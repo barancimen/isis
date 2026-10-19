@@ -46,6 +46,14 @@ LANE_INFO = {
 }
 
 
+EMPTY_NOTE = {
+    "core": "Nothing in the corpus is clearly related yet.",
+    "hidden": "Nothing close in meaning without also sharing the task's keywords.",
+    "bridges": "No passage relates clearly to two of your themes at once.",
+    "gaps": "Nothing clearly related to your thinly covered themes.",
+}
+
+
 @dataclass
 class RelatedConfig:
     n_query_terms: int = 20  # lexical query = the task's top TF-IDF terms
@@ -59,9 +67,9 @@ class RelatedConfig:
     duplicate_cos: float = 0.95  # this similar to a task paragraph counts as already collected
     negative_weight: float = 0.5  # push away from dismissed passages (Rocchio-style)
     rrf_k: int = 60
-    hidden_z: float = 3.0  # stricter than the gate: a small model's similarities are noisy
+    hidden_z: float = 2.5  # raise it if hidden connections look random with your model
     hidden_max_obviousness: float = 0.3  # BM25 relative to the best lexical hit
-    bridge_z: float = 2.0  # both themes must reach this
+    bridge_z: float = 1.5  # both themes must reach this; also a route through the gate
     gap_z: float = 2.5
     theme_distance: float = 0.5  # cosine distance cut when clustering paragraphs into themes
     total_slots: int = 24
@@ -392,6 +400,7 @@ def related(
     lap("units")
 
     weights = np.array([u.weight for u in units], np.float32)
+    theme_z = second = None
     if semantic:
         sem_any = z.max(1)
         sem_w = (z * weights).max(1)
@@ -401,6 +410,10 @@ def related(
             _, z_neg = zscores(snapshot, embedder.embed(dismissed, cache=True))
             penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
             sem_any, sem_w = sem_any - penalty, sem_w - penalty
+        if len(themes) >= 2:  # each passage's z-score per theme, and its second-best theme's
+            theme_of = np.array([u.theme for u in units])
+            theme_z = np.stack([z[:, theme_of == t].max(1) for t in range(len(themes))], axis=1)
+            second = np.sort(theme_z, axis=1)[:, -2]
     else:
         sem_any = sem_w = np.full(n, -np.inf)
         best_unit = np.zeros(n, np.int64)
@@ -413,29 +426,37 @@ def related(
     sem_rank = ranks(sem_w, np.isfinite(sem_w))
     lap("lexical")
 
-    # 3: gate
+    # 3: gate. A passage gets in on strong meaning, on a top keyword match with some meaning
+    # behind it, or (bridges) on being clearly related to two themes at once: two independent
+    # themes at z >= bridge_z is about as unlikely by chance as one at z >= z_strong.
+    has = snapshot.has_vector & semantic
+    relevant = np.where(
+        has,
+        (sem_any >= config.z_strong) | ((lex_rank < config.lexical_top) & (sem_any >= config.z_weak)),
+        lex_rank < config.lexical_top,  # no embedding for this passage (yet): keywords alone
+    )
+    if second is not None:
+        relevant |= has & (second >= config.bridge_z)
+    if semantic:
+        relevant &= ~(has & (np.max(np.where(has[:, None], cos, -1.0), axis=1) >= config.duplicate_cos))
+
     candidates = set(top_rows(lex, config.candidates, positive=True)) | set(top_rows(sem_w, config.candidates))
+    if second is not None:
+        candidates |= set(top_rows(second, config.candidates))
     collected = {r for u in units for r in u.source_rows}
     dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
-    excerpts = [_norm(u.text) for u in units if u.excerpt]
-    has = snapshot.has_vector
+    excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
 
     gated = []
-    for row in map(int, candidates):
+    for row in sorted(map(int, candidates)):
+        if not relevant[row] or row in collected:
+            continue
         p = snapshot.passages[row]
-        if row in collected or (p.path, _norm(p.text)) in dismissed_keys:
-            continue
-        if semantic and has[row] and cos[row].max() >= config.duplicate_cos:
-            continue
-        hay = _norm(p.text)
-        if any(len(e) >= 20 and (e in hay or hay in e) for e in excerpts):
-            continue
-        if has[row] and semantic:
-            ok = sem_any[row] >= config.z_strong or (lex_rank[row] < config.lexical_top and sem_any[row] >= config.z_weak)
-        else:  # no embedding for this passage (yet): lexical evidence alone
-            ok = lex_rank[row] < config.lexical_top
-        if ok:
-            gated.append(row)
+        if dismissed_keys or excerpts:
+            hay = _norm(p.text)
+            if (p.path, hay) in dismissed_keys or any(e in hay or hay in e for e in excerpts):
+                continue
+        gated.append(row)
     lap("gate")
 
     # 4: lanes
@@ -457,15 +478,13 @@ def related(
                 lane_scores["hidden"][row] = float(sem_w[row]) * (1 - obviousness)
                 lane_why["hidden"][row] = {"obviousness": round(obviousness, 3)}
 
-        if len(themes) < 2:
+        if theme_z is None:
             notes["bridges"] = notes["gaps"] = "Needs at least two themes: add headings, or write about more than one thing."
         else:
-            theme_of = np.array([u.theme for u in units])
-            theme_z = np.stack([z[:, theme_of == t].max(1) for t in range(len(themes))], axis=1)
             strong = theme_z >= config.bridge_z
             size = strong.sum(0)
             both = strong.T.astype(np.int32) @ strong.astype(np.int32)
-            overlap = both / np.maximum(np.minimum.outer(size, size), 1)
+            overlap = both / np.maximum(np.minimum.outer(size, size), 1)  # how often two themes meet
             need = np.array([1 / (1 + t.excerpts) for t in themes])
 
             for row in gated:
@@ -474,7 +493,11 @@ def related(
                 if theme_z[row, f2] >= config.bridge_z:
                     rarity = 1 - overlap[f1, f2]
                     lane_scores["bridges"][row] = float(theme_z[row, f2]) * (0.5 + 0.5 * rarity)
-                    lane_why["bridges"][row] = {"themes": [themes[f1].label, themes[f2].label], "rarity": round(float(rarity), 3)}
+                    lane_why["bridges"][row] = {
+                        "themes": [themes[f1].label, themes[f2].label],
+                        "theme_z": [round(float(theme_z[row, f1]), 2), round(float(theme_z[row, f2]), 2)],
+                        "rarity": round(float(rarity), 3),
+                    }
                 gap = np.where(theme_z[row] >= config.gap_z, need * theme_z[row], -np.inf)
                 if np.isfinite(gap.max()):
                     f = int(gap.argmax())
@@ -529,7 +552,7 @@ def related(
     lanes = []
     for lane in LANES:
         items = [h for row, value in picked.get(lane, []) if (h := hit(lane, row, value)) is not None]
-        note = notes.get(lane, "" if items or lane in active else "Nothing passed the relevance gate for this lane.")
+        note = notes.get(lane, "" if items or lane in active else EMPTY_NOTE[lane])
         lanes.append(Lane(lane, *LANE_INFO[lane], items, note))
     lap("snippets")
 

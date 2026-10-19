@@ -135,3 +135,15 @@ def test_lexical_only_engine_still_suggests(engine, tmp_path):
 def test_task_units_are_paragraphs_with_lines():
     units = task_units("# A\none\n\ntwo\n# B\nthree")
     assert [(u.heading, u.start_line, u.text) for u in units] == [("A", 1, "one"), ("A", 3, "two"), ("B", 5, "three")]
+
+
+def test_holdout_recovers_hidden_excerpts(engine):
+    from isis.engine.evaluate import compare, holdout
+
+    rows = engine.snapshot.file_rows
+    excerpts = [engine.snapshot.passages[rows[f"sea-{i}.md"][0]].text for i in range(6)]
+    task = "# Sea\n\n" + "\n\n".join(excerpts) + "\n"
+    result = holdout(engine, task, fraction=0.5, seed=1)
+    assert result.hidden == 3 and 0 <= result.found <= 3 and result.recall == result.found / 3
+    table = compare(engine, [task], {"default": RelatedConfig(), "narrow": RelatedConfig(total_slots=8)}, seeds=[0])
+    assert [r["config"] for r in table] == ["default", "narrow"] and all(0 <= r["recall"] <= 1 for r in table)
