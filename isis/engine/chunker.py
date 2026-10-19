@@ -10,8 +10,8 @@ HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HAS_WORD = re.compile(r"[^\W_]")
 
-TARGET_WORDS = 120  # short neighbouring paragraphs under one heading are merged up to this size
-MAX_WORDS = 250  # longer runs are cut at line boundaries; small embedding models degrade past this
+TARGET_WORDS = 100  # short neighbouring paragraphs under one heading are merged up to this size
+MAX_WORDS = 180  # longer runs are cut at line boundaries, so most passages fit in 256 model tokens
 
 
 @dataclass(frozen=True)
