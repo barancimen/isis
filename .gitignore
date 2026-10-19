@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# isis: index caches and the downloadable sample corpus
+.isis/
+sample_corpus/
