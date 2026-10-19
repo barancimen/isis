@@ -34,21 +34,20 @@ class Embedder:
         cache_size: int = 4096,
     ):
         import onnxruntime as ort
-        from huggingface_hub import hf_hub_download
         from tokenizers import Tokenizer
 
         self.model_id = model_id
         self.name = f"{model_id}:{onnx_file}:{max_tokens}"  # identifies vectors in the index cache
         self.batch_size = batch_size
 
-        self.tokenizer = Tokenizer.from_file(hf_hub_download(model_id, "tokenizer.json"))
+        self.tokenizer = Tokenizer.from_file(self._fetch("tokenizer.json"))
         # Text longer than max_tokens is split into overlapping windows whose embeddings are averaged.
         self.tokenizer.no_padding()
         self.tokenizer.enable_truncation(max_length=max_tokens, stride=max_tokens // 8)
         self.pad_id = self.tokenizer.token_to_id("[PAD]") or 0
 
         try:
-            with open(hf_hub_download(model_id, "1_Pooling/config.json")) as f:
+            with open(self._fetch("1_Pooling/config.json")) as f:
                 self.pooling = "cls" if json.load(f).get("pooling_mode_cls_token") else "mean"
         except Exception:
             self.pooling = "mean"
@@ -56,14 +55,21 @@ class Embedder:
         options = ort.SessionOptions()
         if threads:
             options.intra_op_num_threads = threads
-        self.session = ort.InferenceSession(
-            hf_hub_download(model_id, onnx_file), options, providers=["CPUExecutionProvider"]
-        )
+        self.session = ort.InferenceSession(self._fetch(onnx_file), options, providers=["CPUExecutionProvider"])
         self.input_names = {i.name for i in self.session.get_inputs()}
         self.dim = self.session.get_outputs()[0].shape[-1]
 
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self.cache_size = cache_size
+
+    def _fetch(self, filename: str) -> str:
+        """A model file from the local Hugging Face cache, downloading it only if it isn't there."""
+        from huggingface_hub import hf_hub_download
+
+        try:
+            return hf_hub_download(self.model_id, filename, local_files_only=True)
+        except Exception:
+            return hf_hub_download(self.model_id, filename)
 
     def embed(self, texts: list[str], cache: bool = False) -> np.ndarray:
         """One normalised row per text. `cache=True` remembers results (for task paragraphs,

@@ -1,1 +1,69 @@
-<!doctype html><title>isis</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>isis</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <nav id="tasks" aria-label="Tasks">
+    <div class="tasks-head">
+      <span class="brand">isis</span>
+      <button id="new-task" class="icon-btn" title="New task" aria-label="New task">+</button>
+    </div>
+    <ul id="task-tabs" role="tablist" aria-orientation="vertical"></ul>
+  </nav>
+
+  <aside id="side">
+    <div class="side-tabs" role="tablist">
+      <button role="tab" data-panel="files">Files</button>
+      <button role="tab" data-panel="search">Search</button>
+      <button role="tab" data-panel="related">Related</button>
+    </div>
+    <section id="panel-files" class="panel" role="tabpanel">
+      <input id="file-filter" type="search" placeholder="Filter files…" aria-label="Filter files">
+      <ul id="file-list"></ul>
+    </section>
+    <section id="panel-search" class="panel" role="tabpanel">
+      <div class="search-row">
+        <input id="search-input" type="search" placeholder="Search the corpus…" aria-label="Search the corpus">
+        <label class="toggle" title="Also match by meaning (fuses BM25 with embeddings)"><input id="search-hybrid" type="checkbox"> meaning</label>
+      </div>
+      <div class="hint">Words rank by BM25; <code>"quoted phrases"</code> must match exactly. Ctrl/⌘+K jumps here.</div>
+      <div id="search-status" class="status-line"></div>
+      <div id="search-results" class="results"></div>
+    </section>
+    <section id="panel-related" class="panel" role="tabpanel">
+      <div id="related-status" class="status-line"></div>
+      <div id="related-terms" class="chips" aria-label="Terms taken from the task"></div>
+      <div id="related-lanes" class="results"></div>
+    </section>
+  </aside>
+
+  <main id="reader">
+    <header class="pane-head">
+      <span id="reader-path" class="path">No file open</span>
+      <button id="reader-add" class="add-btn" title="Add the selected text to the task, at its cursor (Ctrl/⌘+Enter)" hidden>+ Add to task</button>
+    </header>
+    <div id="reader-editor" class="editor"></div>
+  </main>
+
+  <section id="task" aria-label="Task document">
+    <header class="pane-head">
+      <span id="task-name" class="path">No task</span>
+      <span id="save-state" class="save-state"></span>
+    </header>
+    <div id="conflict" class="banner" hidden>
+      This task changed on disk since it was loaded.
+      <button id="conflict-load">Load the disk version</button>
+      <button id="conflict-keep">Keep mine</button>
+    </div>
+    <div id="task-editor" class="editor"></div>
+  </section>
+</div>
+<footer id="statusbar"><span id="index-status"></span><span id="flash" aria-live="polite"></span></footer>
+<script type="module" src="app.js"></script>
+</body>
+</html>

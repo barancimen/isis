@@ -62,6 +62,7 @@ class TaskStore:
         return [{"name": p.stem, "mtime": _mtime(p)} for p in files]
 
     def create(self, name: str) -> dict:
+        self.folder.mkdir(parents=True, exist_ok=True)
         path = self._path(name)
         if path.exists():
             raise TaskError(f"a task named {path.stem!r} already exists", 409)
