@@ -310,3 +310,17 @@ class Engine:
             context_lines=context_lines,
             read_lines=self.read_lines,
         )
+
+    def related(self, task_text: str, *, cursor_line: int | None = None, prefs=None, config=None, seed: int = 0):
+        from .related import related
+
+        return related(
+            self.snapshot,
+            task_text,
+            embedder=self.embedder,
+            cursor_line=cursor_line,
+            prefs=prefs,
+            config=config,
+            seed=seed,
+            read_lines=self.read_lines,
+        )
