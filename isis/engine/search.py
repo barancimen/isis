@@ -43,11 +43,11 @@ class SearchConfig:
         help="How fast repeated words stop adding to a passage's score. 0: one occurrence counts as much as many.",
     )
     b: float = tunable(
-        0.75, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        0.35, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
         help="How much long passages are penalised. 0: length ignored; 1: fully normalised.",
     )
     rrf_k: int = tunable(
-        10, label="Fusion k", group=FUSION, min=1, max=100, step=1,
+        20, label="Fusion k", group=FUSION, min=1, max=100, step=1,
         help="Reciprocal-rank fusion: each list adds weight / (k + rank). Small k keeps the best of each "
         "list on top; large k favours passages ranked fairly well in both.",
     )

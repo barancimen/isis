@@ -13,7 +13,7 @@ from isis.server.tasks import TaskStore
 
 def test_specs_describe_every_tunable_value():
     by_name = {s["name"]: s for s in specs(RelatedConfig)}
-    assert by_name["z_strong"]["default"] == 2.5 and by_name["z_strong"]["type"] == "float"
+    assert by_name["z_strong"]["default"] == 3.25 and by_name["z_strong"]["type"] == "float"
     assert by_name["total_slots"]["type"] == "int"
     assert by_name["query"]["type"] == "choice" and by_name["query"]["choices"] == ["document", "paragraphs"]
     assert by_name["mmr_lambda.hidden"]["default"] == 0.6
@@ -31,7 +31,7 @@ def test_configure_applies_valid_overrides_and_ignores_the_rest():
     assert config.z_strong == 3.25 and config.total_slots == 11 and config.query == "paragraphs"
     assert config.mmr_lambda == {"core": 0.2, "hidden": 0.6, "bridges": 0.6, "gaps": 0.6}
     assert config.hidden_z == 5.0  # clamped to the range
-    assert config.z_weak == 1.0 and config.cursor_boost == 1.0
+    assert config.z_weak == 1.75 and config.cursor_boost == 1.0
     assert configure(RelatedConfig, {"query": "sideways"}).query == "document"
     assert RelatedConfig().mmr_lambda["core"] == 0.7  # the default dict is not shared or changed
 

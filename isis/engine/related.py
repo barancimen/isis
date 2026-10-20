@@ -70,11 +70,11 @@ class RelatedConfig:
         "scores by its best match (strong matches to any one topic, not to their overlap).",
     )
     n_query_terms: int = tunable(
-        20, label="Keywords taken", group=QUERY, min=1, max=60, step=1,
+        30, label="Keywords taken", group=QUERY, min=1, max=60, step=1,
         help="How many of the task's most distinctive words (TF-IDF) make up the keyword query.",
     )
     excerpt_weight: float = tunable(
-        1.0, label="Excerpt weight", group=QUERY, min=0.0, max=3.0, step=0.1,
+        0.5, label="Excerpt weight", group=QUERY, min=0.0, max=3.0, step=0.1,
         help="Weight of passages you collected from the corpus, relative to your own writing.",
     )
     cursor_boost: float = 1.0  # > 1 weights the paragraph at cursor_line up (1 = the whole document counts equally)
@@ -84,7 +84,7 @@ class RelatedConfig:
         help="How fast repeated words stop adding to a passage's keyword score.",
     )
     bm25_b: float = tunable(
-        0.75, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        0.35, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
         help="How much long passages are penalised. 0: length ignored; 1: fully normalised.",
     )
     candidates: int = tunable(
@@ -92,15 +92,15 @@ class RelatedConfig:
         help="How deep the keyword and meaning rankings go before the filter.",
     )
     z_strong: float = tunable(
-        2.5, label="Meaning alone", group=FILTER, min=0.0, max=5.0, step=0.1,
+        3.25, label="Meaning alone", group=FILTER, min=0.0, max=5.0, step=0.1,
         help="Meaning z-score that gets a passage through the filter on its own.",
     )
     z_weak: float = tunable(
-        1.0, label="Meaning with keywords", group=FILTER, min=-1.0, max=4.0, step=0.1,
+        1.75, label="Meaning with keywords", group=FILTER, min=-1.0, max=4.0, step=0.1,
         help="Meaning z-score that is enough for one of the top keyword matches.",
     )
     lexical_top: int = tunable(
-        30, label="Top keyword ranks", group=FILTER, min=0, max=300, step=1,
+        50, label="Top keyword ranks", group=FILTER, min=0, max=300, step=1,
         help="How many of the best keyword matches count as top keyword matches.",
     )
     duplicate_cos: float = tunable(
@@ -117,7 +117,7 @@ class RelatedConfig:
         "Lower hides more.",
     )
     rrf_k: int = tunable(
-        60, label="Core fusion k", group=LANES_GROUP, min=1, max=100, step=1,
+        30, label="Core fusion k", group=LANES_GROUP, min=1, max=100, step=1,
         help="Core ranks by reciprocal-rank fusion. Large k favours passages good on both signals; small k "
         "lets the best of either signal through.",
     )
@@ -138,7 +138,7 @@ class RelatedConfig:
         help="Meaning z-score a passage needs on a thinly covered theme.",
     )
     theme_distance: float = tunable(
-        0.5, label="Theme split", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
+        0.2, label="Theme split", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
         help="Without headings, paragraphs further apart than this (cosine distance) become separate themes.",
     )
     total_slots: int = tunable(
