@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import zlib
 from collections import OrderedDict
 from functools import lru_cache
@@ -61,6 +62,7 @@ class Embedder:
 
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self.cache_size = cache_size
+        self._cache_lock = threading.Lock()  # searches and the related panel embed at the same time
 
     def _fetch(self, filename: str) -> str:
         """A model file from the local Hugging Face cache, downloading it only if it isn't there."""
@@ -76,17 +78,21 @@ class Embedder:
         which are re-embedded on every refresh of the related panel)."""
         if not cache:
             return self._embed(texts)
-        missing = list(dict.fromkeys(t for t in texts if t not in self._cache))
+        with self._cache_lock:
+            found = {t: self._cache[t] for t in texts if t in self._cache}
+            for t in found:
+                self._cache.move_to_end(t)
+        missing = list(dict.fromkeys(t for t in texts if t not in found))
         if missing:
-            for text, vec in zip(missing, self._embed(missing)):
-                self._cache[text] = vec
-            while len(self._cache) > self.cache_size:
-                self._cache.popitem(last=False)
-        for t in texts:
-            self._cache.move_to_end(t)
+            fresh = dict(zip(missing, self._embed(missing)))
+            found.update(fresh)
+            with self._cache_lock:
+                self._cache.update(fresh)
+                while len(self._cache) > self.cache_size:
+                    self._cache.popitem(last=False)
         if not texts:
             return np.zeros((0, self.dim), np.float32)
-        return np.stack([self._cache[t] for t in texts])
+        return np.stack([found[t] for t in texts])
 
     def _embed(self, texts: list[str]) -> np.ndarray:
         windows, owner = [], []

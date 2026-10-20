@@ -18,6 +18,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
 from ..engine.index import MARKDOWN, Engine
@@ -28,6 +29,7 @@ from .tasks import Conflict, TaskError, TaskStore
 
 log = logging.getLogger("isis")
 WEB = Path(__file__).resolve().parents[2] / "web"
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
 
 
 def plain(x):
@@ -82,7 +84,11 @@ class FeedbackRequest(BaseModel):
     end_line: int | None = None
 
 
-def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, watch: bool = True) -> FastAPI:
+def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, watch: bool = True,
+               allowed_hosts: list[str] | None = None) -> FastAPI:
+    """`allowed_hosts`: the Host headers the API answers (None: any). A page on another site can
+    point its own domain at 127.0.0.1 (DNS rebinding); checking the Host header stops it from
+    reading the corpus or overwriting tasks through the browser."""
     def refresh() -> None:
         try:
             stats = engine.refresh()
@@ -118,6 +124,8 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         stop.set()
 
     app = FastAPI(title="isis", lifespan=lifespan)
+    if allowed_hosts is not None:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.exception_handler(TaskError)
     async def task_error(_, e: TaskError):
@@ -253,7 +261,8 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
 
 def app_from_env() -> FastAPI:
-    """The app `isis serve` runs, configured through ISIS_CORPUS, ISIS_TASKS and ISIS_MODEL."""
+    """The app `isis serve` runs, configured through ISIS_CORPUS, ISIS_TASKS, ISIS_MODEL and
+    ISIS_HOSTS (comma-separated Host names to answer, or "*"; default: this machine only)."""
     from ..engine.semantic import Embedder
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -261,4 +270,5 @@ def app_from_env() -> FastAPI:
     tasks_dir = Path(os.environ.get("ISIS_TASKS") or corpus / "_tasks")
     model = os.environ.get("ISIS_MODEL", "")
     engine = Engine(corpus, embedder=Embedder(model) if model else None, exclude=(tasks_dir,))
-    return create_app(engine, TaskStore(tasks_dir))
+    hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
+    return create_app(engine, TaskStore(tasks_dir), allowed_hosts=hosts)

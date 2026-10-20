@@ -28,10 +28,11 @@ Point `isis serve` at any folder of `.md` files.
   - `--no-model`: keyword search only.
   - `--model REPO`: another Hugging Face model with ONNX weights, such as `BAAI/bge-small-en-v1.5`.
   - `--port`, `--host`.
+  - `--allow-host NAME`: also answer requests addressed to this name (repeatable; see below).
   - `--reload`: restart when the Python code changes, handy while you tune the algorithm.
 - `isis index CORPUS` builds the index without starting the server.
 
-The server has no authentication. Keep the default `--host 127.0.0.1`, and use an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 yourserver`) to reach it on a remote machine.
+The server has no authentication. Keep the default `--host 127.0.0.1`, and use an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 yourserver`) to reach it on a remote machine. It answers only requests addressed to this machine or to the `--host` address, so a web page can't reach it by pointing its own domain at 127.0.0.1 (DNS rebinding); `--allow-host` adds names. With `--host 0.0.0.0` and no `--allow-host`, any name is answered.
 
 ## Using it
 
@@ -50,7 +51,7 @@ Task documents are ordinary markdown files, so you can edit them elsewhere too. 
 
 The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and every threshold is a field of `RelatedConfig`:
 
-1. **Units.** The task is split into paragraphs. Paragraphs copied from the corpus are recognised as collected excerpts, and headings (or clusters of similar paragraphs) become themes.
+1. **Units.** The task is split into paragraphs. Paragraphs copied from the corpus are recognised as collected excerpts; a whole collected passage reuses its embedding from the index, so a long task is quick to refresh. Headings (or clusters of similar paragraphs) become themes.
 2. **Signals.** The whole document is the query. Every corpus passage is scored two ways:
    - its *robust z-score* of embedding similarity to the document vector (the length-weighted mean of the paragraph embeddings), meaning how far it stands out from the typical passage;
    - BM25 for the document's ~30 most distinctive terms.
@@ -66,7 +67,7 @@ The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and
    - Each lane is filled by MMR, so results differ from each other and from what you have collected, with at most two passages per file.
    - Slots per lane are drawn by Thompson sampling from your add/dismiss counts.
 
-The defaults were calibrated on the sample corpus with bge-micro-v2, against blind relevance judgments: 1,026 search results for 38 queries, and about 740 Related suggestions for 14 task documents. That lowered BM25's length normalisation (b 0.35), raised the meaning thresholds of the Related filter (3.25 alone, 1.75 with a top keyword match), weighted your own notes above pasted excerpts, and turned the dismissal push off (it pushed relevant passages down as often as junk). The similarity scores of this model are compressed (robust z rarely passes 4); a different model or corpus may want different thresholds, so measure before changing them.
+The defaults were calibrated on the sample corpus with bge-micro-v2, against blind relevance judgments: 1,026 search results for 38 queries, and about 970 Related suggestions for 19 task documents (5 of them long, the size of a document after a session of collecting). That lowered BM25's length normalisation (b 0.35), raised the meaning thresholds of the Related filter (3.25 alone, 1.75 with a top keyword match), weighted your own notes above pasted excerpts, and turned the dismissal push off (it pushed relevant passages down as often as junk). The similarity scores of this model are compressed (robust z rarely passes 4); a different model or corpus may want different thresholds, so measure before changing them.
 
 ## Playing with the algorithm
 
@@ -119,4 +120,4 @@ Limitations:
 - Tokenising is English-only (Snowball stemmer and stopwords).
 - The app assumes one user at a time.
 - Passages are whole lines, so a very long single-line paragraph becomes one passage. Its embedding averages several windows.
-- The index cache is a pickle. It is safe because the app only reads the cache it wrote itself.
+- The index cache (`<corpus>/.isis/index.json` and `index.npz`) is plain data, so a corpus that comes with someone else's cache can't run code. Caches from before this format (`index.pkl`) are ignored and rebuilt.

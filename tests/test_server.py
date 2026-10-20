@@ -159,3 +159,19 @@ def test_unreadable_preferences_are_kept_aside(corpus):
     assert store.prefs("T").steer == ""
     (kept,) = (corpus / "_tasks" / ".trash").glob("T.*.bad.json")
     assert kept.read_text(encoding="utf-8") == '{"steer": "whale'
+
+
+def test_requests_for_other_hosts_are_refused(engine, corpus):
+    app = create_app(engine, TaskStore(corpus / "_tasks"), background=False, watch=False, allowed_hosts=["localhost"])
+    with TestClient(app, base_url="http://localhost:8000") as c:
+        assert c.get("/api/status").status_code == 200
+        assert c.get("/api/status", headers={"host": "attacker.example:8000"}).status_code == 400
+
+
+def test_allowed_hosts_from_the_command_line():
+    from isis.cli import allowed_hosts
+
+    assert allowed_hosts("127.0.0.1", []) == ["localhost", "127.0.0.1", "::1"]
+    assert allowed_hosts("0.0.0.0", []) == ["*"]
+    assert allowed_hosts("0.0.0.0", ["notes.lan"]) == ["localhost", "127.0.0.1", "::1", "notes.lan"]
+    assert allowed_hosts("192.168.1.5", []) == ["localhost", "127.0.0.1", "::1", "192.168.1.5"]

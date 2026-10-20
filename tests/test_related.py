@@ -1,3 +1,4 @@
+import math
 import random
 
 import numpy as np
@@ -116,25 +117,45 @@ def test_dismissed_passages_stay_away(engine):
 
 
 
-def test_dismissals_are_only_embedded_when_they_are_used(engine, monkeypatch):
-    task = "# Sea\nThe whale and the harpoon, the ship and its captain.\n"
+def test_passages_from_the_corpus_are_not_embedded_again(engine, monkeypatch):
+    rows = engine.snapshot.file_rows
+    collected = [engine.snapshot.passages[rows[f"sea-{i}.md"][0]] for i in range(3)]
+    task = "# Sea\nThe whale and the harpoon, the ship and its captain.\n\n" + "\n\n".join(p.text for p in collected) + "\n"
     shown = items(engine.related(task), "core")
-    dismissed, avoided = shown[0], shown[1]
     embedded = []
     real = engine.embedder.embed
     monkeypatch.setattr(engine.embedder, "embed", lambda texts, cache=False: embedded.extend(texts) or real(texts, cache))
 
-    prefs = TaskPrefs()
-    prefs.dismiss("core", dismissed.path, dismissed.text)
-    engine.related(task, prefs=prefs)
-    assert dismissed.text not in embedded  # negative_weight is 0: nothing to score it for
+    reused = lambda: not any(p.text in t for p in collected for t in embedded)
+    result = engine.related(task + "\nA new note about lances.\n")
+    assert result.stats["excerpts"] == 3
+    assert "Sea\nA new note about lances." in embedded and reused()  # collected passages keep their vectors
 
-    prefs.dismiss("core", avoided.path, avoided.text, avoid=True)
+    prefs = TaskPrefs()
+    prefs.dismiss("core", shown[0].path, shown[0].text, shown[0].start_line)
+    prefs.dismiss("core", shown[1].path, shown[1].text, shown[1].start_line, avoid=True)
+    embedded.clear()
     keys = {(h.path, h.start_line) for h in items(engine.related(task, prefs=prefs))}
-    assert avoided.text in embedded and dismissed.text not in embedded
-    assert (avoided.path, avoided.start_line) not in keys
-    engine.related(task, prefs=prefs, config=RelatedConfig(negative_weight=0.5))
-    assert dismissed.text in embedded
+    assert not {shown[0].text, shown[1].text} & set(embedded) and (shown[1].path, shown[1].start_line) not in keys
+
+    prefs.dismiss("core", shown[2].path, shown[2].text + " (edited since)", shown[2].start_line, avoid=True)
+    engine.related(task, prefs=prefs)
+    assert shown[2].text + " (edited since)" in embedded  # no longer the corpus passage: embedded
+
+
+def test_long_tasks_get_a_few_themes_with_readable_labels(engine):
+    rng = random.Random(7)
+    task = "\n\n".join(paragraph(rng, rng.choice(["sea", "birds"])) for _ in range(40)) + "\n"
+    result = engine.related(task)
+    assert 2 <= len(result.themes) <= 2 * math.ceil(math.sqrt(40))
+
+
+def test_theme_labels_prefer_distinctive_words(engine):
+    from isis.engine.related import Unit, _cluster_label
+
+    units = [Unit("", 0, 0, "A long day by the old basalt.")]
+    assert _cluster_label(units, engine.snapshot).startswith("basalt")  # rarer in the corpus than "long", "day" or "old"
+
 
 def test_bridges_link_two_themes(engine):
     task = f"# Sea\n{' '.join(SEA_TASK)}.\n\n# Birds\n{' '.join(BIRD_TASK)}.\n"

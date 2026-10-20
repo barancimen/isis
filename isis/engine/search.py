@@ -180,10 +180,10 @@ class Filters:
             ok &= containing(term)
         for term in self.excluded_terms:
             ok &= ~containing(term)
-        if self.required or self.excluded:
-            for i in np.flatnonzero(ok):
-                text = snapshot.passages[rows[i]].embed_text  # heading too, as words are indexed
-                ok[i] = all(p.search(text) for p in self.required) and not any(p.search(text) for p in self.excluded)
+        for p in self.required:  # match counts are cached per snapshot, so typing doesn't rescan
+            ok &= snapshot.pattern_counts(p)[rows] > 0
+        for p in self.excluded:
+            ok &= snapshot.pattern_counts(p)[rows] == 0
         return ok
 
 

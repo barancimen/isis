@@ -31,6 +31,7 @@ pipeline can be taken apart and tuned from a notebook.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
@@ -142,7 +143,7 @@ class RelatedConfig:
         help="Meaning z-score a passage needs on a thinly covered theme.",
     )
     theme_distance: float = tunable(
-        0.2, label="Theme split", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
+        0.15, label="Theme split", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
         help="Without headings, paragraphs further apart than this (cosine distance) become separate themes.",
     )
     total_slots: int = tunable(
@@ -348,42 +349,73 @@ def _norm(s: str) -> str:
     return " ".join(s.lower().split())
 
 
-def find_excerpts(snapshot: Snapshot, units: list[Unit], cos: np.ndarray | None) -> None:
+def find_excerpts(snapshot: Snapshot, units: list[Unit], cos: np.ndarray | None = None) -> None:
     """Mark units copied from the corpus, and remember which passages they came from.
 
     A unit is an excerpt when its text appears inside a corpus passage (or contains one). The
-    places to look are the unit's best lexical and semantic matches."""
+    places to look are the unit's best lexical matches; with `cos`, the closest passages in
+    meaning of the units not matched yet (the second pass, once the units are embedded)."""
     for j, unit in enumerate(units):
         needle = _norm(unit.text)
-        if len(needle) < 20:
+        if len(needle) < 20 or (cos is not None and unit.excerpt):
             continue
-        ids = [i for t in set(tokenize(unit.text)) if (i := snapshot.term_id(t)) is not None]
-        rows = list(top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True))
-        if cos is not None:
-            rows += list(top_rows(cos[:, j], 5))
+        if cos is None:
+            ids = [i for t in set(tokenize(unit.text)) if (i := snapshot.term_id(t)) is not None]
+            rows = top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True)
+        else:
+            rows = top_rows(cos[:, j], 5)
         for row in dict.fromkeys(int(r) for r in rows):
             hay = _norm(snapshot.passages[row].text)
-            if needle in hay or (len(hay) >= 20 and hay in needle):
+            if row not in unit.source_rows and (needle in hay or (len(hay) >= 20 and hay in needle)):
                 unit.excerpt = True
                 unit.source_rows.append(row)
 
 
-def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: RelatedConfig) -> list[Theme]:
+def same_passage(snapshot: Snapshot, rows, text: str) -> int | None:
+    """The row among `rows` whose passage is exactly `text` (up to case and spacing) and has a
+    vector, so that vector can be reused instead of embedding the text again."""
+    needle = _norm(text)
+    for row in rows:
+        if snapshot.has_vector[row] and _norm(snapshot.passages[row].text) == needle:
+            return int(row)
+    return None
+
+
+def embed_reusing(snapshot: Snapshot, embedder, texts: list[str], rows: list[int | None]) -> np.ndarray:
+    """Embeddings of `texts`, taking the corpus vector where `rows` names the passage a text is.
+    A long task is mostly collected passages, so most of it is already embedded in the index."""
+    out = np.zeros((len(texts), snapshot.vectors.shape[1]), np.float32)
+    todo = [j for j, row in enumerate(rows) if row is None]
+    for j, row in enumerate(rows):
+        if row is not None:
+            out[j] = snapshot.vectors[row]
+    if todo:
+        out[todo] = embedder.embed([texts[j] for j in todo], cache=True)
+    return out
+
+
+def passage_row(snapshot: Snapshot, path: str, start_line: int | None, text: str) -> int | None:
+    """The corpus row of a passage remembered by path, line and text (as dismissals are)."""
+    lo, hi = snapshot.file_rows.get(path, (0, 0))
+    rows = [r for r in range(lo, hi) if start_line is None or snapshot.passages[r].start_line == start_line]
+    return same_passage(snapshot, rows, text)
+
+
+def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: RelatedConfig,
+                  snapshot: Snapshot | None = None) -> list[Theme]:
     """Themes are the task's sections when it has at least two; otherwise clusters of similar
-    paragraphs (average linkage on cosine distance)."""
+    paragraphs (average linkage on cosine distance), at most 2 * sqrt(paragraphs) of them."""
     headings = list(dict.fromkeys(u.heading for u in units))
     if len(headings) >= 2:
         for u in units:
             u.theme = headings.index(u.heading)
         labels = [h or "(top)" for h in headings]
     elif unit_vecs is not None and len(units) >= 3:
-        from scipy.cluster.hierarchy import fcluster, linkage
-
-        clusters = fcluster(linkage(unit_vecs, "average", metric="cosine"), config.theme_distance, "distance")
+        clusters = _clusters(unit_vecs, config.theme_distance)
         order = list(dict.fromkeys(clusters))  # number themes in reading order
         for u, c in zip(units, clusters):
             u.theme = order.index(c)
-        labels = [_cluster_label([u for u in units if u.theme == t]) for t in range(len(order))]
+        labels = [_cluster_label([u for u in units if u.theme == t], snapshot) for t in range(len(order))]
     else:
         for u in units:
             u.theme = 0
@@ -395,9 +427,34 @@ def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: Relat
     ]
 
 
-def _cluster_label(units: list[Unit]) -> str:
-    counts = Counter(surface for u in units for _, surface in tokenize_with_surface(u.text))
-    return " · ".join(w for w, _ in counts.most_common(3)) or "(untitled)"
+def _clusters(vecs: np.ndarray, distance: float) -> np.ndarray:
+    """Cluster ids for the paragraphs. A long task about one subject would otherwise split into
+    a theme per paragraph. Small themes are kept: on long tasks, merging single paragraphs into
+    bigger themes cost relevance in the bridges and gaps lanes (CALIBRATE.md)."""
+    from scipy.cluster.hierarchy import fcluster, linkage
+
+    tree = linkage(vecs, "average", metric="cosine")
+    clusters = fcluster(tree, distance, "distance")
+    cap = 2 * math.ceil(math.sqrt(len(vecs)))
+    if len(set(clusters)) > cap:
+        clusters = fcluster(tree, cap, "maxclust")
+    return clusters
+
+
+def _cluster_label(units: list[Unit], snapshot: Snapshot | None = None) -> str:
+    """The theme's three most distinctive words: frequency in the theme times rarity in the corpus."""
+    counts, surfaces = Counter(), defaultdict(Counter)
+    for u in units:
+        for term, surface in tokenize_with_surface(u.text):
+            counts[term] += 1
+            surfaces[term][surface] += 1
+
+    def weight(term):
+        i = snapshot.term_id(term) if snapshot is not None else None
+        return counts[term] * (float(snapshot.bm25.idf[i]) if i is not None else 1.0)
+
+    best = sorted(counts, key=lambda t: (-weight(t), t))[:3]
+    return " · ".join(surfaces[t].most_common(1)[0][0] for t in best) or "(untitled)"
 
 
 # ---- 2. signals ----
@@ -570,12 +627,14 @@ def related(
     # 1-2: units and the semantic signal
     semantic = embedder is not None and snapshot.has_vector.any()
     unit_vecs = cos = z = None
+    find_excerpts(snapshot, units)
     if semantic:
-        unit_vecs = embedder.embed([u.heading + "\n" + u.text if u.heading else u.text for u in units], cache=True)
+        texts = [u.heading + "\n" + u.text if u.heading else u.text for u in units]
+        unit_vecs = embed_reusing(snapshot, embedder, texts, [same_passage(snapshot, u.source_rows, u.text) for u in units])
         cos, z = zscores(snapshot, unit_vecs)
-    find_excerpts(snapshot, units, cos)
+        find_excerpts(snapshot, units, cos)
     weight_units(units, cursor_line, config)
-    themes = assign_themes(units, unit_vecs, config)
+    themes = assign_themes(units, unit_vecs, config, snapshot)
     lap("units")
 
     weights = np.array([u.weight for u in units], np.float32)
@@ -595,7 +654,8 @@ def related(
         if config.negative_weight <= 0:  # no penalty: only the anti-queries need scoring
             dismissed = [d for d in dismissed if d.get("avoid")]
         if dismissed:
-            _, z_neg = zscores(snapshot, embedder.embed([d["text"] for d in dismissed], cache=True))
+            rows = [passage_row(snapshot, d.get("path", ""), d.get("start_line"), d["text"]) for d in dismissed]
+            _, z_neg = zscores(snapshot, embed_reusing(snapshot, embedder, [d["text"] for d in dismissed], rows))
             if config.negative_weight > 0:
                 penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
                 sem_any, sem_w = sem_any - penalty, sem_w - penalty

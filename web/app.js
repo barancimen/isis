@@ -303,7 +303,10 @@ async function saveTask(name, { keepalive = false } = {}) {
   if (name === state.task) setSaveState("Saving…");
   doc.saving = (async () => {
     try {
-      const result = await api("PUT", `/api/tasks/${enc(name)}`, { content, base_mtime: doc.mtime }, { keepalive });
+      const body = { content, base_mtime: doc.mtime };
+      // Browsers refuse keepalive requests over 64 KiB; a larger task saves as a normal request.
+      const small = new TextEncoder().encode(JSON.stringify(body)).length < 60000;
+      const result = await api("PUT", `/api/tasks/${enc(name)}`, body, { keepalive: keepalive && small });
       doc.mtime = result.mtime;
       if (name === state.task) setSaveState(doc.dirty ? "Unsaved" : "Saved");
     } catch (error) {

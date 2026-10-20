@@ -1,11 +1,14 @@
 """The corpus index: passages, BM25 and embeddings for every markdown file, kept up to date
-incrementally and cached on disk."""
+incrementally and cached on disk.
+
+The cache is plain data, JSON for the text and an .npz of arrays read with allow_pickle=False, so
+a cache that came with someone else's corpus can't run code when it is loaded."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-import pickle
 import re
 import threading
 import time
@@ -21,7 +24,7 @@ from .text import tokenize
 
 log = logging.getLogger(__name__)
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 MARKDOWN = (".md", ".markdown")
 EMBED_GROUP = 256  # passages per embedding call while indexing
 PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
@@ -53,6 +56,7 @@ class Snapshot:
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
     _bm25_variants: dict = field(default_factory=dict, repr=False)
     _pattern_counts: dict = field(default_factory=dict, repr=False)
+    _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # requests share snapshots
 
     def __len__(self) -> int:
         return len(self.passages)
@@ -62,27 +66,27 @@ class Snapshot:
         key = (round(float(k1), 4), round(float(b), 4))
         if key == (self.bm25.k1, self.bm25.b):
             return self.bm25
-        variant = self._bm25_variants.get(key)
-        if variant is None:
-            while len(self._bm25_variants) >= 4:
-                self._bm25_variants.pop(next(iter(self._bm25_variants)))
-            variant = self._bm25_variants[key] = self.bm25.with_params(*key)
-        return variant
+        return self._cached(self._bm25_variants, key, 4, lambda: self.bm25.with_params(*key))
 
     def pattern_counts(self, pattern: re.Pattern) -> np.ndarray:
         """How often `pattern` matches in each passage. The last few patterns are kept, so a
         regex in a steer line is not rescanned on every refresh."""
-        key = (pattern.pattern, pattern.flags)
-        counts = self._pattern_counts.get(key)
-        if counts is None:
-            while len(self._pattern_counts) >= 32:
-                self._pattern_counts.pop(next(iter(self._pattern_counts)))
-            counts = np.fromiter(
-                (sum(1 for m in pattern.finditer(p.embed_text) if m.end() > m.start()) for p in self.passages),
-                np.float32, len(self.passages),
-            )
-            self._pattern_counts[key] = counts
-        return counts
+        return self._cached(self._pattern_counts, (pattern.pattern, pattern.flags), 32, lambda: np.fromiter(
+            (sum(1 for m in pattern.finditer(p.embed_text) if m.end() > m.start()) for p in self.passages),
+            np.float32, len(self.passages),
+        ))
+
+    def _cached(self, cache: dict, key, size: int, make: Callable):
+        """cache[key], made on first use; the oldest entries go when there are `size`."""
+        with self._cache_lock:
+            value = cache.get(key)
+        if value is None:
+            value = make()  # outside the lock: a slow regex scan doesn't hold up other requests
+            with self._cache_lock:
+                while len(cache) >= size:
+                    cache.pop(next(iter(cache)))
+                cache[key] = value
+        return value
 
     def term_id(self, term: str) -> int | None:
         i = self.vocab.get(term)
@@ -122,6 +126,9 @@ class Engine:
         self.files: dict[str, FileRecord] = {}
         self.status = IndexStatus()
         self._lock = threading.Lock()
+        # The model the cached vectors came from. Without a model they are kept as they are, so a
+        # keyword-only run never throws away embeddings that took hours to compute.
+        self._vectors_from = getattr(embedder, "name", None)
         self._load()
         self._publish()
 
@@ -289,42 +296,101 @@ class Engine:
     # ---- cache ----
 
     @property
-    def _cache_path(self) -> Path:
-        return self.index_dir / "index.pkl"
+    def _cache_paths(self) -> tuple[Path, Path]:
+        return self.index_dir / "index.json", self.index_dir / "index.npz"
 
     def _save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self._cache_path.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            pickle.dump(
+        paths = sorted(self.files)
+        records = [self.files[p] for p in paths]
+        embedded = [r for r in records if r.vectors is not None]
+        meta = {
+            "version": INDEX_VERSION,
+            "chunking": list(self.chunking),
+            "embedder": self._vectors_from,
+            "vocab": self.vocab.terms,
+            "files": [
                 {
-                    "version": INDEX_VERSION,
-                    "chunking": self.chunking,
-                    "embedder": getattr(self.embedder, "name", None),
-                    "vocab": self.vocab.terms,
-                    "files": self.files,
-                },
-                f,
-                protocol=pickle.HIGHEST_PROTOCOL,
-            )
-        os.replace(tmp, self._cache_path)
+                    "path": path,
+                    "mtime_ns": r.mtime_ns,
+                    "size": r.size,
+                    "embedded": r.vectors is not None,
+                    "passages": [[p.heading, p.start_line, p.end_line, p.text] for p in r.passages],
+                }
+                for path, r in zip(paths, records)
+            ],
+        }
+        dim = embedded[0].vectors.shape[1] if embedded else 0
+        arrays = {
+            "indptr": np.concatenate([r.indptr for r in records]) if records else np.zeros(0, np.int64),
+            "term_ids": np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32),
+            "counts": np.concatenate([r.counts for r in records]) if records else np.zeros(0, np.float32),
+            "vectors": np.concatenate([r.vectors for r in embedded]) if embedded else np.zeros((0, dim), np.float16),
+        }
+        json_path, npz_path = self._cache_paths
+        # The arrays go first: a cache is only used when its JSON matches them (see _load).
+        tmp = npz_path.with_name("index.tmp.npz")
+        np.savez(tmp, **arrays)
+        os.replace(tmp, npz_path)
+        tmp = json_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, json_path)
+        old = self.index_dir / "index.pkl"
+        if old.exists():  # the version 1 cache, which this one replaces
+            old.unlink()
 
     def _load(self) -> None:
-        if not self._cache_path.exists():
+        json_path, npz_path = self._cache_paths
+        if (self.index_dir / "index.pkl").exists() and not json_path.exists():
+            log.info("ignoring the old index cache (index.pkl); the index will be rebuilt")
+        if not json_path.exists() or not npz_path.exists():
             return
         try:
-            with open(self._cache_path, "rb") as f:
-                data = pickle.load(f)
+            meta = json.loads(json_path.read_text(encoding="utf-8"))
+            if meta.get("version") != INDEX_VERSION or tuple(meta.get("chunking", ())) != self.chunking:
+                return
+            with np.load(npz_path, allow_pickle=False) as data:
+                arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
+            files = self._records(meta["files"], arrays)
         except Exception as e:
             log.warning("ignoring unreadable index cache: %s", e)
             return
-        if data.get("version") != INDEX_VERSION or tuple(data.get("chunking", ())) != self.chunking:
-            return
-        self.vocab = Vocabulary(data["vocab"])
-        self.files = data["files"]
-        if data.get("embedder") != getattr(self.embedder, "name", None):
-            for record in self.files.values():  # a different model: keep the text, re-embed
+        self.vocab = Vocabulary(meta["vocab"])
+        self.files = files
+        saved = meta.get("embedder")
+        if self.embedder is None:
+            self._vectors_from = saved
+        elif saved != self.embedder.name:  # a different model: keep the text, re-embed
+            for record in self.files.values():
                 record.vectors = None
+
+    @staticmethod
+    def _records(entries: list[dict], arrays: dict) -> dict[str, FileRecord]:
+        """FileRecords from the cache's JSON entries and the arrays they index into, in order."""
+        files = {}
+        at_indptr = at_nnz = at_vec = 0
+        for e in entries:
+            n = len(e["passages"])
+            indptr = arrays["indptr"][at_indptr : at_indptr + n + 1]
+            nnz = int(indptr[-1])
+            vectors = None
+            if e["embedded"]:
+                vectors = arrays["vectors"][at_vec : at_vec + n]
+                at_vec += n
+            files[e["path"]] = FileRecord(
+                e["mtime_ns"],
+                e["size"],
+                [Passage(e["path"], h, s, end, t) for h, s, end, t in e["passages"]],
+                indptr.astype(np.int64),
+                arrays["term_ids"][at_nnz : at_nnz + nnz],
+                arrays["counts"][at_nnz : at_nnz + nnz],
+                vectors,
+            )
+            at_indptr += n + 1
+            at_nnz += nnz
+        if (at_indptr, at_nnz, at_vec) != (len(arrays["indptr"]), len(arrays["term_ids"]), len(arrays["vectors"])):
+            raise ValueError("the index arrays don't match the file list")
+        return files
 
     # ---- queries ----
 

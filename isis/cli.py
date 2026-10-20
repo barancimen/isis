@@ -41,6 +41,17 @@ def cmd_index(args) -> None:
     )
 
 
+def allowed_hosts(host: str, extra: list[str]) -> list[str]:
+    """Host headers the server answers: this machine, the address it listens on, and --allow-host.
+    Listening on every interface without --allow-host answers any name, as before."""
+    if host in ("0.0.0.0", "::", "") and not extra:
+        print("isis: listening on every interface; add --allow-host NAME to answer only that name", flush=True)
+        return ["*"]
+    from .server.app import LOOPBACK
+
+    return list(dict.fromkeys([*LOOPBACK, *([] if host in ("0.0.0.0", "::", "") else [host]), *extra]))
+
+
 def cmd_serve(args) -> None:
     import uvicorn
 
@@ -48,6 +59,7 @@ def cmd_serve(args) -> None:
     if args.tasks:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
     os.environ["ISIS_MODEL"] = "" if args.no_model else args.model
+    os.environ["ISIS_HOSTS"] = ",".join(allowed_hosts(args.host, args.allow_host))
     package = Path(__file__).parent
     print(f"isis: http://{args.host}:{args.port}", flush=True)
     uvicorn.run(
@@ -79,6 +91,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("serve", help="run the web app")
     common(p)
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                   help="also answer requests addressed to this host name or IP (repeatable)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", help="restart when the Python code changes")
     p.set_defaults(func=cmd_serve)

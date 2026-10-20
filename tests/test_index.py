@@ -1,4 +1,5 @@
 import os
+import pickle
 import time
 
 import numpy as np
@@ -81,6 +82,33 @@ def test_cache_is_reused_and_model_change_re_embeds(corpus, tmp_path):
     assert stats["changed"] == 0 and stats["embedded"] == other.status.passages
     assert other.snapshot.vectors.shape[1] == 32
 
+
+
+def test_a_run_without_a_model_keeps_the_embeddings(corpus, tmp_path):
+    index = tmp_path / "index"
+    Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    keywords_only = Engine(corpus, index_dir=index)
+    (corpus / "new.md").write_text("Ambergris washed up on the beach.\n")
+    assert keywords_only.refresh()["changed"] == 1  # saves the index
+
+    again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    assert again.refresh()["embedded"] == 1  # only the new file
+
+
+class Planted:
+    def __reduce__(self):
+        return (os.system, ("touch planted-ran",))
+
+
+def test_a_planted_pickle_is_never_loaded(corpus, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (corpus / ".isis").mkdir()
+    (corpus / ".isis" / "index.pkl").write_bytes(pickle.dumps(Planted()))
+    e = Engine(corpus, embedder=HashEmbedder())
+    e.refresh()
+    assert not (tmp_path / "planted-ran").exists()
+    assert not (corpus / ".isis" / "index.pkl").exists()  # replaced by the new cache
+    assert Engine(corpus, embedder=HashEmbedder()).snapshot.has_vector.all()
 
 def test_lexical_only_engine_works_without_a_model(corpus, tmp_path):
     e = Engine(corpus, index_dir=tmp_path / "index")

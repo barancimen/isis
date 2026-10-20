@@ -110,14 +110,24 @@ def score(engine, docs, qrels, over):
                 lanes={k: (v[0], v[1] / max(v[2], 1)) for k, v in lanes.items()}, per_task=per_task)
 
 
+def kinds() -> dict[str, str]:
+    """Task id -> "short" or "long" (tasks.json "kind"): long tasks are documents after a real
+    session of collecting, short ones a first note with a few excerpts."""
+    return {t["id"]: t.get("kind", "short") for t in jload("tasks.json", [])}
+
+
 def show(name, m, base=None):
     lanes = " ".join(f"{k}:{n}/{p:.2f}" for k, (n, p) in m["lanes"].items())
+    groups = {}
+    for tid, util in m["per_task"].items():
+        groups.setdefault(kinds().get(tid, "short"), []).append(util)
+    by_kind = " ".join(f"{k}={statistics.mean(v):5.2f}" for k, v in sorted(groups.items(), reverse=True))
     versus = ""
     if base:
         wins = sum(m["per_task"][t] > base["per_task"][t] + 1e-9 for t in m["per_task"])
         losses = sum(m["per_task"][t] < base["per_task"][t] - 1e-9 for t in m["per_task"])
         versus = f" | vs defaults +{wins} -{losses}"
-    print(f"  {name:60s} util={m['util']:5.2f} prec={m['prec']:.3f} shown={m['n']:4.1f} junk={m['junk']:3d} "
+    print(f"  {name:60s} util={m['util']:5.2f} ({by_kind}) prec={m['prec']:.3f} shown={m['n']:4.1f} junk={m['junk']:3d} "
           f"nonobv={m['nonobv']:3d} judged={m['cover']:.2f} | {lanes}{versus}")
 
 
@@ -130,8 +140,8 @@ def evaluate(engine, args, docs, qrels):
 
 
 def signals(engine, args, docs, qrels):
-    from isis.engine.related import (TaskPrefs, assign_themes, find_excerpts, ranks, task_terms, task_units,
-                                     weight_units, zscores)
+    from isis.engine.related import (TaskPrefs, assign_themes, embed_reusing, find_excerpts, ranks, same_passage,
+                                     task_terms, task_units, weight_units, zscores)
 
     cfg = RelatedConfig()
     snap = engine.snapshot
@@ -139,11 +149,13 @@ def signals(engine, args, docs, qrels):
     rows = []
     for tid, doc in docs.items():
         units = task_units(doc)
-        vecs = engine.embedder.embed([u.heading + "\n" + u.text if u.heading else u.text for u in units], cache=True)
+        find_excerpts(snap, units)
+        texts = [u.heading + "\n" + u.text if u.heading else u.text for u in units]
+        vecs = embed_reusing(snap, engine.embedder, texts, [same_passage(snap, u.source_rows, u.text) for u in units])
         cos, z = zscores(snap, vecs)
         find_excerpts(snap, units, cos)
         weight_units(units, None, cfg)
-        assign_themes(units, vecs, cfg)
+        assign_themes(units, vecs, cfg, snap)
         sizes = np.array([len(u.text.split()) * u.weight for u in units], np.float32)
         document = (sizes[:, None] * vecs).sum(0)
         _, z_doc = zscores(snap, (document / np.linalg.norm(document))[None, :])
