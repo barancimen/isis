@@ -159,12 +159,12 @@ def main() -> None:
         step(f"+ inserted a related passage and recorded feedback {meta['feedback']}")
 
         page.locator("#related-terms .chip .chip-x").first.click()
-        expect(page.locator("#related-terms .chip.banned")).to_have_count(1, timeout=30000)
+        expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
         page.locator("#related-lanes .hit button[title^='Not useful']").first.click()
         expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
-        assert meta["bans"] and meta["dismissed"]
-        step(f"banned a term {meta['bans']} and dismissed a passage")
+        assert meta["ignored"] and meta["dismissed"]
+        step(f"ignored a keyword {meta['ignored']} and dismissed a passage")
 
         drawer = page.locator("#related-feedback")
         drawer.locator("summary").click()
@@ -176,25 +176,37 @@ def main() -> None:
         assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["dismissed"] == []
         drawer.locator("button", has_text="Forget all").click()
         expect(drawer.locator(".tune-count")).to_have_text("", timeout=30000)
-        expect(page.locator("#related-terms .chip.banned")).to_have_count(0)
+        expect(page.locator("#related-terms .chip.ignored")).to_have_count(0)
         assert not (TASKS / ".meta" / f"{WHALES}.json").exists()
         drawer.locator("summary").click()
         step("feedback drawer: restored the dismissed passage, then forgot all of the task's feedback")
 
         related_lines = """() => [...document.querySelectorAll('#related-lanes .hit-body .line:not(.ctx)')].map(l => l.innerText)"""
         assert any("squid" in l.lower() for l in page.evaluate(related_lines))
-        page.fill("#exclude-input", "squid")
-        page.press("#exclude-input", "Enter")
-        expect(page.locator("#related-excluded .chip")).to_have_count(1, timeout=30000)
+        page.fill("#steer-input", "  -squid ")
+        page.press("#steer-input", "Enter")
+        expect(page.locator("#steer-input")).to_have_value("-squid", timeout=30000)
         expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
         lines = page.evaluate(related_lines)
         assert lines and not any("squid" in l.lower() for l in lines), lines
+        page.fill("#steer-input", "-squid +/[Ww]hal/")
+        page.press("#steer-input", "Enter")
+        expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
+        page.wait_for_timeout(500)
+        hits = page.evaluate("""() => [...document.querySelectorAll('#related-lanes .hit')].map(h =>
+            [...h.querySelectorAll('.hit-body .line:not(.ctx)')].map(l => l.innerText).join(' '))""")
+        assert hits and all(re.search("[Ww]hal", t) for t in hits), hits
+        page.fill("#steer-input", "/(oops/")
+        page.press("#steer-input", "Enter")
+        expect(page.locator("#steer-error")).to_contain_text("invalid pattern", timeout=30000)
+        page.press("#steer-input", "Escape")
+        expect(page.locator("#steer-input")).to_have_value("-squid +/[Ww]hal/")
         page.locator("#related-lanes .hit button.avoid").first.click()
         expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 avoided", timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
-        assert meta["excluded"] == ["squid"] and meta["dismissed"][0]["avoid"] is True
-        shot(page, "excluded.png")
-        step("related: 'squid' excluded from every suggestion; ⊘ avoided a passage")
+        assert meta["steer"] == "-squid +/[Ww]hal/" and meta["dismissed"][0]["avoid"] is True
+        shot(page, "steer.png")
+        step("related steer line: -squid excludes, +/regex/ requires, a bad pattern is reported; ⊘ avoided a passage")
 
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")

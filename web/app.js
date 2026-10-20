@@ -590,7 +590,7 @@ function renderRelatedEmpty(message) {
   $("#related-terms").replaceChildren();
   $("#related-lanes").replaceChildren();
   $("#related-feedback").hidden = true;
-  $("#related-exclude").hidden = true;
+  $("#related-steer").hidden = true;
 }
 
 async function refreshRelated() {
@@ -624,7 +624,7 @@ async function refreshRelated() {
   );
   state.lastRelatedKeys = keys;
   renderChips(result.terms);
-  renderExcluded(result.prefs.excluded);
+  renderSteer(result.prefs.steer);
   renderFeedback(result.prefs, result.terms, result.lanes);
   $("#related-lanes").replaceChildren(...lanes);
   const s = result.stats;
@@ -634,18 +634,24 @@ async function refreshRelated() {
     : `${s.gated} clearly related of ${s.passages.toLocaleString()} passages${themes ? ` · themes: ${themes}` : ""}`;
 }
 
+// The keywords taken from the task. Boosting writes the word into the steer line; ignoring takes
+// a keyword out of the query without hiding the passages that contain it.
 function renderChips(terms) {
   $("#related-terms").replaceChildren(
     ...terms.map((t) =>
-      h("span", { class: `chip${t.pinned ? " pinned" : ""}${t.banned ? " banned" : ""}`, style: `--w: ${t.weight.toFixed(2)}` },
+      h("span", { class: `chip${t.boosted ? " boosted" : ""}${t.ignored ? " ignored" : ""}`, style: `--w: ${t.weight.toFixed(2)}` },
         h("button", {
           class: "chip-label",
-          title: t.banned ? "Banned: click to use it again" : t.pinned ? "Pinned: click to unpin" : "Click to pin: always search for this term",
-          onclick: () => termAction(t.term, t.banned ? "unban" : t.pinned ? "unpin" : "pin").catch(fail),
+          title: t.ignored
+            ? "Ignored: click to search for it again"
+            : t.boosted
+              ? "Boosted by the steer line: click to stop boosting"
+              : "Click to boost: always search for it, at full weight (adds it to the steer line)",
+          onclick: () => (t.ignored ? termAction(t.term, "unignore") : t.boosted ? termAction(t.term, "unboost") : termAction(t.label, "boost")).catch(fail),
         }, t.label),
-        t.banned
-          ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}”`, onclick: () => termAction(t.label, "exclude").catch(fail) }, "⊘")
-          : h("button", { class: "chip-x", title: "Ban: never search for this term in this task", onclick: () => termAction(t.term, "ban").catch(fail) }, "×"),
+        t.ignored
+          ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}” (adds -${t.label} to the steer line)`, onclick: () => termAction(t.label, "exclude").catch(fail) }, "⊘")
+          : h("button", { class: "chip-x", title: "Ignore: stop searching for this word (passages containing it can still be suggested)", onclick: () => termAction(t.term, "ignore").catch(fail) }, "×"),
       ),
     ),
   );
@@ -656,28 +662,27 @@ async function termAction(term, action) {
   await refreshRelated();
 }
 
-// Words, phrases and patterns never to show, as chips; the input adds one.
-const excludedChip = (entry) =>
-  h("span", { class: "chip excluded" },
-    h("span", { class: "chip-label", title: "Passages containing this are never suggested" }, entry),
-    h("button", { class: "chip-x", title: "Show such passages again", onclick: () => termAction(entry, "unexclude").catch(fail) }, "×"),
-  );
-
-function renderExcluded(entries) {
-  $("#related-exclude").hidden = false;
-  $("#related-excluded").replaceChildren(...entries.map(excludedChip));
+// The steer line: clauses as in a search, kept with the task. Enter saves; Escape undoes the edit.
+function renderSteer(steer) {
+  $("#related-steer").hidden = false;
+  const input = $("#steer-input");
+  input.dataset.saved = steer;
+  if (document.activeElement !== input) input.value = steer;
 }
 
-async function addExclusion(event) {
+async function saveSteer(event) {
   event.preventDefault();
-  const input = $("#exclude-input");
-  const entry = input.value.trim();
-  if (!entry || !state.task) return;
+  const input = $("#steer-input");
+  if (!state.task || input.value.trim() === (input.dataset.saved ?? "")) return;
   try {
-    await termAction(entry, "exclude");
-    input.value = "";
+    const prefs = await api("PUT", `/api/tasks/${enc(state.task)}/steer`, { text: input.value });
+    input.value = input.dataset.saved = prefs.steer;
+    $("#steer-error").hidden = true;
+    await refreshRelated();
   } catch (error) {
-    flash(error.status === 400 ? `⚠ ${error.message}` : `Error: ${error.message}`);
+    if (error.status !== 400) throw error;
+    $("#steer-error").textContent = `⚠ ${error.message}`;
+    $("#steer-error").hidden = false;
   }
 }
 
@@ -697,10 +702,9 @@ function renderFeedback(prefs, terms, lanes) {
   const drawer = $("#related-feedback");
   drawer.hidden = false;
   const labels = new Map(terms.map((t) => [t.term, t.label]));
-  const words = [...prefs.pins, ...prefs.bans];
-  const excluded = prefs.excluded || [];
+  const ignored = prefs.ignored;
   const avoided = prefs.dismissed.filter((d) => d.avoid).length;
-  const key = JSON.stringify([state.task, prefs, words.map((t) => labels.get(t))]);
+  const key = JSON.stringify([state.task, prefs, ignored.map((t) => labels.get(t))]);
   if (drawer.dataset.key === key) return; // keep the list's scroll position while typing
   drawer.dataset.key = key;
 
@@ -710,12 +714,11 @@ function renderFeedback(prefs, terms, lanes) {
   const summary = [
     prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} dismissed`,
     avoided && `${avoided} avoided`,
-    excluded.length && `${excluded.length} excluded`,
+    prefs.steer && "steered",
     added && `${added} added`,
-    prefs.pins.length && `${prefs.pins.length} pinned`,
-    prefs.bans.length && `${prefs.bans.length} banned`,
+    ignored.length && `${ignored.length} ignored`,
   ].filter(Boolean);
-  const empty = !prefs.dismissed.length && !words.length && !counted.length && !excluded.length;
+  const empty = !prefs.dismissed.length && !prefs.steer && !ignored.length && !counted.length;
 
   const dismissed = [...prefs.dismissed].reverse().map((d) => {
     const known = d.start_line !== undefined && d.start_line !== null;
@@ -732,10 +735,10 @@ function renderFeedback(prefs, terms, lanes) {
         text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
     );
   });
-  const word = (term, kind) =>
-    h("span", { class: `chip ${kind}` },
+  const ignoredChip = (term) =>
+    h("span", { class: "chip ignored" },
       h("span", { class: "chip-label" }, labels.get(term) ?? term),
-      h("button", { class: "chip-x", title: kind === "pinned" ? "Unpin" : "Unban", onclick: () => termAction(term, kind === "pinned" ? "unpin" : "unban").catch(fail) }, "×"),
+      h("button", { class: "chip-x", title: "Search for it again", onclick: () => termAction(term, "unignore").catch(fail) }, "×"),
     );
   const laneCounts = counted.map(([lane, [adds, dismisses]]) =>
     `${laneTitles.get(lane) ?? lane}: ${[adds && `${adds} added`, dismisses && `${dismisses} dismissed`].filter(Boolean).join(", ")}`);
@@ -744,19 +747,21 @@ function renderFeedback(prefs, terms, lanes) {
     h("summary", {}, "Feedback", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
-        "Nothing yet. The passages you add (+), dismiss (×) or avoid (⊘) here, and the words you pin, ban or exclude, are remembered for this task, whatever its text."),
+        "Nothing yet. The passages you add (+), dismiss (×) or avoid (⊘) here, the steer line, and the keywords you ignore are remembered for this task, whatever its text."),
       dismissed.length > 0 && [
         h("div", { class: "tune-group" }, "Dismissed and avoided passages"),
         h("p", { class: "feedback-note" }, "Never suggested again. Passages like an avoided one are hidden too (Parameters › Avoid: similarity), and Parameters › Dismissal push can also rank passages like dismissed ones lower."),
         h("ul", { class: "feedback-list" }, dismissed),
       ],
-      excluded.length > 0 && [
-        h("div", { class: "tune-group" }, "Never shown"),
-        h("div", { class: "chips" }, excluded.map(excludedChip)),
+      prefs.steer && [
+        h("div", { class: "tune-group" }, "Steer line"),
+        h("code", { class: "feedback-steer" }, prefs.steer),
+        h("p", { class: "feedback-note" }, "Edit it in the box above the suggestions."),
       ],
-      words.length > 0 && [
-        h("div", { class: "tune-group" }, "Pinned and banned words"),
-        h("div", { class: "chips" }, prefs.pins.map((t) => word(t, "pinned")), prefs.bans.map((t) => word(t, "banned"))),
+      ignored.length > 0 && [
+        h("div", { class: "tune-group" }, "Ignored keywords"),
+        h("p", { class: "feedback-note" }, "Not searched for; passages containing them can still be suggested."),
+        h("div", { class: "chips" }, ignored.map(ignoredChip)),
       ],
       counted.length > 0 && [
         h("div", { class: "tune-group" }, "Lane feedback"),
@@ -778,7 +783,7 @@ async function restoreDismissed(dismissal, element) {
 
 async function forgetFeedback() {
   const name = state.task;
-  if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, pins, bans and exclusions are cleared, and the lanes start even.`)) return;
+  if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
   await api("DELETE", `/api/tasks/${enc(name)}/prefs`);
   flash(`Forgot the feedback for “${name}”`);
   await refreshRelated();
@@ -1024,7 +1029,14 @@ function bind() {
   $("#file-filter").addEventListener("input", debounce(renderFiles, 120));
   $("#search-input").addEventListener("input", runSearch);
   $("#search-hybrid").addEventListener("change", runSearch);
-  $("#related-exclude").addEventListener("submit", (e) => addExclusion(e).catch(fail));
+  $("#related-steer").addEventListener("submit", (e) => saveSteer(e).catch(fail));
+  $("#steer-input").addEventListener("input", () => ($("#steer-error").hidden = true));
+  $("#steer-input").addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault(); // a search field would clear itself
+    e.target.value = e.target.dataset.saved ?? "";
+    $("#steer-error").hidden = true;
+  });
   for (const button of document.querySelectorAll(".side-tabs button")) {
     button.addEventListener("click", () => showPanel(button.dataset.panel));
   }

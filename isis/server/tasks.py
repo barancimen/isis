@@ -1,5 +1,5 @@
 """Task documents: one markdown file each in the tasks folder, plus a small JSON file of
-preferences (pinned and banned terms, dismissed passages, feedback per lane) in `.meta/`.
+preferences (the steer line, ignored keywords, dismissed passages, feedback per lane) in `.meta/`.
 Deleted tasks are moved to `.trash/`, not removed."""
 
 from __future__ import annotations

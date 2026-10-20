@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from ..engine.index import MARKDOWN, Engine
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
-from ..engine.search import QueryError, SearchConfig, exclusion_filters
+from ..engine.search import QueryError, SearchConfig
 from .tasks import Conflict, TaskError, TaskStore
 
 log = logging.getLogger("isis")
@@ -65,8 +65,12 @@ class RelatedRequest(BaseModel):
 
 
 class TermRequest(BaseModel):
-    term: str  # a stemmed term from the chips; to exclude: a word, "phrase" or /regex/
-    action: Literal["pin", "unpin", "ban", "unban", "exclude", "unexclude"]
+    term: str  # boost and exclude: the word as shown on its chip; unboost, ignore, unignore: its stem
+    action: Literal["boost", "unboost", "ignore", "unignore", "exclude"]
+
+
+class SteerRequest(BaseModel):
+    text: str  # clauses as in a search query: x prefer, +x require, -x never show
 
 
 class FeedbackRequest(BaseModel):
@@ -214,35 +218,21 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         tasks.forget_prefs(name)
         return tasks.prefs(name).to_dict()
 
+    @app.put("/api/tasks/{name}/steer")
+    def steer(name: str, body: SteerRequest):
+        prefs = tasks.prefs(name)
+        try:
+            prefs.set_steer(body.text)
+        except QueryError as e:
+            raise HTTPException(400, str(e))
+        tasks.save_prefs(name, prefs)
+        return prefs.to_dict()
+
     @app.post("/api/tasks/{name}/terms")
     def terms(name: str, body: TermRequest):
+        """Chip shortcuts: they edit the steer line (boost, unboost, exclude) or the ignored list."""
         prefs = tasks.prefs(name)
-        if body.action in ("exclude", "unexclude"):
-            entry = " ".join(body.term.split())
-            if body.action == "unexclude":
-                prefs.excluded = [e for e in prefs.excluded if e != entry]
-            elif entry and entry not in prefs.excluded:
-                try:
-                    stems = exclusion_filters([entry]).excluded_terms
-                except QueryError as e:
-                    raise HTTPException(400, str(e))
-                prefs.excluded.append(entry)
-                prefs.pins = [t for t in prefs.pins if t not in stems]
-                prefs.bans = [t for t in prefs.bans if t not in stems]
-            tasks.save_prefs(name, prefs)
-            return prefs.to_dict()
-        pins, bans = set(prefs.pins), set(prefs.bans)
-        if body.action == "pin":
-            pins.add(body.term)
-            bans.discard(body.term)
-        elif body.action == "ban":
-            bans.add(body.term)
-            pins.discard(body.term)
-        elif body.action == "unpin":
-            pins.discard(body.term)
-        else:
-            bans.discard(body.term)
-        prefs.pins, prefs.bans = sorted(pins), sorted(bans)
+        getattr(prefs, body.action)(body.term)
         tasks.save_prefs(name, prefs)
         return prefs.to_dict()
 

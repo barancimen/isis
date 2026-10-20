@@ -58,6 +58,7 @@ class BM25:
 
         self.n_docs = n_docs
         self.n_terms = n_terms
+        self.doc_len, self.avg_len = doc_len.astype(np.float32), float(avg_len)
         self.doc_freq = np.bincount(term_ids, minlength=n_terms)
         self.idf = np.log1p((n_docs - self.doc_freq + 0.5) / (self.doc_freq + 0.5)).astype(np.float32)
 
@@ -73,6 +74,17 @@ class BM25:
         if (k1, b) == (self.k1, self.b):
             return self
         return BM25(*self._raw, n_terms=self.n_terms, k1=k1, b=b)
+
+    def pattern_scores(self, counts: np.ndarray) -> np.ndarray:
+        """BM25 of a pseudo-term (a phrase or a regex) from how often it matches in each passage, so
+        that it ranks like one more word of the query."""
+        df = int((counts > 0).sum())
+        if not df:
+            return np.zeros(self.n_docs, np.float32)
+        idf = np.log1p((self.n_docs - df + 0.5) / (df + 0.5))
+        tf = counts.astype(np.float32)
+        norm = self.k1 * (1 - self.b + self.b * self.doc_len / self.avg_len)
+        return (idf * tf * (self.k1 + 1) / (tf + norm)).astype(np.float32)
 
     def scores(self, term_ids, weights) -> np.ndarray:
         """BM25 score of every passage for a query given as term ids with weights."""

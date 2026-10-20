@@ -61,10 +61,12 @@ def test_related_terms_and_feedback(client):
     assert [lane["name"] for lane in body["lanes"]] == ["core", "hidden", "bridges", "gaps"]
     assert "whale" in {c["term"] for c in body["terms"]}
 
-    prefs = client.post("/api/tasks/t/terms", json={"term": "whale", "action": "ban"}).json()
-    assert prefs["bans"] == ["whale"]
-    prefs = client.post("/api/tasks/t/terms", json={"term": "whale", "action": "pin"}).json()
-    assert prefs["pins"] == ["whale"] and prefs["bans"] == []
+    prefs = client.post("/api/tasks/t/terms", json={"term": "whale", "action": "ignore"}).json()
+    assert prefs["ignored"] == ["whale"]
+    prefs = client.post("/api/tasks/t/terms", json={"term": "Whale", "action": "boost"}).json()
+    assert prefs["steer"] == "Whale" and prefs["ignored"] == []
+    prefs = client.post("/api/tasks/t/terms", json={"term": "whale", "action": "unboost"}).json()
+    assert prefs["steer"] == ""
 
     dismissal = {"action": "dismiss", "lane": "core", "path": "whales.md", "text": "x", "start_line": 4, "end_line": 6}
     prefs = client.post("/api/tasks/t/feedback", json=dismissal).json()
@@ -84,9 +86,9 @@ def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     assert [d["text"] for d in prefs["dismissed"]] == ["y"]
     assert prefs["feedback"] == {"hidden": [0, 1], "core": [1, 0]}
 
-    client.post("/api/tasks/t/terms", json={"term": "whale", "action": "pin"})
-    assert client.delete("/api/tasks/t/prefs").json() == {"pins": [], "bans": [], "dismissed": [], "feedback": {}, "excluded": []}
-    assert client.get("/api/tasks/t/prefs").json()["pins"] == []
+    client.put("/api/tasks/t/steer", json={"text": "whale"})
+    assert client.delete("/api/tasks/t/prefs").json() == {"steer": "", "ignored": [], "dismissed": [], "feedback": {}}
+    assert client.get("/api/tasks/t/prefs").json()["steer"] == ""
     assert len(list((corpus / "_tasks" / ".trash").glob("t.*.prefs.json"))) == 1
 
 
@@ -102,19 +104,23 @@ def test_page_is_served(client):
     assert client.get("/").status_code == 200
 
 
-def test_exclusions_and_avoided_passages(client):
+def test_steer_line_and_avoided_passages(client):
     client.post("/api/tasks", json={"name": "t"})
     task = {"text": "The sperm whale and ambergris. Ahab hunted the white whale from the Pequod.", "params": {"z_weak": -1}}
     texts = lambda: [h["text"] for lane in client.post("/api/tasks/t/related", json=task).json()["lanes"] for h in lane["items"]]
     assert any("Ambergris" in t for t in texts())
 
-    client.post("/api/tasks/t/terms", json={"term": "ambergri", "action": "ban"})
+    client.post("/api/tasks/t/terms", json={"term": "ambergri", "action": "ignore"})
     prefs = client.post("/api/tasks/t/terms", json={"term": "Ambergris", "action": "exclude"}).json()
-    assert prefs["excluded"] == ["Ambergris"] and prefs["bans"] == []  # excluding takes the word out of the bans
+    assert prefs["steer"] == "-Ambergris" and prefs["ignored"] == []  # excluding takes the word out of the ignored
     assert texts() and not any("ambergris" in t.lower() for t in texts())
-    assert client.post("/api/tasks/t/terms", json={"term": "/[oops/", "action": "exclude"}).status_code == 400
-    prefs = client.post("/api/tasks/t/terms", json={"term": "Ambergris", "action": "unexclude"}).json()
-    assert prefs["excluded"] == []
+
+    prefs = client.put("/api/tasks/t/steer", json={"text": "  +/[Ww]hal/   -/Pequod/ "}).json()
+    assert prefs["steer"] == "+/[Ww]hal/ -/Pequod/"  # tidied
+    assert texts() and all("hal" in t and "Pequod" not in t for t in texts())
+    assert client.put("/api/tasks/t/steer", json={"text": "/[oops/"}).status_code == 400
+    assert client.get("/api/tasks/t/prefs").json()["steer"] == "+/[Ww]hal/ -/Pequod/"  # unchanged
+    client.put("/api/tasks/t/steer", json={"text": ""})
 
     first = next(t for t in texts() if "Ambergris" in t)
     body = {"action": "avoid", "lane": "core", "path": "whales.md", "text": first}

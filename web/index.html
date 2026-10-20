@@ -32,7 +32,7 @@
         <input id="search-input" type="search" placeholder="Search the corpus…" aria-label="Search the corpus">
         <label class="toggle" title="Also match by meaning (fuses BM25 with embeddings)"><input id="search-hybrid" type="checkbox"> meaning</label>
       </div>
-      <div class="hint">Words rank by BM25. <code>"a phrase"</code> and <code>/regex/</code> must match; <code>-word</code>, <code>-"a phrase"</code> and <code>-/regex/</code> must not, even with <em>meaning</em> ticked. Ctrl/⌘+K jumps here.</div>
+      <div class="hint">Words rank by BM25. A <code>"phrase"</code> or <code>/regex/</code> ranks like a word; <code>+x</code> requires x and <code>-x</code> excludes it, even with <em>meaning</em> ticked. Ctrl/⌘+K jumps here.</div>
       <details id="search-tune" class="tune"></details>
       <div id="search-status" class="status-line"></div>
       <div id="search-results" class="results"></div>
@@ -42,9 +42,10 @@
       <details id="related-feedback" class="tune" hidden></details>
       <div id="related-status" class="status-line"></div>
       <div id="related-terms" class="chips" aria-label="Terms taken from the task"></div>
-      <form id="related-exclude" class="exclude-row" hidden>
-        <div id="related-excluded" class="chips" aria-label="Never shown"></div>
-        <input id="exclude-input" type="search" placeholder='Never show passages with… (word, "phrase" or /regex/)' aria-label="Exclude from the suggestions">
+      <form id="related-steer" class="steer-row" hidden>
+        <input id="steer-input" type="search" spellcheck="false" placeholder='Steer: word  +required  -never  "a phrase"  /regex/' aria-label="Steer the suggestions">
+        <div class="hint">Plain words, phrases and patterns are preferred, <code>+x</code> is required, <code>-x</code> is never shown. Enter saves; it stays with the task.</div>
+        <div id="steer-error" class="steer-error" hidden></div>
       </form>
       <div id="related-lanes" class="results"></div>
     </section>

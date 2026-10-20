@@ -211,15 +211,16 @@ code { font-family: var(--mono); font-size: 0.92em; }
 }
 .chip button { border: none; border-radius: 0; padding: 1px 6px; background: none; }
 .chip .chip-x { color: var(--faint); padding: 1px 5px 1px 2px; }
-.chip.pinned { border-color: var(--accent); }
-.chip.pinned .chip-label::before { content: "📌 "; font-size: 10px; }
-.chip.banned { background: none; }
-.chip.banned .chip-label { text-decoration: line-through; color: var(--faint); }
-.chip.excluded { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--bg)); }
-.chip.excluded .chip-label::before { content: "⊘ "; color: var(--danger); }
-.exclude-row { display: flex; flex-direction: column; gap: 4px; }
-.exclude-row[hidden] { display: none; }
-.exclude-row input { font-size: 12.5px; padding: 4px 8px; }
+.chip.boosted { border-color: var(--accent); }
+.chip.boosted .chip-label::before { content: "↑ "; color: var(--accent); }
+.chip.ignored { background: none; }
+.chip.ignored .chip-label { text-decoration: line-through; color: var(--faint); }
+.steer-row { display: flex; flex-direction: column; gap: 4px; }
+.steer-row[hidden] { display: none; }
+.steer-row input { font: 12.5px var(--mono); padding: 5px 8px; }
+.steer-error { color: var(--danger); font-size: 12px; }
+.steer-error[hidden] { display: none; }
+.feedback-steer { display: block; font-size: 12px; color: var(--fg); overflow-wrap: anywhere; }
 .hit-actions .avoid { color: var(--danger); }
 .feedback-tag { color: var(--danger); font: 11.5px var(--sans); margin-right: 6px; }
 

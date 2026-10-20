@@ -148,7 +148,7 @@ def signals(engine, args, docs, qrels):
         document = (sizes[:, None] * vecs).sum(0)
         _, z_doc = zscores(snap, (document / np.linalg.norm(document))[None, :])
         chips = task_terms(snap, units, TaskPrefs(), cfg)
-        query = [(snap.term_id(c.term), c.weight) for c in chips if not c.banned]
+        query = [(snap.term_id(c.term), c.weight) for c in chips if not c.ignored]
         lex = snap.bm25_for(cfg.bm25_k1, cfg.bm25_b).scores([i for i, _ in query], [w for _, w in query])
         lex_rank = ranks(lex, lex > 0)
         collected = {r for u in units for r in u.source_rows}

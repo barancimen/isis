@@ -7,13 +7,15 @@
                         length-weighted mean of the paragraph embeddings): how far it stands out
                         from the typical passage (median, and median absolute deviation), so
                         thresholds mean the same for every task and every model;
-              lexical   BM25 for the document's most distinctive terms (TF-IDF), with the
-                        user's pinned and banned terms applied.
+              lexical   BM25 for the document's most distinctive terms (TF-IDF), minus the ones
+                        the user ignores, plus the user's steer line: its words join the query at
+                        full weight, and its phrases and regexes are scored like words.
             With query="paragraphs" each paragraph is a query of its own instead, and a passage
             scores by its best match (optionally weighted toward the cursor).
 3. gate     Keep only clearly relevant passages: a strong semantic z-score, or a top lexical hit
             with some semantic support. Drop what is already collected or was dismissed, what
-            contains an excluded word, phrase or pattern, and what is close to an avoided passage.
+            the steer line rules out (+x requires x, -x excludes it), and what is close to an
+            avoided passage.
 4. lanes    Rank the survivors four ways:
               core      reciprocal-rank fusion of both signals
               hidden    high meaning, low keyword overlap: the same idea in other words
@@ -39,7 +41,8 @@ import numpy as np
 from .chunker import MAX_WORDS, chunk_markdown
 from .index import Snapshot
 from .params import tunable
-from .search import Hit, exclusion_filters, make_hit, top_rows
+from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit, split_query,
+                     steering, top_rows)
 from .text import tokenize, tokenize_with_surface
 
 LANES = ("core", "hidden", "bridges", "gaps")
@@ -171,19 +174,79 @@ class RelatedConfig:
 class TaskPrefs:
     """What the user has told us about one task. Stored next to the task document."""
 
-    pins: list[str] = field(default_factory=list)
-    bans: list[str] = field(default_factory=list)
+    steer: str = ""  # clauses as in a search query: x prefer, +x require, -x never show
+    ignored: list[str] = field(default_factory=list)  # stems of task keywords not to search for
     dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line", "avoid"?}
     feedback: dict = field(default_factory=dict)  # lane -> [adds, dismisses]
-    excluded: list[str] = field(default_factory=list)  # never shown: words, "phrases" and /regexes/
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "TaskPrefs":
         data = data or {}
-        return cls(**{k: data[k] for k in ("pins", "bans", "dismissed", "feedback", "excluded") if k in data})
+        prefs = cls(**{k: data[k] for k in ("steer", "ignored", "dismissed", "feedback") if k in data})
+        # Saved before the steer line: pinned terms become words to prefer, exclusions become
+        # -clauses, and banned terms are what is now called ignored.
+        if "steer" not in data and (data.get("pins") or data.get("excluded")):
+            prefs.steer = " ".join([*data.get("pins", []), *(f"-{e}" for e in data.get("excluded", []))])
+        if "ignored" not in data and data.get("bans"):
+            prefs.ignored = list(data["bans"])
+        return prefs
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    # ---- the steer line ----
+
+    def clauses(self) -> list[Clause]:
+        return [c for c in split_query(self.steer) if c.kind != "partial"]
+
+    def set_steer(self, text: str) -> None:
+        """Replace the steer line (raises QueryError for an invalid regex)."""
+        clauses = [c for c in split_query(text) if c.kind != "partial"]
+        steering(clauses)
+        self.steer = " ".join(map(str, clauses))
+
+    def _keep(self, clauses: list[Clause]) -> None:
+        self.steer = " ".join(map(str, clauses))
+
+    def _without(self, stem: str, ops) -> list[Clause]:
+        return [c for c in self.clauses() if not (c.kind == "word" and c.op in ops and c.stems() == [stem])]
+
+    def boost(self, word: str) -> None:
+        """Prefer passages with this word: it joins the keyword query at full weight."""
+        stems = tokenize(word)
+        if len(stems) != 1:
+            return
+        clauses = self._without(stems[0], (NEVER,))
+        if not any(c.kind == "word" and c.op != NEVER and c.stems() == stems for c in clauses):
+            clauses.append(Clause(PREFER, "word", word))
+        self._keep(clauses)
+        self.ignored = [t for t in self.ignored if t != stems[0]]
+
+    def unboost(self, stem: str) -> None:
+        self._keep(self._without(stem, (PREFER, REQUIRE)))
+
+    def exclude(self, word: str) -> None:
+        """Never show passages containing this word (in any form sharing its stem)."""
+        stems = tokenize(word)
+        if len(stems) != 1:
+            return
+        clauses = self._without(stems[0], (PREFER, REQUIRE))
+        if not any(c.kind == "word" and c.op == NEVER and c.stems() == stems for c in clauses):
+            clauses.append(Clause(NEVER, "word", word))
+        self._keep(clauses)
+        self.ignored = [t for t in self.ignored if t != stems[0]]
+
+    def ignore(self, stem: str) -> None:
+        """Stop searching for one of the task's own keywords. Passages containing it can still be
+        suggested (to rule them out, exclude the word instead)."""
+        self.unboost(stem)
+        if stem not in self.ignored:
+            self.ignored.append(stem)
+
+    def unignore(self, stem: str) -> None:
+        self.ignored = [t for t in self.ignored if t != stem]
+
+    # ---- feedback on suggestions ----
 
     def record(self, lane: str, added: bool) -> None:
         counts = self.feedback.setdefault(lane, [0, 0])
@@ -227,8 +290,8 @@ class TermChip:
     term: str  # stemmed, as used by the index
     label: str  # the word as it appears in the task
     weight: float
-    pinned: bool = False
-    banned: bool = False
+    boosted: bool = False  # from the steer line: searched for at full weight
+    ignored: bool = False  # not searched for
 
 
 @dataclass
@@ -355,8 +418,11 @@ def zscores(snapshot: Snapshot, vecs: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return cos, z
 
 
-def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: RelatedConfig) -> list[TermChip]:
-    """The task's most distinctive terms: weighted term frequency in the task x corpus IDF."""
+def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: RelatedConfig,
+               steer: Steering | None = None) -> list[TermChip]:
+    """The task's most distinctive terms (weighted term frequency in the task x corpus IDF), minus
+    the ignored and excluded ones, plus the steer line's words at full weight."""
+    steer = steer or Steering()
     tf: dict[str, float] = defaultdict(float)
     surfaces: dict[str, Counter] = defaultdict(Counter)
     for u in units:
@@ -375,18 +441,23 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
             scored.append((f * float(snapshot.bm25.idf[i]), term))
     scored.sort(reverse=True)
 
-    bans, pins = set(prefs.bans), set(prefs.pins)
-    excluded = exclusion_filters(prefs.excluded).excluded_terms
-    top = [(s, t) for s, t in scored if t not in bans and t not in excluded][: config.n_query_terms]
+    skip = set(prefs.ignored) | steer.filters.excluded_terms
+    boosted = set(steer.words) - steer.filters.excluded_terms
+    top = [(s, t) for s, t in scored if t not in skip][: config.n_query_terms]
     best = top[0][0] if top else 1.0
+    top = [(best if t in boosted else s, t) for s, t in top]
     chosen = {t for _, t in top}
-    for t in sorted(pins - chosen - excluded):  # pinned terms always take part, at full weight
+    for t in sorted(boosted - chosen):  # steered words always take part, at full weight
         if snapshot.term_id(t) is not None:
             top.append((best, t))
 
-    label = lambda t: surfaces[t].most_common(1)[0][0] if surfaces.get(t) else t
-    chips = [TermChip(t, label(t), s / best, pinned=t in pins) for s, t in top]
-    chips += [TermChip(t, label(t), 0.0, banned=True) for t in prefs.bans]
+    def label(t):
+        if surfaces.get(t):
+            return surfaces[t].most_common(1)[0][0]
+        return steer.surfaces.get(t, t)
+
+    chips = [TermChip(t, label(t), s / best, boosted=t in boosted) for s, t in top]
+    chips += [TermChip(t, label(t), 0.0, ignored=True) for t in prefs.ignored]
     return chips
 
 
@@ -537,9 +608,14 @@ def related(
         best_unit = np.zeros(n, np.int64)
     lap("semantic")
 
-    chips = task_terms(snapshot, units, prefs, config)
-    query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.banned]
-    lex = snapshot.bm25_for(config.bm25_k1, config.bm25_b).scores([i for i, _ in query], [w for _, w in query])
+    try:
+        steer = steering(prefs.clauses())
+    except QueryError:  # saved lines are checked when saved; an old one may not be
+        steer = Steering()
+    chips = task_terms(snapshot, units, prefs, config, steer)
+    query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.ignored]
+    bm25 = snapshot.bm25_for(config.bm25_k1, config.bm25_b)
+    lex = lexical_scores(snapshot, bm25, [i for i, _ in query], [w for _, w in query], steer.patterns)
     lex_rank = ranks(lex, lex > 0)
     sem_rank = ranks(sem_w, np.isfinite(sem_w))
     lap("lexical")
@@ -569,9 +645,8 @@ def related(
     rows = rows[relevant[rows]]
     if avoided is not None:
         rows = rows[~avoided[rows]]
-    exclusions = exclusion_filters(prefs.excluded)
-    if exclusions:
-        rows = rows[exclusions.allowed(snapshot, rows)]
+    if steer.filters:
+        rows = rows[steer.filters.allowed(snapshot, rows)]
 
     gated = []
     for row in map(int, rows):
@@ -651,7 +726,8 @@ def related(
             )
     lap("select")
 
-    terms = {c.term for c in chips if not c.banned}
+    terms = {c.term for c in chips if not c.ignored}
+    highlight = steer.patterns + [p for p in steer.filters.required if p not in steer.patterns]
     lines_cache: dict[str, list[str] | None] = {}
 
     def hit(lane: str, row: int, value: float) -> Hit | None:
@@ -673,7 +749,7 @@ def related(
             "matches_task_line": u.start_line if semantic else None,
             **lane_why[lane].get(row, {}),
         }
-        return make_hit(snapshot, row, lane_scores[lane][row], terms, lines_cache[path], context_lines, why)
+        return make_hit(snapshot, row, lane_scores[lane][row], terms, lines_cache[path], context_lines, why, highlight)
 
     lanes = []
     for lane in LANES:

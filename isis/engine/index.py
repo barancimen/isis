@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import pickle
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ class Snapshot:
     has_vector: np.ndarray  # bool [n]
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
     _bm25_variants: dict = field(default_factory=dict, repr=False)
+    _pattern_counts: dict = field(default_factory=dict, repr=False)
 
     def __len__(self) -> int:
         return len(self.passages)
@@ -66,6 +68,21 @@ class Snapshot:
                 self._bm25_variants.pop(next(iter(self._bm25_variants)))
             variant = self._bm25_variants[key] = self.bm25.with_params(*key)
         return variant
+
+    def pattern_counts(self, pattern: re.Pattern) -> np.ndarray:
+        """How often `pattern` matches in each passage. The last few patterns are kept, so a
+        regex in a steer line is not rescanned on every refresh."""
+        key = (pattern.pattern, pattern.flags)
+        counts = self._pattern_counts.get(key)
+        if counts is None:
+            while len(self._pattern_counts) >= 32:
+                self._pattern_counts.pop(next(iter(self._pattern_counts)))
+            counts = np.fromiter(
+                (sum(1 for m in pattern.finditer(p.text) if m.end() > m.start()) for p in self.passages),
+                np.float32, len(self.passages),
+            )
+            self._pattern_counts[key] = counts
+        return counts
 
     def term_id(self, term: str) -> int | None:
         i = self.vocab.get(term)

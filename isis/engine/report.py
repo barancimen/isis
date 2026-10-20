@@ -16,10 +16,10 @@ def show_hits(hits, width: int = 110) -> None:
 
 
 def show_related(result, per_lane: int = 5, width: int = 110) -> None:
-    print("terms: " + ", ".join(f"{c.label}{'*' if c.pinned else ''}" for c in result.terms if not c.banned))
-    banned = [c.label for c in result.terms if c.banned]
-    if banned:
-        print("banned: " + ", ".join(banned))
+    print("terms: " + ", ".join(f"{c.label}{'*' if c.boosted else ''}" for c in result.terms if not c.ignored))
+    ignored = [c.label for c in result.terms if c.ignored]
+    if ignored:
+        print("ignored: " + ", ".join(ignored))
     print("themes: " + " | ".join(f"{t.label} ({t.units} paragraphs, {t.excerpts} collected)" for t in result.themes))
     for lane in result.lanes:
         print(f"\n{lane.title} ({len(lane.items)})" + (f": {lane.note}" if lane.note else ""))

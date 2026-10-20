@@ -1,21 +1,23 @@
 """Typed search: BM25 over passages, or BM25 fused with embedding similarity ("hybrid").
 
-Query syntax:
-    words          ranked with BM25: any word may match; more and rarer matches rank higher.
-                   A partly typed last word is expanded to the corpus terms it starts.
-    "a phrase"     must appear verbatim (case and spacing ignored).
-    /regex/        must match (Python syntax; case-insensitive unless it has a capital letter).
-    -word          must not appear, in any form that shares its stem (-whale also drops "whales").
-    -"a phrase"    must not appear.
-    -/regex/       must not match.
-The constraints filter every passage before ranking, in both modes, so similarity of meaning
-never brings back a passage they exclude.
+Query syntax: a query is a list of clauses, each a word, a "phrase" (verbatim, case and
+spacing ignored) or a /regex/ (Python syntax; case-insensitive unless it has a capital letter).
+    x      prefer: ranks passages up. Words are ranked with BM25 (more and rarer matches first), and
+           a phrase or regex is scored the same way, as one more word. Without any + clause, a
+           passage must match at least one of these to be found.
+    +x     require: only passages matching x are found (and x counts for the ranking too).
+    -x     never: passages matching x are dropped. A word is matched by its stem, so -whale also
+           drops "whales" and "whaling".
+A partly typed last word is expanded to the corpus terms it starts. The + and - clauses filter
+every passage before ranking, in both modes, so similarity of meaning never brings back a
+passage they exclude. The same clauses steer the Related panel (see related.py).
 """
 
 from __future__ import annotations
 
 import bisect
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -25,9 +27,10 @@ from .index import Snapshot
 from .params import tunable
 from .text import term_spans, tokenize, tokenize_with_surface
 
-# One query token: optional "-", then a "phrase" (its closing quote may still be missing), a
+# One clause: an optional operator, then a "phrase" (its closing quote may still be missing), a
 # /regex/ that ends at a space or the end, a /regex still being typed, or a plain word.
-TOKEN = re.compile(r'''(-?)(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))''')
+TOKEN = re.compile(r"""([-+]?)(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))""")
+PREFER, REQUIRE, NEVER = "", "+", "-"
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 SNIPPET_LINES = 8  # passage lines shown per hit, centred on the first match
@@ -87,6 +90,8 @@ class Hit:
     why: dict = field(default_factory=dict)
 
 
+
+
 class QueryError(ValueError):
     """The query can't be run, e.g. an invalid regular expression."""
 
@@ -104,42 +109,77 @@ def phrase_pattern(phrase: str) -> re.Pattern:
     return re.compile(r"\s+".join(map(re.escape, phrase.split())), re.IGNORECASE)
 
 
+@dataclass(frozen=True)
+class Clause:
+    op: str  # PREFER, REQUIRE or NEVER
+    kind: str  # "word", "phrase", "regex", or "partial" (a regex still being typed: ignored)
+    value: str
+
+    def __str__(self) -> str:
+        return self.op + {"phrase": f'"{self.value}"', "regex": f"/{self.value}/"}.get(self.kind, self.value)
+
+    def stems(self) -> list[str]:
+        return tokenize(self.value) if self.kind == "word" else []
+
+    def pattern(self) -> re.Pattern | None:
+        """The clause as text to match: a phrase, a regex, or a word that is not one search term
+        (a stopword, or a hyphenated compound), matched as written."""
+        if self.kind == "regex":
+            return compile_pattern(self.value)
+        if self.kind == "phrase":
+            return phrase_pattern(self.value) if self.value.split() else None
+        if self.kind == "word" and len(self.stems()) != 1:
+            return re.compile(rf"(?<!\w){re.escape(self.value)}(?!\w)", re.IGNORECASE)
+        return None
+
+
+def split_query(query: str) -> list[Clause]:
+    out = []
+    for m in TOKEN.finditer(query):
+        op, phrase, regex, partial, word = m.groups()
+        if phrase is not None:
+            out.append(Clause(op, "phrase", phrase))
+        elif regex is not None:
+            out.append(Clause(op, "regex", regex))
+        elif partial is not None:
+            out.append(Clause(op, "partial", partial))
+        elif word and word not in (REQUIRE, NEVER):
+            out.append(Clause(op, "word", word))
+    return out
+
+
 @dataclass
 class Filters:
-    """Hard constraints on passages: patterns that must match, and terms and patterns that must not."""
+    """Hard constraints: terms and patterns a passage must contain, and ones it must not."""
 
+    required_terms: set[str] = field(default_factory=set)  # stems
     required: list[re.Pattern] = field(default_factory=list)
-    excluded_terms: set[str] = field(default_factory=set)  # stems: a passage with any of them is out
+    excluded_terms: set[str] = field(default_factory=set)
     excluded: list[re.Pattern] = field(default_factory=list)
 
     def __bool__(self) -> bool:
-        return bool(self.required or self.excluded_terms or self.excluded)
+        return bool(self.requires or self.excluded_terms or self.excluded)
 
-    def exclude(self, kind: str, value: str) -> None:
-        """Exclude a word (by its stem), a phrase or a regex, as written in a query."""
-        if kind == "regex":
-            self.excluded.append(compile_pattern(value))
-        elif kind == "phrase":
-            if value.split():
-                self.excluded.append(phrase_pattern(value))
-        else:
-            stems = tokenize(value)
-            if len(stems) == 1:
-                self.excluded_terms.add(stems[0])
-            elif value.strip("-"):  # a stopword or a hyphenated compound: match it as written
-                self.excluded.append(re.compile(rf"(?<!\w){re.escape(value.strip('-'))}(?!\w)", re.IGNORECASE))
+    @property
+    def requires(self) -> bool:
+        return bool(self.required_terms or self.required)
 
     def allowed(self, snapshot: Snapshot, rows=None) -> np.ndarray:
         """Which of `rows` (default: every passage) pass, as a boolean array aligned with them."""
         rows = np.arange(len(snapshot)) if rows is None else np.asarray(rows, np.int64)
         ok = np.ones(len(rows), bool)
-        if self.excluded_terms:
-            out = np.zeros(len(snapshot), bool)
-            for term in self.excluded_terms:
-                tid = snapshot.term_id(term)
-                if tid is not None:
-                    out[snapshot.bm25.matrix[:, tid].indices] = True
-            ok &= ~out[rows]
+
+        def containing(term: str) -> np.ndarray:
+            has = np.zeros(len(snapshot), bool)
+            tid = snapshot.term_id(term)
+            if tid is not None:
+                has[snapshot.bm25.matrix[:, tid].indices] = True
+            return has[rows]
+
+        for term in self.required_terms:
+            ok &= containing(term)
+        for term in self.excluded_terms:
+            ok &= ~containing(term)
         if self.required or self.excluded:
             for i in np.flatnonzero(ok):
                 text = snapshot.passages[rows[i]].text
@@ -147,29 +187,50 @@ class Filters:
         return ok
 
 
-def exclusion_filters(entries: list[str]) -> Filters:
-    """Filters for a list of things never to show, each written as in a query: word, "phrase", /regex/."""
-    filters = Filters()
-    for entry in entries:
-        for negated, kind, value in split_query(entry.strip().lstrip("-")):
-            filters.exclude(kind, value)
-    return filters
+@dataclass
+class Steering:
+    """What a list of clauses asks for, sorted by how each part is used."""
+
+    words: Counter = field(default_factory=Counter)  # stems to rank by (prefer and require), with counts
+    surfaces: dict = field(default_factory=dict)  # stem -> the word as written
+    patterns: list[re.Pattern] = field(default_factory=list)  # phrases and regexes to rank by
+    filters: Filters = field(default_factory=Filters)
+    text: str = ""  # what the meaning side embeds: the words and phrases to prefer or require
 
 
-def split_query(query: str) -> list[tuple[bool, str, str]]:
-    """(negated, kind, value) per token; kind is "word", "phrase", "regex" or "partial" (a regex
-    still being typed, which is ignored)."""
-    out = []
-    for m in TOKEN.finditer(query):
-        negated, phrase, regex, partial, word = m.groups()
-        if phrase is not None:
-            out.append((bool(negated), "phrase", phrase))
-        elif regex is not None:
-            out.append((bool(negated), "regex", regex))
-        elif partial is not None:
-            out.append((bool(negated), "partial", partial))
-        elif word and word != "-":
-            out.append((bool(negated), "word", word))
+def steering(clauses: list[Clause]) -> Steering:
+    """Compile clauses (raises QueryError for an invalid regex)."""
+    out, text = Steering(), []
+    for c in clauses:
+        if c.kind == "partial":
+            continue
+        stems = c.stems()
+        if c.op == NEVER:
+            if c.kind == "word" and len(stems) == 1:
+                out.filters.excluded_terms.add(stems[0])
+            elif (p := c.pattern()) is not None:
+                out.filters.excluded.append(p)
+            continue
+        if c.kind == "word":
+            for stem, surface in tokenize_with_surface(c.value):
+                out.words[stem] += 1
+                out.surfaces.setdefault(stem, surface)
+            text.append(c.value)
+            if c.op == REQUIRE:
+                if len(stems) == 1:
+                    out.filters.required_terms.add(stems[0])
+                elif (p := c.pattern()) is not None:
+                    out.filters.required.append(p)
+            continue
+        p = c.pattern()
+        if p is None:
+            continue
+        out.patterns.append(p)
+        if c.op == REQUIRE:
+            out.filters.required.append(p)
+        if c.kind == "phrase":
+            text.append(c.value)
+    out.text = " ".join(text)
     return out
 
 
@@ -179,57 +240,48 @@ class Query:
     weights: list[float]
     terms: set[str]  # for highlighting
     filters: Filters
-    text: str  # what the meaning side embeds: the positive words and phrases
-    highlight: list[re.Pattern] = field(default_factory=list)  # required phrases and patterns
-
-
-def _norm(s: str) -> str:
-    return " ".join(s.lower().split())
+    text: str  # what the meaning side embeds
+    patterns: list[re.Pattern] = field(default_factory=list)  # phrases and regexes to rank by
+    highlight: list[re.Pattern] = field(default_factory=list)
 
 
 def expand_prefix(snapshot: Snapshot, prefix: str, limit: int = MAX_EXPANSIONS) -> list[str]:
     """Corpus terms starting with `prefix`, most common first."""
     terms = snapshot.sorted_terms
     lo = bisect.bisect_left(terms, prefix)
-    hi = bisect.bisect_left(terms, prefix + "\uffff")
+    hi = bisect.bisect_left(terms, prefix + "￿")
     found = terms[lo:hi]
     df = snapshot.bm25.doc_freq
     return sorted(found, key=lambda t: -df[snapshot.term_id(t)])[:limit]
 
 
 def parse_query(snapshot: Snapshot, query: str) -> Query:
-    tokens = split_query(query)
-    filters = Filters()
-    positive: list[str] = []  # words and phrases, in order: the BM25 and meaning query
-    for negated, kind, value in tokens:
-        if kind == "partial":
-            continue
-        if negated:
-            filters.exclude(kind, value)
-        elif kind == "phrase":
-            if value.split():
-                filters.required.append(phrase_pattern(value))
-            positive.append(value)
-        elif kind == "regex":
-            filters.required.append(compile_pattern(value))
-        else:
-            positive.append(value)
-
-    last = tokens[-1] if tokens else None
-    still_typing = bool(query) and not query[-1].isspace() and last is not None and last[:2] == (False, "word")
-    pairs = tokenize_with_surface(" ".join(positive))
+    clauses = split_query(query)
+    steer = steering(clauses)
     weights: dict[int, float] = {}
     terms: set[str] = set()
-    for i, (term, surface) in enumerate(pairs):
-        tid = snapshot.term_id(term)
+    for stem, count in steer.words.items():
+        tid = snapshot.term_id(stem)
         if tid is not None:
-            weights[tid] = weights.get(tid, 0.0) + 1.0
-            terms.add(term)
-        elif still_typing and i == len(pairs) - 1 and len(surface) >= MIN_PREFIX:
-            for t in expand_prefix(snapshot, surface):
+            weights[tid] = float(count)
+            terms.add(stem)
+    last = clauses[-1] if clauses else None
+    if query and not query[-1].isspace() and last is not None and last.kind == "word" and last.op != NEVER:
+        pairs = tokenize_with_surface(last.value)
+        if pairs and snapshot.term_id(pairs[-1][0]) is None and len(pairs[-1][1]) >= MIN_PREFIX:
+            for t in expand_prefix(snapshot, pairs[-1][1]):  # a partly typed last word
                 weights.setdefault(snapshot.term_id(t), 1.0)
                 terms.add(t)
-    return Query(list(weights), list(weights.values()), terms, filters, " ".join(positive), list(filters.required))
+    highlight = steer.patterns + [p for p in steer.filters.required if p not in steer.patterns]
+    return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, highlight)
+
+
+def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns, pattern_weight: float = 1.0) -> np.ndarray:
+    """BM25 for weighted terms, plus each phrase or regex scored as one more term."""
+    scores = bm25.scores(term_ids, weights)
+    for p in patterns:
+        scores = scores + pattern_weight * bm25.pattern_scores(snapshot.pattern_counts(p))
+    return scores
 
 
 def top_rows(scores: np.ndarray, k: int, positive: bool = False) -> np.ndarray:
@@ -255,11 +307,11 @@ def search(
     if not len(snapshot) or not query.strip():
         return []
     q = parse_query(snapshot, query)
-    if not q.term_ids and not q.filters.required:
+    if not q.term_ids and not q.patterns and not q.filters.requires:
         return []  # only exclusions, or a regex still being typed: nothing to look for
     allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)
-    lexical = snapshot.bm25_for(config.k1, config.b).scores(q.term_ids, q.weights)
-    lexical = np.where(allowed, lexical, 0.0)
+    bm25 = snapshot.bm25_for(config.k1, config.b)
+    lexical = np.where(allowed, lexical_scores(snapshot, bm25, q.term_ids, q.weights, q.patterns), 0.0)
 
     if mode == "hybrid" and q.text.strip() and embedder is not None and snapshot.has_vector.any():
         semantic = snapshot.vectors @ embedder.embed([q.text], cache=True)[0]
@@ -281,7 +333,7 @@ def search(
         rows = top_rows(lexical, len(lexical), positive=True)
         ranked = [(int(r), float(lexical[r])) for r in rows]
         why = lambda row: {"bm25": float(lexical[row])}
-    if q.filters.required:  # passages that match the phrases or patterns without any of the words
+    if q.filters.requires:  # passages that match every + clause, but none of the others
         seen = {r for r, _ in ranked}
         ranked += [(int(r), 0.0) for r in np.flatnonzero(allowed) if r not in seen]
 

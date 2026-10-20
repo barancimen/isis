@@ -1,6 +1,6 @@
 import pytest
 
-from isis.engine.search import QueryError, exclusion_filters, split_query
+from isis.engine.search import QueryError, split_query, steering
 
 
 def paths(hits):
@@ -8,17 +8,29 @@ def paths(hits):
 
 
 def test_query_tokens():
-    assert split_query('whale -ship "white whale" -"sperm whale" /cap\\w+/ -/ahab/ /typ') == [
-        (False, "word", "whale"),
-        (True, "word", "ship"),
-        (False, "phrase", "white whale"),
-        (True, "phrase", "sperm whale"),
-        (False, "regex", "cap\\w+"),
-        (True, "regex", "ahab"),
-        (False, "partial", "/typ"),
+    clauses = split_query('whale +ship -"sperm whale" /cap\\w+/ +/x/ -/ahab/ /typ')
+    assert [(c.op, c.kind, c.value) for c in clauses] == [
+        ("", "word", "whale"),
+        ("+", "word", "ship"),
+        ("-", "phrase", "sperm whale"),
+        ("", "regex", "cap\\w+"),
+        ("+", "regex", "x"),
+        ("-", "regex", "ahab"),
+        ("", "partial", "/typ"),
     ]
-    assert split_query('"half typed phrase') == [(False, "phrase", "half typed phrase")]
-    assert split_query("well-known -") == [(False, "word", "well-known")]
+    assert " ".join(map(str, clauses[:-1])) == 'whale +ship -"sperm whale" /cap\\w+/ +/x/ -/ahab/'
+    assert [str(c) for c in split_query('"half typed phrase')] == ['"half typed phrase"']
+    assert [str(c) for c in split_query("well-known - +")] == ["well-known"]
+
+
+def test_prefer_require_and_never(engine):
+    assert paths(engine.search('"white whale"')) == ["ships/pequod.md"]  # a phrase alone: exact matches only
+    hits = engine.search("whale /white/")  # prefer: matches first, the rest still found
+    assert "white whale" in hits[0].text and len(hits) == 4
+    assert [h.text for h in engine.search("whale +/white/")] == [hits[0].text]  # require
+    assert {h.path for h in engine.search("+whale")} == {"whales.md", "ships/pequod.md"}
+    assert all("Ambergris" not in h.text for h in engine.search("+whale -ambergris"))
+    assert engine.search("+whale +finch") == []
 
 
 def test_regex_must_match_and_ranks_with_the_words(engine):
@@ -46,12 +58,13 @@ def test_invalid_patterns_are_reported(engine):
     with pytest.raises(QueryError):
         engine.search("/(unclosed/")
     with pytest.raises(QueryError):
-        exclusion_filters(["/[a-/"])
+        steering(split_query("-/[a-/"))
 
 
-def test_exclusion_lists(engine):
-    f = exclusion_filters(["Whales", '"white whale"', "/beak/", "of"])
-    assert f.excluded_terms == {"whale"} and len(f.excluded) == 3
-    texts = [p.text for p in engine.snapshot.passages]
-    assert all(not ok for ok in f.allowed(engine.snapshot))  # every passage has one of them
-    assert any("finches" in t.lower() for t in texts)
+def test_steering_sorts_clauses_by_use():
+    steer = steering(split_query('Whales +harpoon "white whale" +/beak/ -of -squid -/Ahab/'))
+    assert dict(steer.words) == {"whale": 1, "harpoon": 1}
+    assert [p.pattern for p in steer.patterns] == [r"white\s+whale", "beak"]
+    assert steer.filters.required_terms == {"harpoon"} and [p.pattern for p in steer.filters.required] == ["beak"]
+    assert steer.filters.excluded_terms == {"squid"} and len(steer.filters.excluded) == 2  # "of" is a stopword
+    assert steer.text == "Whales harpoon white whale"
