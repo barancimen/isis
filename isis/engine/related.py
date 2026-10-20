@@ -108,11 +108,12 @@ class RelatedConfig:
         help="A passage this similar to a paragraph of the task counts as already collected.",
     )
     negative_weight: float = tunable(
-        0.5, label="Dismissal push", group=FILTER, min=0.0, max=2.0, step=0.1,
-        help="How strongly passages similar to ones you dismissed are pushed down.",
+        0.0, label="Dismissal push", group=FILTER, min=0.0, max=2.0, step=0.1,
+        help="How strongly passages similar to ones you dismissed are pushed down. Off by default: what you "
+        "dismiss is usually still on topic, so pushing away from it pushed relevant passages down too.",
     )
     avoid_z: float = tunable(
-        3.0, label="Avoid: similarity", group=FILTER, min=0.5, max=6.0, step=0.1,
+        3.5, label="Avoid: similarity", group=FILTER, min=0.5, max=6.0, step=0.1,
         help="Passages you avoid (⊘) also hide every passage at least this similar to them (z-score). "
         "Lower hides more.",
     )

@@ -535,7 +535,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
   };
   const actions = h("span", { class: "hit-actions" },
     h("button", { class: "add", title: "Add this passage to the task, at its cursor", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
-    lane && h("button", { title: "Not useful: hide it and steer away from it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
+    lane && h("button", { title: "Not useful: hide it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
     lane && h("button", { class: "avoid", title: "Avoid: hide it and every passage like it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
@@ -747,7 +747,7 @@ function renderFeedback(prefs, terms, lanes) {
         "Nothing yet. The passages you add (+), dismiss (×) or avoid (⊘) here, and the words you pin, ban or exclude, are remembered for this task, whatever its text."),
       dismissed.length > 0 && [
         h("div", { class: "tune-group" }, "Dismissed and avoided passages"),
-        h("p", { class: "feedback-note" }, "Never suggested again, and passages like them rank lower (Parameters › Dismissal push). Passages like an avoided one are hidden (Parameters › Avoid: similarity)."),
+        h("p", { class: "feedback-note" }, "Never suggested again. Passages like an avoided one are hidden too (Parameters › Avoid: similarity), and Parameters › Dismissal push can also rank passages like dismissed ones lower."),
         h("ul", { class: "feedback-list" }, dismissed),
       ],
       excluded.length > 0 && [
