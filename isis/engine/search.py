@@ -34,7 +34,6 @@ TOKEN = re.compile(r"""([-+]?)(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(
 PREFER, REQUIRE, NEVER = "", "+", "-"
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
-SNIPPET_LINES = 8  # passage lines shown per hit, centred on the first match
 
 KEYWORDS = "Keywords (BM25)"
 FUSION = "Fusion (when 'meaning' is ticked)"
@@ -89,6 +88,7 @@ class Hit:
     text: str
     snippet: list[SnippetLine]
     why: dict = field(default_factory=dict)
+    marks: list[tuple[int, int, int]] = field(default_factory=list)  # (line, start, end) of every highlight in the passage
 
 
 
@@ -403,17 +403,19 @@ def make_hit(
         if n is not None and (spans := _spans(lines[n], terms, patterns)):
             above, match = n, (n, spans[0][0], spans[0][1] - spans[0][0])
 
-    core_start = max(start, min((match[0] if match and above is None else start) - 2, end - SNIPPET_LINES + 1))
-    core_end = min(end, core_start + SNIPPET_LINES - 1)
-    first = max(0, core_start - context_lines)
+    # The whole passage (what + adds to the task, and what the reader highlights), with a few
+    # dimmed lines of context around it.
+    first = max(0, start - context_lines)
     snippet = []
     if above is not None and above < first:  # show the heading, then the passage
         snippet += [SnippetLine(above, lines[above], False, _spans(lines[above], terms, patterns)),
                     SnippetLine(above, "", False, [])]
-    for n in range(first, min(last_line, core_end + context_lines) + 1):
+    for n in range(first, min(last_line, end + context_lines) + 1):
         inside = start <= n <= end
         marks = _spans(lines[n], terms, patterns) if inside or n == above else []
         snippet.append(SnippetLine(n, lines[n], inside, marks))
     focus = match[0] if match else start
+    marks = [(n, s, e) for n in ([above] if above is not None else []) + list(range(start, end + 1))
+             for s, e in _spans(lines[n], terms, patterns)]
 
-    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why or {})
+    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why or {}, marks)

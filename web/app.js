@@ -93,7 +93,7 @@ const theme = EditorView.theme({
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selection) !important" },
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   ".cm-placeholder": { color: "var(--faint)", fontStyle: "italic" },
-  ".cm-hit-line": { backgroundColor: "var(--hit-line)" },
+  ".cm-hit-range": { backgroundColor: "var(--hit-line)" },
   ".cm-soft-break": { whiteSpace: "normal" }, // a joined line break: no stray space at the start of a wrapped line
   ".cm-hit-match": { backgroundColor: "var(--mark)", borderRadius: "2px" },
   ".cm-just-added": { backgroundColor: "var(--added)", transition: "background-color 1s" },
@@ -468,11 +468,19 @@ async function openFile(path, location = null) {
   const to = Math.min(from + (location.len ?? 0), line.to);
   const decos = [];
   if (location.start !== undefined) {
-    for (let n = location.start + 1; n <= Math.min(location.end + 1, doc.lines); n++) {
-      decos.push(Decoration.line({ class: "cm-hit-line" }).range(doc.line(n).from));
-    }
+    // The passage itself, exactly: it may start or end inside a paragraph, which flows as one line.
+    const start = doc.line(Math.min(location.start + 1, doc.lines)).from;
+    const end = doc.line(Math.min(location.end + 1, doc.lines)).to;
+    if (end > start) decos.push(Decoration.mark({ class: "cm-hit-range" }).range(start, end));
   }
-  if (to > from) decos.push(Decoration.mark({ class: "cm-hit-match" }).range(from, to));
+  const words = location.marks ?? (to > from ? [[location.line, location.ch, location.len + location.ch]] : []);
+  for (const [n, s, e] of words) {
+    if (n >= doc.lines) continue;
+    const l = doc.line(n + 1);
+    const a = l.from + Math.min(s, l.length);
+    const b = l.from + Math.min(e, l.length);
+    if (b > a) decos.push(Decoration.mark({ class: "cm-hit-match" }).range(a, b));
+  }
   reader.dispatch({
     selection: EditorSelection.cursor(from),
     effects: [hitSlot.set.of(Decoration.set(decos, true)), EditorView.scrollIntoView(from, { y: "center" })],
@@ -579,6 +587,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
       len: hit.match ? hit.match[2] : 0,
       start: hit.start_line,
       end: hit.end_line,
+      marks: hit.marks,
     }).catch(fail);
   };
   const actions = h("span", { class: "hit-actions" },

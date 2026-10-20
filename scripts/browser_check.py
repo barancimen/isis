@@ -30,6 +30,22 @@ WHALES, ISLANDS = f"e2e-whales-{STAMP}", f"e2e-islands-{STAMP}"
 STEPS = [0]
 
 
+def opens_as_shown(page, card) -> str:
+    """Click a result card; the reader must highlight exactly the passage text the card shows
+    (its dimmed context excluded), and every word the card marks. Returns the passage's start."""
+    squash = lambda t: re.sub(r"\s+", "", t)
+    shown = card.evaluate("c => [...c.querySelectorAll('.hit-body .line:not(.ctx)')].map(l => l.textContent).join(' ')")
+    marked = card.locator(".hit-body .line:not(.ctx) mark").count()
+    path = card.locator(".hit-loc").inner_text().rsplit(":", 1)[0]
+    card.locator(".hit-body").click()
+    expect(page.locator("#reader-path")).to_have_text(path)  # the highlight is set as the file appears
+    expect(page.locator("#reader-editor .cm-hit-range").first).to_be_visible()
+    highlighted = page.evaluate("() => [...document.querySelectorAll('#reader-editor .cm-hit-range')].map(e => e.textContent).join(' ')")
+    assert squash(highlighted) == squash(shown), f"reader: ...{highlighted[-80:]!r}\ncard:   ...{shown[-80:]!r}"
+    assert page.locator("#reader-editor .cm-hit-match").count() == marked, (page.locator("#reader-editor .cm-hit-match").count(), marked)
+    return shown[:40]
+
+
 def step(message):
     STEPS[0] += 1
     print(f"{STEPS[0]:>2}. {message}", flush=True)
@@ -73,10 +89,13 @@ def main() -> None:
         page.fill("#search-input", '"white whale"')
         expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
         location = page.locator("#search-results .hit .hit-loc").first.inner_text()
-        page.locator("#search-results .hit .hit-body").first.click()
+        opens_as_shown(page, page.locator("#search-results .hit").first)
         expect(page.locator("#reader-path")).to_have_text(location.rsplit(":", 1)[0])
-        expect(page.locator("#reader-editor .cm-hit-match").first).to_be_visible()
-        step(f"search hit opened at its match: {location}")
+        page.fill("#search-input", "whale ship")  # long passages that start and end inside paragraphs
+        expect(page.locator("#search-results .hit").nth(5)).to_be_visible(timeout=10000)
+        for i in range(6):
+            opens_as_shown(page, page.locator("#search-results .hit").nth(i))
+        step(f"search hits open at their match, highlighted from the passage's first to its last word: {location}")
         shot(page, "search.png")
 
         searches: list[str] = []
@@ -127,7 +146,9 @@ def main() -> None:
         expect(page.locator("#related-lanes .lane")).to_have_count(4, timeout=30000)
         expect(page.locator("#related-lanes .hit").first).to_be_visible(timeout=30000)
         counts = page.evaluate("""() => [...document.querySelectorAll('#related-lanes .lane h3')].map(h => h.innerText.replace(/\\n/g, ' '))""")
-        step(f"related lanes: {counts}")
+        for card in page.locator("#related-lanes .hit").all()[:6]:
+            opens_as_shown(page, card)
+        step(f"related lanes: {counts}; suggestions open highlighted exactly as their cards show them")
         shot(page, "related.png")
 
         page.locator("#related-tune > summary").click()

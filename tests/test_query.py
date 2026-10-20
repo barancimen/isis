@@ -80,3 +80,9 @@ def test_a_match_in_the_heading_is_shown_and_opened_there(engine):
     (hit,) = [h for h in engine.search('"The Pequod"') if "Ahab" in h.text]  # its body never names the ship
     assert hit.match[0] == 0 and hit.focus_line == 0  # the heading line of ships/pequod.md
     assert hit.snippet[0].text == "# The Pequod" and hit.snippet[0].marks
+
+
+def test_hits_list_every_highlight_in_the_passage(engine):
+    (hit,) = engine.search("+ahab captain")
+    words = [hit.text.split("\n")[n - hit.start_line][s:e] for n, s, e in hit.marks]
+    assert sorted(words) == ["Ahab", "captain"]
