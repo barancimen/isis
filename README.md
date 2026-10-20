@@ -41,7 +41,7 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 |---|---|
 | **Tasks** (left column) | **+** creates a task. Click a tab to switch; hover for rename ✎ and delete × (deleted tasks go to `_tasks/.trash/`). Each task keeps its own cursor and undo history while the page is open. |
 | **Files** | Filter and open any file in the reader. |
-| **Search** (Ctrl/⌘+K) | Words rank by BM25; `"quoted phrases"` must appear verbatim; a half-typed last word matches the terms it starts. Tick *meaning* to fuse in embedding similarity. Click a hit to open it at the match; **+** adds the passage to the task. |
+| **Search** (Ctrl/⌘+K) | Words rank by BM25; `"quoted phrases"` must appear verbatim; a half-typed last word matches the terms it starts. Tick *meaning* to blend in embedding similarity; each hit then shows its rank by keywords and by meaning. Click a hit to open it at the match; **+** adds the passage to the task. |
 | **Reader** | Select text and press **Ctrl/⌘+Enter** (or *+ Add to task*). It goes in at the task's cursor, as its own paragraph. |
 | **Related** | Suggestions for the whole task document, refreshed when you pause typing (moving the cursor or selecting text changes nothing). The chips are the keywords taken from the task: click to pin one, × to ban it. On a suggestion, **+** adds it and × dismisses it. Both teach the panel which lanes you find useful, and a dismissed passage also pushes similar ones down. Hover a suggestion for its scores. |
 

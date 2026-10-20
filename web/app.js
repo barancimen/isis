@@ -503,6 +503,15 @@ const WHY_LABELS = {
   cosine: (v) => `cosine ${v.toFixed(2)}`,
 };
 
+// For search hits found with "meaning" ticked: where each signal ranked the passage.
+function describeSignals(why) {
+  if (!("meaning_rank" in why)) return "";
+  return [
+    why.keyword_rank ? `keywords #${why.keyword_rank}` : "not a top keyword match",
+    why.meaning_rank ? `meaning #${why.meaning_rank}` : "not a top meaning match",
+  ].join(" · ");
+}
+
 function describeWhy(why) {
   return Object.entries(why)
     .filter(([k, v]) => v !== null && WHY_LABELS[k])
@@ -526,7 +535,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     h("button", { class: "add", title: "Add this passage to the task, at its cursor", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
     lane && h("button", { title: "Not useful: hide it and steer away from it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
   );
-  const why = lane ? describeWhy(hit.why) : "";
+  const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
   return h("article", { class: `hit${isNew ? " is-new" : ""}`, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
     h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hit.heading || file), actions),
     h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
@@ -550,7 +559,8 @@ const runSearch = debounce(async () => {
     const result = await api("GET", `/api/search?q=${enc(q)}&mode=${mode}&limit=50`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
-    $("#search-status").textContent = n ? `${n}${n === 50 ? "+" : ""} passages · ${result.ms} ms` : "No matches.";
+    const how = mode === "hybrid" ? " by keywords and meaning" : "";
+    $("#search-status").textContent = n ? `${n}${n === 50 ? "+" : ""} passages${how} · ${result.ms} ms` : "No matches.";
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
   } catch (error) {
     fail(error);

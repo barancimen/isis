@@ -45,7 +45,14 @@ def test_quoted_phrases_must_appear_verbatim(engine):
 def test_hybrid_mode_fuses_both_signals(engine):
     hits = engine.search("whale", mode="hybrid")
     assert {"whales.md", "ships/pequod.md"} <= set(paths(hits))
-    assert {"bm25", "cosine"} <= set(hits[0].why)
+    assert {"bm25", "cosine", "keyword_rank", "meaning_rank"} <= set(hits[0].why)
+
+
+def test_hybrid_mode_keeps_the_best_of_each_signal(engine):
+    hits = engine.search("finches beaks", mode="hybrid", limit=3)
+    assert hits[0].path == "finches.md" and hits[0].why["keyword_rank"] == 1 and hits[0].why["meaning_rank"] == 1
+    meaning_only = [h for h in engine.search("finches beaks", mode="hybrid") if h.why["keyword_rank"] is None]
+    assert meaning_only and all(h.why["meaning_rank"] for h in meaning_only)  # found by meaning alone, and labelled so
 
 
 def test_refresh_picks_up_edits_new_files_and_deletions(engine, corpus):

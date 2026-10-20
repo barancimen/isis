@@ -21,7 +21,9 @@ QUOTED = re.compile(r'"([^"]+)"')
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 CANDIDATES = 300  # per signal, before fusion
-RRF_K = 60
+# Reciprocal-rank fusion constant. Small, so the best results of each signal stay near the top;
+# with the textbook 60, passages that are middling in both lists push them out.
+RRF_K = 10
 SNIPPET_LINES = 8  # passage lines shown per hit, centred on the first match
 
 
@@ -114,14 +116,19 @@ def search(
     if mode == "hybrid" and embedder is not None and snapshot.has_vector.any():
         semantic = snapshot.vectors @ embedder.embed([query], cache=True)[0]
         semantic[~snapshot.has_vector] = -np.inf
-        lex_rows = top_rows(lexical, CANDIDATES, positive=True)
-        sem_rows = top_rows(semantic, CANDIDATES)
+        lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, CANDIDATES, positive=True))}
+        sem_rank = {int(row): rank for rank, row in enumerate(top_rows(semantic, CANDIDATES))}
         fused: dict[int, float] = {}
-        for rows in (lex_rows, sem_rows):
-            for rank, row in enumerate(rows):
-                fused[int(row)] = fused.get(int(row), 0.0) + 1.0 / (RRF_K + rank + 1)
+        for ranks in (lex_rank, sem_rank):
+            for row, rank in ranks.items():
+                fused[row] = fused.get(row, 0.0) + 1.0 / (RRF_K + rank + 1)
         ranked = sorted(fused.items(), key=lambda kv: -kv[1])
-        why = lambda row: {"bm25": float(lexical[row]), "cosine": float(semantic[row])}
+        why = lambda row: {
+            "bm25": float(lexical[row]),
+            "cosine": float(semantic[row]),
+            "keyword_rank": lex_rank[row] + 1 if row in lex_rank else None,  # None: not among the top keyword hits
+            "meaning_rank": sem_rank[row] + 1 if row in sem_rank else None,
+        }
     else:
         rows = top_rows(lexical, len(lexical), positive=True)
         ranked = [(int(r), float(lexical[r])) for r in rows]
