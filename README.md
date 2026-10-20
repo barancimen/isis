@@ -1,8 +1,6 @@
 # isis
 
-*A machine to reassemble the corpus.*
-
-A local web app for working through a corpus of markdown files:
+A vibe-coded local web app for working through a corpus of markdown files:
 
 - **Read** any file, and **collect** selections into *task documents*: one markdown file per task, switched with vertical tabs.
 - **Insert at the cursor.** Each selection goes in at the task document's cursor, as its own paragraph, even while you are editing that document. The task saves itself to disk.
