@@ -39,6 +39,7 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 
 | | |
 |---|---|
+| **Layout** | Drag the border right of the task list, the side panel or the reader to resize it (or focus it and use the arrow keys); double-click a border to reset it. Widths are kept in this browser. |
 | **Tasks** (left column) | **+** creates a task. Click a tab to switch; hover for rename ✎ and delete × (deleted tasks go to `_tasks/.trash/`). Each task keeps its own cursor and undo history while the page is open. |
 | **Files** | Filter and open any file in the reader. |
 | **Search** (Ctrl/⌘+K) | Words rank by BM25, and a half-typed last word matches the terms it starts. `"a phrase"` and `/regex/` must match (a regex is case-insensitive unless it has a capital letter). `-word`, `-"a phrase"` and `-/regex/` must not; `-whale` also drops "whales" and "whaling". Tick *meaning* to blend in embedding similarity; each hit then shows its rank by keywords and by meaning. The phrases, patterns and exclusions filter the corpus before anything is ranked, so meaning never brings back what they rule out. **Parameters** opens sliders for BM25 and the fusion. Click a hit to open it at the match; **+** adds the passage to the task. |
@@ -73,6 +74,8 @@ The defaults were calibrated on the sample corpus with bge-micro-v2, against bli
 
 **In the page:** open **Parameters** in the Search or Related panel. Every slider re-runs the panel as you move it; hover one for what it does and its default. Your settings stay in this browser only and are sent with each request, so the server's defaults never change. The drawer also shows the same settings as Python (`SearchConfig(...)` or `RelatedConfig(...)`) to paste into the notebook.
 
+**Against judgments:** [`CALIBRATE.md`](CALIBRATE.md) explains how the defaults were measured against about 1,800 graded results, and how to redo it with `calibration/` (for example after changing the embedding model).
+
 **In a notebook:** [`notebooks/explore.ipynb`](notebooks/explore.ipynb) walks through it: typed search, `related()` with different configs and preferences, the z-score distributions, and a **hold-out evaluation**. That evaluation (`isis.engine.evaluate`) hides some of a task's excerpts and measures how many come back, and through which lane. `compare()` runs it over several tasks and configs.
 
 ```python
@@ -102,6 +105,7 @@ isis/server/   app.py       FastAPI app and file watcher; tasks.py: task files a
 isis/cli.py    `isis index` / `isis serve`
 web/           index.html, app.js, style.css, insert.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
 scripts/       fetch_sample_corpus.py, browser_check.py
+calibration/   judged queries and tasks, and the scripts that score settings against them (see CALIBRATE.md)
 ```
 
 ## Development

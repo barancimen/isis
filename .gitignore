@@ -220,3 +220,4 @@ __marimo__/
 # isis: index caches and the downloadable sample corpus
 .isis/
 sample_corpus/
+calibration/.cache/
