@@ -23,6 +23,7 @@ from typing import Callable
 
 import numpy as np
 
+from .chunker import HEADING
 from .index import Snapshot
 from .params import tunable
 from .text import term_spans, tokenize, tokenize_with_surface
@@ -366,6 +367,15 @@ def _spans(text: str, terms: set[str], patterns: list[re.Pattern]) -> list[tuple
     return merged
 
 
+def heading_line(lines: list[str], start: int, heading: str) -> int | None:
+    """The line of the heading a passage sits under: the nearest heading above it."""
+    for n in range(min(start, len(lines)) - 1, -1, -1):
+        m = HEADING.match(lines[n])
+        if m:
+            return n if m.group(1) == heading else None
+    return None
+
+
 def make_hit(
     snapshot: Snapshot,
     row: int,
@@ -387,13 +397,23 @@ def make_hit(
         if spans:
             match = (n, spans[0][0], spans[0][1] - spans[0][0])
             break
-    focus = match[0] if match else start
+    above = None  # a heading line that holds the only match (phrases and regexes see headings)
+    if match is None and p.heading:
+        n = heading_line(lines, start, p.heading)
+        if n is not None and (spans := _spans(lines[n], terms, patterns)):
+            above, match = n, (n, spans[0][0], spans[0][1] - spans[0][0])
 
-    core_start = max(start, min(focus - 2, end - SNIPPET_LINES + 1))
+    core_start = max(start, min((match[0] if match and above is None else start) - 2, end - SNIPPET_LINES + 1))
     core_end = min(end, core_start + SNIPPET_LINES - 1)
+    first = max(0, core_start - context_lines)
     snippet = []
-    for n in range(max(0, core_start - context_lines), min(last_line, core_end + context_lines) + 1):
+    if above is not None and above < first:  # show the heading, then the passage
+        snippet += [SnippetLine(above, lines[above], False, _spans(lines[above], terms, patterns)),
+                    SnippetLine(above, "", False, [])]
+    for n in range(first, min(last_line, core_end + context_lines) + 1):
         inside = start <= n <= end
-        snippet.append(SnippetLine(n, lines[n], inside, _spans(lines[n], terms, patterns) if inside else []))
+        marks = _spans(lines[n], terms, patterns) if inside or n == above else []
+        snippet.append(SnippetLine(n, lines[n], inside, marks))
+    focus = match[0] if match else start
 
     return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why or {})

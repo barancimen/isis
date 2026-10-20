@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import time
@@ -132,3 +133,37 @@ def test_paths_outside_the_corpus_are_refused(engine):
 def test_snapshot_vectors_are_normalised(engine):
     norms = np.linalg.norm(engine.snapshot.vectors, axis=1)
     assert np.allclose(norms, 1, atol=1e-2)
+
+
+def test_an_edit_re_embeds_only_the_changed_passages(corpus, tmp_path):
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
+    e.refresh()
+    before = {p.text: e.snapshot.vectors[i].copy() for i, p in enumerate(e.snapshot.passages)}
+    with open(corpus / "whales.md", "a") as f:
+        f.write("\nSperm whales sleep upright.\n")
+    stats = e.refresh()
+    assert (stats["changed"], stats["embedded"]) == (1, 1)
+    for i, p in enumerate(e.snapshot.passages):
+        if p.text in before:
+            assert np.allclose(e.snapshot.vectors[i], before[p.text], atol=1e-3)
+
+
+def test_a_failed_refresh_is_reported(corpus, tmp_path, monkeypatch):
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    monkeypatch.setattr(e.embedder, "embed", lambda texts, cache=False: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        e.refresh()
+    assert e.status.state == "error" and "ZeroDivisionError" in e.status.error
+    monkeypatch.undo()
+    e.refresh()
+    assert (e.status.state, e.status.error) == ("ready", "")
+
+
+def test_a_cache_with_missing_parts_is_rebuilt(corpus, tmp_path):
+    index = tmp_path / "index"
+    Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    meta = json.loads((index / "index.json").read_text())
+    del meta["vocab"]
+    (index / "index.json").write_text(json.dumps(meta))
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)  # no crash
+    assert e.refresh()["changed"] == 3

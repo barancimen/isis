@@ -31,6 +31,7 @@ pipeline can be taken apart and tuned from a notebook.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from collections import Counter, defaultdict
@@ -182,18 +183,45 @@ class TaskPrefs:
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "TaskPrefs":
-        data = data or {}
-        prefs = cls(**{k: data[k] for k in ("steer", "ignored", "dismissed", "feedback") if k in data})
+        """Preferences as saved. Values of the wrong type (a hand-edited file) are dropped one by
+        one rather than failing later; anything but an object raises ValueError."""
+        data = {} if data is None else data
+        if not isinstance(data, dict):
+            raise ValueError("task preferences must be a JSON object")
+        strings = lambda v: [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+        line = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
+        prefs = cls(
+            steer=data["steer"] if isinstance(data.get("steer"), str) else "",
+            ignored=strings(data.get("ignored")),
+            dismissed=[
+                {**d, "path": d.get("path") if isinstance(d.get("path"), str) else "",
+                 "start_line": line(d.get("start_line")), "end_line": line(d.get("end_line"))}
+                for d in (data.get("dismissed") if isinstance(data.get("dismissed"), list) else [])
+                if isinstance(d, dict) and isinstance(d.get("text"), str)
+            ],
+            feedback={
+                lane: [int(v[0]), int(v[1])]
+                for lane, v in (data.get("feedback") if isinstance(data.get("feedback"), dict) else {}).items()
+                if isinstance(v, list) and len(v) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in v)
+            },
+        )
         # Saved before the steer line: pinned terms become words to prefer, exclusions become
         # -clauses, and banned terms are what is now called ignored.
         if "steer" not in data and (data.get("pins") or data.get("excluded")):
-            prefs.steer = " ".join([*data.get("pins", []), *(f"-{e}" for e in data.get("excluded", []))])
+            prefs.steer = " ".join([*strings(data.get("pins")), *(f"-{e}" for e in strings(data.get("excluded")))])
         if "ignored" not in data and data.get("bans"):
-            prefs.ignored = list(data["bans"])
+            prefs.ignored = strings(data["bans"])
         return prefs
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    def summary(self, preview: int = 200) -> dict:
+        """What the page shows: as to_dict, but each dismissal carries an id and only the start
+        of its text. Hundreds of dismissed passages would otherwise travel with every refresh."""
+        out = self.to_dict()
+        out["dismissed"] = [{**d, "id": dismissal_id(d), "text": d["text"][:preview]} for d in self.dismissed]
+        return out
 
     # ---- the steer line ----
 
@@ -261,6 +289,12 @@ class TaskPrefs:
             entry = {"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line}
             self.dismissed.append({**entry, "avoid": True} if avoid else entry)
 
+    def restore_id(self, ident: str) -> None:
+        """restore() for the dismissal with this id (see summary())."""
+        for d in self.dismissed:
+            if dismissal_id(d) == ident:
+                return self.restore(d.get("path", ""), d["text"])
+
     def restore(self, path: str, text: str) -> None:
         """Undo the dismissals of a passage: it may come back, and its lanes lose those dismissals."""
         key = (path, _norm(text))
@@ -272,6 +306,11 @@ class TaskPrefs:
                 counts = self.feedback[d["lane"]]
                 counts[1] = max(counts[1] - 1, 0)
         self.dismissed = kept
+
+
+def dismissal_id(d: dict) -> str:
+    """A short stable name for a dismissed passage: its path and text, hashed."""
+    return hashlib.sha1(f"{d.get('path', '')}\0{_norm(d.get('text', ''))}".encode()).hexdigest()[:12]
 
 
 @dataclass

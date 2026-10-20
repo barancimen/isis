@@ -80,6 +80,7 @@ class FeedbackRequest(BaseModel):
     lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
     path: str = ""
     text: str = ""
+    id: str = ""  # restore: the dismissal's id from the preferences the page was given
     start_line: int | None = None
     end_line: int | None = None
 
@@ -215,16 +216,16 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             config=configure(RelatedConfig, body.params),
             seed=zlib.crc32(name.encode()),
         )
-        return {**plain(result), "prefs": prefs.to_dict()}
+        return {**plain(result), "prefs": prefs.summary()}
 
     @app.get("/api/tasks/{name}/prefs")
     def get_prefs(name: str):
-        return tasks.prefs(name).to_dict()
+        return tasks.prefs(name).summary()
 
     @app.delete("/api/tasks/{name}/prefs")
     def forget_prefs(name: str):
         tasks.forget_prefs(name)
-        return tasks.prefs(name).to_dict()
+        return tasks.prefs(name).summary()
 
     @app.put("/api/tasks/{name}/steer")
     def steer(name: str, body: SteerRequest):
@@ -233,28 +234,30 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
                 prefs.set_steer(body.text)
         except QueryError as e:
             raise HTTPException(400, str(e))
-        return prefs.to_dict()
+        return prefs.summary()
 
     @app.post("/api/tasks/{name}/terms")
     def terms(name: str, body: TermRequest):
         """Chip shortcuts: they edit the steer line (boost, unboost, exclude) or the ignored list."""
         with tasks.edit_prefs(name) as prefs:
             getattr(prefs, body.action)(body.term)
-        return prefs.to_dict()
+        return prefs.summary()
 
     @app.post("/api/tasks/{name}/feedback")
     def feedback(name: str, body: FeedbackRequest):
         if body.action != "restore" and not body.lane:
             raise HTTPException(400, "feedback needs the lane the passage was shown in")
         with tasks.edit_prefs(name) as prefs:
-            if body.action == "restore":
+            if body.action == "restore" and body.id:
+                prefs.restore_id(body.id)
+            elif body.action == "restore":
                 prefs.restore(body.path, body.text)
             elif body.action in ("dismiss", "avoid"):
                 prefs.dismiss(body.lane, body.path, body.text, body.start_line, body.end_line,
                               avoid=body.action == "avoid")
             else:
                 prefs.record(body.lane, added=True)
-        return prefs.to_dict()
+        return prefs.summary()
 
     app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
     return app

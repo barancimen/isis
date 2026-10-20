@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from isis.server.app import create_app
-from isis.server.tasks import TaskStore
+from isis.server.tasks import TaskError, TaskStore
 
 
 @pytest.fixture
@@ -74,7 +74,8 @@ def test_related_terms_and_feedback(client):
     dismissal = {"action": "dismiss", "lane": "core", "path": "whales.md", "text": "x", "start_line": 4, "end_line": 6}
     prefs = client.post("/api/tasks/t/feedback", json=dismissal).json()
     assert prefs["feedback"] == {"core": [0, 1]}
-    assert prefs["dismissed"] == [{"path": "whales.md", "text": "x", "lane": "core", "start_line": 4, "end_line": 6}]
+    (entry,) = prefs["dismissed"]
+    assert {k: v for k, v in entry.items() if k != "id"} == {"path": "whales.md", "text": "x", "lane": "core", "start_line": 4, "end_line": 6}
     assert client.get("/api/tasks/t/prefs").json() == prefs
     assert client.post("/api/tasks/t/feedback", json={"action": "add", "path": "whales.md"}).status_code == 400
 
@@ -88,6 +89,8 @@ def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     prefs = client.post("/api/tasks/t/feedback", json={"action": "restore", "path": "whales.md", "text": " X "}).json()
     assert [d["text"] for d in prefs["dismissed"]] == ["y"]
     assert prefs["feedback"] == {"hidden": [0, 1], "core": [1, 0]}
+    prefs = client.post("/api/tasks/t/feedback", json={"action": "restore", "id": prefs["dismissed"][0]["id"]}).json()
+    assert prefs["dismissed"] == [] and prefs["feedback"]["hidden"] == [0, 0]
 
     client.put("/api/tasks/t/steer", json={"text": "whale"})
     assert client.delete("/api/tasks/t/prefs").json() == {"steer": "", "ignored": [], "dismissed": [], "feedback": {}}
@@ -175,3 +178,88 @@ def test_allowed_hosts_from_the_command_line():
     assert allowed_hosts("0.0.0.0", []) == ["*"]
     assert allowed_hosts("0.0.0.0", ["notes.lan"]) == ["localhost", "127.0.0.1", "::1", "notes.lan"]
     assert allowed_hosts("192.168.1.5", []) == ["localhost", "127.0.0.1", "::1", "192.168.1.5"]
+
+
+def test_dismissed_texts_are_sent_as_previews(client):
+    client.post("/api/tasks", json={"name": "t"})
+    long = "whale " * 500
+    client.post("/api/tasks/t/feedback", json={"action": "dismiss", "lane": "core", "path": "whales.md", "text": long})
+    body = client.post("/api/tasks/t/related", json={"text": "The sperm whale."}).json()
+    assert len(body["prefs"]["dismissed"][0]["text"]) == 200
+    client.post("/api/tasks/t/feedback", json={"action": "restore", "id": body["prefs"]["dismissed"][0]["id"]})
+    assert client.get("/api/tasks/t/prefs").json()["dismissed"] == []
+
+
+def test_saves_wait_for_each_other_and_never_bring_back_a_deleted_task(corpus):
+    store = TaskStore(corpus / "_tasks")
+    store.create("T")
+    mtime = store.read("T")["mtime"]
+    outcomes = []
+
+    def save(text):
+        try:
+            store.write("T", text * 300_000, mtime)
+            outcomes.append("saved")
+        except Exception as e:
+            outcomes.append(type(e).__name__)
+
+    threads = [threading.Thread(target=save, args=(c,)) for c in "ab"]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(outcomes) == ["Conflict", "saved"]  # the second save saw the first one's change
+    assert not list((corpus / "_tasks").glob(".*.tmp"))
+
+    store.delete("T")
+    with pytest.raises(TaskError):
+        store.write("T", "late save", None)
+    assert not (corpus / "_tasks" / "T.md").exists()
+
+
+def test_renames_in_both_directions_do_not_deadlock(corpus):
+    store = TaskStore(corpus / "_tasks")
+    store.create("B")
+
+    def rename():
+        try:
+            store.rename("B", "A")
+        except TaskError:
+            pass
+
+    with store.lock("A"):  # a rename A -> B, half done, holds A
+        t = threading.Thread(target=rename, daemon=True)
+        t.start()
+        t.join(0.2)
+        assert t.is_alive()  # B -> A waits for A...
+        free = []
+
+        def check():
+            free.append(store.lock("B").acquire(timeout=1))
+            if free[-1]:
+                store.lock("B").release()
+
+        checker = threading.Thread(target=check)
+        checker.start()
+        checker.join()
+        assert free == [True]  # ...without holding B, which A -> B needs next
+    t.join(2)
+    assert not t.is_alive()
+
+
+def test_bad_preference_values_are_dropped_not_fatal(client, corpus):
+    client.post("/api/tasks", json={"name": "t"})
+    (corpus / "_tasks" / ".meta").mkdir(exist_ok=True)
+    (corpus / "_tasks" / ".meta" / "t.json").write_text(
+        '{"steer": 5, "ignored": "whale", "dismissed": ["x", {"text": "kept", "path": 3}], "feedback": {"core": 5, "gaps": [1, 2]}}')
+    prefs = client.get("/api/tasks/t/prefs").json()
+    assert (prefs["steer"], prefs["ignored"], prefs["feedback"]) == ("", [], {"gaps": [1, 2]})
+    assert [d["text"] for d in prefs["dismissed"]] == ["kept"]
+    assert client.post("/api/tasks/t/related", json={"text": "The sperm whale."}).status_code == 200
+
+
+def test_a_task_that_is_not_utf8_gives_a_clear_error(client, corpus):
+    client.post("/api/tasks", json={"name": "t"})
+    (corpus / "_tasks" / "t.md").write_bytes("caf\xe9".encode("latin-1"))
+    response = client.get("/api/tasks/t")
+    assert response.status_code == 422 and "UTF-8" in response.json()["detail"]

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -36,6 +37,20 @@ class Conflict(TaskError):
 
 def _mtime(path: Path) -> str:
     return str(path.stat().st_mtime_ns)  # a string: nanoseconds don't fit a JavaScript number
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: a temporary file of its own, flushed, then renamed."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 class TaskStore:
@@ -74,28 +89,41 @@ class TaskStore:
 
     def create(self, name: str) -> dict:
         self.folder.mkdir(parents=True, exist_ok=True)
-        path = self._path(name)
-        if path.exists():
-            raise TaskError(f"a task named {path.stem!r} already exists", 409)
-        path.write_text("", encoding="utf-8")
-        return self.read(path.stem)
+        with self.lock(name):
+            path = self._path(name)
+            if path.exists():
+                raise TaskError(f"a task named {path.stem!r} already exists", 409)
+            path.write_text("", encoding="utf-8")
+            return self.read(path.stem)
 
     def read(self, name: str) -> dict:
-        path = self._existing(name)
-        return {"name": path.stem, "content": path.read_text(encoding="utf-8"), "mtime": _mtime(path)}
+        with self.lock(name):
+            path = self._existing(name)
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                raise TaskError(f"{path.name} is not UTF-8 text; convert it to UTF-8 to open it here", 422)
+            return {"name": path.stem, "content": content, "mtime": _mtime(path)}
 
     def write(self, name: str, content: str, base_mtime: str | None = None) -> str:
-        """Save, unless the file changed on disk since `base_mtime` (then raise Conflict)."""
-        path = self._existing(name)
-        if base_mtime is not None and _mtime(path) != base_mtime:
-            raise Conflict(_mtime(path))
-        tmp = path.with_name(f".{path.name}.tmp")
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-        return _mtime(path)
+        """Save, unless the file changed on disk since `base_mtime` (then raise Conflict). The
+        check and the write happen under the task's lock, so a save can't overwrite another
+        save it hasn't seen, or bring back a task deleted meanwhile."""
+        with self.lock(name):
+            path = self._existing(name)
+            before = _mtime(path)
+            if base_mtime is not None and before != base_mtime:
+                raise Conflict(before)
+            _replace(path, content)
+            if int(_mtime(path)) <= int(before):
+                # File times move in ticks of a few ms: a save in the same tick would leave the
+                # time unchanged, and a second writer's stale save would pass the check.
+                os.utime(path, ns=(time.time_ns(), int(before) + 1))
+            return _mtime(path)
 
     def rename(self, name: str, new_name: str) -> dict:
-        with self.lock(name), self.lock(new_name):
+        first, second = sorted([self.clean(name), self.clean(new_name)])  # one order for A->B and B->A
+        with self.lock(first), self.lock(second):
             path, target = self._existing(name), self._path(new_name)
             if target.exists() and target != path:
                 raise TaskError(f"a task named {target.stem!r} already exists", 409)
@@ -143,12 +171,7 @@ class TaskStore:
         self.meta.mkdir(exist_ok=True)
         prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
         path = self._meta_path(self._existing(name).stem)
-        tmp = path.with_name(f".{path.name}.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(json.dumps(prefs.to_dict(), indent=1))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _replace(path, json.dumps(prefs.to_dict(), indent=1))
 
     @contextmanager
     def edit_prefs(self, name: str):

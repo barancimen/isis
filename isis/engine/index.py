@@ -40,6 +40,7 @@ class FileRecord:
     term_ids: np.ndarray
     counts: np.ndarray
     vectors: np.ndarray | None = None  # float16, one row per passage; None until embedded
+    reuse: dict | None = None  # embed_text -> vector kept from before an edit; not saved
 
 
 @dataclass
@@ -95,7 +96,8 @@ class Snapshot:
 
 @dataclass
 class IndexStatus:
-    state: str = "starting"  # "scanning", "embedding" or "ready"
+    state: str = "starting"  # "scanning", "embedding", "ready" or "error"
+    error: str = ""  # why the last refresh failed
     files: int = 0
     passages: int = 0
     embedded: int = 0  # progress of the current embedding run
@@ -174,63 +176,78 @@ class Engine:
     def refresh(self, on_progress: Callable[[IndexStatus], None] | None = None) -> dict:
         """Re-read changed files, drop deleted ones, embed what isn't embedded yet."""
         with self._lock:
-            started = time.perf_counter()
-            self._set_state("scanning", on_progress)
-            found = self._scan()
-            removed = [p for p in self.files if p not in found]
-            changed = [
-                p
-                for p, st in found.items()
-                if (r := self.files.get(p)) is None or (r.mtime_ns, r.size) != (st.st_mtime_ns, st.st_size)
-            ]
-            for path in removed:
-                del self.files[path]
-            for path in changed:
-                try:
-                    self.files[path] = self._read(path, found[path])
-                except OSError as e:  # deleted or unreadable since the scan
-                    log.warning("skipping %s: %s", path, e)
-                    self.files.pop(path, None)
-            if removed or changed:
-                self._publish()
+            self.status.error = ""
+            try:
+                return self._refresh(on_progress)
+            except Exception as e:
+                self.status.state, self.status.error = "error", f"{type(e).__name__}: {e}"
+                raise
 
-            embedded = self._embed_missing(on_progress)
-            if removed or changed or embedded:
-                self._publish()
-                self._save()
-            self._set_state("ready", on_progress)
-            return {
-                "files": len(self.files),
-                "changed": len(changed),
-                "removed": len(removed),
-                "embedded": embedded,
-                "seconds": round(time.perf_counter() - started, 2),
-            }
+    def _refresh(self, on_progress) -> dict:
+        started = time.perf_counter()
+        self._set_state("scanning", on_progress)
+        found = self._scan()
+        removed = [p for p in self.files if p not in found]
+        changed = [
+            p
+            for p, st in found.items()
+            if (r := self.files.get(p)) is None or (r.mtime_ns, r.size) != (st.st_mtime_ns, st.st_size)
+        ]
+        for path in removed:
+            del self.files[path]
+        for path in changed:
+            try:
+                record = self._read(path, found[path])
+            except OSError as e:  # deleted or unreadable since the scan
+                log.warning("skipping %s: %s", path, e)
+                self.files.pop(path, None)
+                continue
+            old = self.files.get(path)
+            if old is not None and old.vectors is not None and old.vectors.shape[1:] == (self.dim,) and self.dim:
+                # An edit changes a few passages: the others keep their vectors.
+                record.reuse = {p.embed_text: v for p, v in zip(old.passages, old.vectors)}
+            self.files[path] = record
+        if removed or changed:
+            self._publish()
+
+        embedded = self._embed_missing(on_progress)
+        if removed or changed or embedded:
+            self._publish()
+            self._save()
+        self._set_state("ready", on_progress)
+        return {
+            "files": len(self.files),
+            "changed": len(changed),
+            "removed": len(removed),
+            "embedded": embedded,
+            "seconds": round(time.perf_counter() - started, 2),
+        }
 
     def _embed_missing(self, on_progress) -> int:
         if self.embedder is None:
             return 0
         pending = [r for r in self.files.values() if r.vectors is None or r.vectors.shape[1:] != (self.dim,)]
-        self.status.embedded, self.status.to_embed = 0, sum(len(r.passages) for r in pending)
-        if pending:
+        todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {})] for r in pending}
+        self.status.embedded, self.status.to_embed = 0, sum(map(len, todo.values()))
+        if self.status.to_embed:
             self._set_state("embedding", on_progress)
 
         last_publish = last_save = time.monotonic()
         group: list[FileRecord] = []
 
         def flush():
-            texts = [p.embed_text for r in group for p in r.passages]
-            vectors = self.embedder.embed(texts) if texts else np.zeros((0, self.dim), np.float32)
-            offset = 0
+            texts = [t for r in group for t in todo[id(r)]]
+            fresh = iter(self.embedder.embed(texts) if texts else np.zeros((0, self.dim), np.float32))
             for r in group:
-                r.vectors = vectors[offset : offset + len(r.passages)].astype(np.float16)
-                offset += len(r.passages)
+                rows = [r.reuse[p.embed_text] if p.embed_text in (r.reuse or {}) else next(fresh) for p in r.passages]
+                r.vectors = np.array(rows, np.float16).reshape(len(r.passages), self.dim)
+                r.reuse = None
             self.status.embedded += len(texts)
             group.clear()
 
         for record in pending:
             group.append(record)
-            if sum(len(r.passages) for r in group) < EMBED_GROUP:
+            if sum(len(todo[id(r)]) for r in group) < EMBED_GROUP:
                 continue
             flush()
             if on_progress:
@@ -329,10 +346,11 @@ class Engine:
         }
         json_path, npz_path = self._cache_paths
         # The arrays go first: a cache is only used when its JSON matches them (see _load).
-        tmp = npz_path.with_name("index.tmp.npz")
+        unique = f"{os.getpid()}-{threading.get_ident()}"  # another process may share the folder
+        tmp = npz_path.with_name(f"index.{unique}.tmp.npz")
         np.savez(tmp, **arrays)
         os.replace(tmp, npz_path)
-        tmp = json_path.with_suffix(".tmp")
+        tmp = json_path.with_name(f"index.{unique}.tmp")
         tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, json_path)
         old = self.index_dir / "index.pkl"
@@ -352,12 +370,13 @@ class Engine:
             with np.load(npz_path, allow_pickle=False) as data:
                 arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
             files = self._records(meta["files"], arrays)
+            vocab = Vocabulary(meta["vocab"])
+            saved = meta.get("embedder")
         except Exception as e:
             log.warning("ignoring unreadable index cache: %s", e)
             return
-        self.vocab = Vocabulary(meta["vocab"])
+        self.vocab = vocab
         self.files = files
-        saved = meta.get("embedder")
         if self.embedder is None:
             self._vectors_from = saved
         elif saved != self.embedder.name:  # a different model: keep the text, re-embed

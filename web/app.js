@@ -780,7 +780,7 @@ function renderFeedback(prefs, terms, lanes) {
 
 async function restoreDismissed(dismissal, element) {
   element?.remove();
-  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "restore", path: dismissal.path, text: dismissal.text });
+  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "restore", id: dismissal.id });
   await refreshRelated();
 }
 
@@ -929,7 +929,9 @@ async function pollStatus() {
     const model = s.model ? s.model.split("/").pop() : "keywords only";
     let text = `${s.files.toLocaleString()} files · ${s.passages.toLocaleString()} passages · ${model}`;
     if (s.state === "embedding") text = `Embedding ${s.embedded.toLocaleString()} / ${s.to_embed.toLocaleString()} passages… (search works meanwhile)`;
+    else if (s.state === "error") text = `Indexing failed: ${s.error} (see the server log; it retries when files change)`;
     else if (s.state !== "ready") text = "Indexing…";
+    if (s.state === "error") ready = true; // nothing to wait for: poll slowly
     $("#index-status").textContent = text;
     if (state.indexUpdated !== null && s.updated !== state.indexUpdated) {
       loadFiles().catch(fail);
@@ -1053,7 +1055,8 @@ function bind() {
     if (document.visibilityState === "hidden") saveTask(state.task, { keepalive: true }).catch(() => {});
   });
   window.addEventListener("beforeunload", (e) => {
-    if ([...state.docs.values()].some((d) => d.dirty)) e.preventDefault();
+    // A save still on its way counts as unsaved: closing the page could cancel it.
+    if ([...state.docs.values()].some((d) => d.dirty || d.saving)) e.preventDefault();
   });
 }
 
