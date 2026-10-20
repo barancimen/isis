@@ -93,12 +93,23 @@ def main() -> None:
         step(4, f"related lanes: {counts}")
         shot(page, "related.png")
 
+        refreshes: list[str] = []
+        page.on("request", lambda r: "/related" in r.url and refreshes.append(r.url))
+        page.evaluate("""() => {
+            const v = window.isis.taskView;
+            v.dispatch({selection: {anchor: 0, head: v.state.doc.length}});
+            v.dispatch({selection: {anchor: 2}});
+        }""")
+        page.wait_for_timeout(2500)
+        assert not refreshes, "selecting text or moving the cursor refreshed the related panel"
+        step(5, "selecting text and moving the cursor leave the related panel alone")
+
         before = len(task_text())
         page.locator("#related-lanes .hit .add").first.click()
         assert len(task_text()) > before
         saved()
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
-        step(5, f"+ inserted a related passage and recorded feedback {meta['feedback']}")
+        step(6, f"+ inserted a related passage and recorded feedback {meta['feedback']}")
 
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.banned")).to_have_count(1, timeout=30000)
@@ -106,7 +117,7 @@ def main() -> None:
         expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["bans"] and meta["dismissed"]
-        step(6, f"banned a term {meta['bans']} and dismissed a passage")
+        step(7, f"banned a term {meta['bans']} and dismissed a passage")
 
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")
@@ -116,7 +127,7 @@ def main() -> None:
         page.click("#conflict-keep")
         saved()
         assert (TASKS / f"{WHALES}.md").read_text().endswith("More.")
-        step(7, "a change on disk was detected; 'Keep mine' overwrote it")
+        step(8, "a change on disk was detected; 'Keep mine' overwrote it")
 
         cursor = page.evaluate("window.isis.taskView.state.selection.main.head")
         answers.append(ISLANDS)
@@ -126,7 +137,7 @@ def main() -> None:
         expect(page.locator(".task-tab.active")).to_contain_text(WHALES)
         assert task_text().endswith("More.")
         assert page.evaluate("window.isis.taskView.state.selection.main.head") == cursor
-        step(8, "switched tasks and back; text and cursor kept")
+        step(9, "switched tasks and back; text and cursor kept")
 
         page.click(".side-tabs button[data-panel=files]")
         first = page.evaluate("window.isis.state.files[0].path")
@@ -134,7 +145,7 @@ def main() -> None:
         expect(page.locator("#file-list .file").first).to_have_attribute("data-path", first)
         page.locator("#file-list .file").first.click()
         expect(page.locator("#reader-path")).to_have_text(first)
-        step(9, f"files panel filtered and opened {first}")
+        step(10, f"files panel filtered and opened {first}")
         shot(page, "files.png")
         browser.close()
 
