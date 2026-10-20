@@ -37,6 +37,7 @@ import numpy as np
 
 from .chunker import MAX_WORDS, chunk_markdown
 from .index import Snapshot
+from .params import tunable
 from .search import Hit, make_hit, top_rows
 from .text import tokenize, tokenize_with_surface
 
@@ -57,30 +58,103 @@ EMPTY_NOTE = {
 }
 
 
+QUERY, KEYWORDS, FILTER, LANES_GROUP, SELECTION = "Query", "Keywords (BM25)", "Relevance filter", "Lanes", "Selection"
+
+
 @dataclass
 class RelatedConfig:
-    query: str = "document"  # "document": the whole task is one query; "paragraphs": each paragraph is
-    n_query_terms: int = 20  # lexical query = the task's top TF-IDF terms
-    cursor_boost: float = 1.0  # > 1 weights the paragraph at the cursor up (1 = the whole document counts equally)
+    query: str = tunable(
+        "document", label="Query", group=QUERY, choices=["document", "paragraphs"],
+        help="document: the whole task is one query. paragraphs: each paragraph is a query, and a passage "
+        "scores by its best match (strong matches to any one topic, not to their overlap).",
+    )
+    n_query_terms: int = tunable(
+        20, label="Keywords taken", group=QUERY, min=1, max=60, step=1,
+        help="How many of the task's most distinctive words (TF-IDF) make up the keyword query.",
+    )
+    excerpt_weight: float = tunable(
+        1.0, label="Excerpt weight", group=QUERY, min=0.0, max=3.0, step=0.1,
+        help="Weight of passages you collected from the corpus, relative to your own writing.",
+    )
+    cursor_boost: float = 1.0  # > 1 weights the paragraph at cursor_line up (1 = the whole document counts equally)
     cursor_decay: float = 1.0  # paragraphs over which that boost fades (1/e per this many)
-    excerpt_weight: float = 1.0  # weight of collected excerpts relative to your own writing
-    candidates: int = 300  # per signal
-    z_strong: float = 2.5  # gate: semantic z-score that is enough on its own
-    z_weak: float = 1.0  # gate: semantic z-score that is enough for a top lexical hit
-    lexical_top: int = 30  # ... where "top lexical hit" means this rank or better
-    duplicate_cos: float = 0.95  # this similar to a task paragraph counts as already collected
-    negative_weight: float = 0.5  # push away from dismissed passages (Rocchio-style)
-    rrf_k: int = 60
-    hidden_z: float = 2.5  # raise it if hidden connections look random with your model
-    hidden_max_obviousness: float = 0.3  # BM25 relative to the best lexical hit
-    bridge_z: float = 1.5  # both themes must reach this; also a route through the gate
-    gap_z: float = 2.5
-    theme_distance: float = 0.5  # cosine distance cut when clustering paragraphs into themes
-    total_slots: int = 24
-    min_slots: int = 2  # per non-empty lane
-    max_per_file: int = 2  # per lane
+    bm25_k1: float = tunable(
+        1.2, label="k1", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
+        help="How fast repeated words stop adding to a passage's keyword score.",
+    )
+    bm25_b: float = tunable(
+        0.75, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        help="How much long passages are penalised. 0: length ignored; 1: fully normalised.",
+    )
+    candidates: int = tunable(
+        300, label="Candidates per signal", group=FILTER, min=20, max=2000, step=10,
+        help="How deep the keyword and meaning rankings go before the filter.",
+    )
+    z_strong: float = tunable(
+        2.5, label="Meaning alone", group=FILTER, min=0.0, max=5.0, step=0.1,
+        help="Meaning z-score that gets a passage through the filter on its own.",
+    )
+    z_weak: float = tunable(
+        1.0, label="Meaning with keywords", group=FILTER, min=-1.0, max=4.0, step=0.1,
+        help="Meaning z-score that is enough for one of the top keyword matches.",
+    )
+    lexical_top: int = tunable(
+        30, label="Top keyword ranks", group=FILTER, min=0, max=300, step=1,
+        help="How many of the best keyword matches count as top keyword matches.",
+    )
+    duplicate_cos: float = tunable(
+        0.95, label="Duplicate similarity", group=FILTER, min=0.7, max=1.0, step=0.01,
+        help="A passage this similar to a paragraph of the task counts as already collected.",
+    )
+    negative_weight: float = tunable(
+        0.5, label="Dismissal push", group=FILTER, min=0.0, max=2.0, step=0.1,
+        help="How strongly passages similar to ones you dismissed are pushed down.",
+    )
+    rrf_k: int = tunable(
+        60, label="Core fusion k", group=LANES_GROUP, min=1, max=100, step=1,
+        help="Core ranks by reciprocal-rank fusion. Large k favours passages good on both signals; small k "
+        "lets the best of either signal through.",
+    )
+    hidden_z: float = tunable(
+        2.5, label="Hidden: meaning", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
+        help="Meaning z-score a hidden connection needs.",
+    )
+    hidden_max_obviousness: float = tunable(
+        0.3, label="Hidden: max keyword overlap", group=LANES_GROUP, min=0.0, max=1.0, step=0.05,
+        help="A hidden connection's keyword score may be at most this share of the best keyword match.",
+    )
+    bridge_z: float = tunable(
+        1.5, label="Bridges: per theme", group=LANES_GROUP, min=0.0, max=4.0, step=0.1,
+        help="Meaning z-score a bridge needs on each of two themes (also lets it through the filter).",
+    )
+    gap_z: float = tunable(
+        2.5, label="Gaps: meaning", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
+        help="Meaning z-score a passage needs on a thinly covered theme.",
+    )
+    theme_distance: float = tunable(
+        0.5, label="Theme split", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
+        help="Without headings, paragraphs further apart than this (cosine distance) become separate themes.",
+    )
+    total_slots: int = tunable(
+        24, label="Results", group=SELECTION, min=4, max=80, step=1,
+        help="Results across all lanes.",
+    )
+    min_slots: int = tunable(
+        2, label="Minimum per lane", group=SELECTION, min=0, max=10, step=1,
+        help="Slots every non-empty lane gets before the rest is shared out by feedback.",
+    )
+    max_per_file: int = tunable(
+        2, label="Per file, per lane", group=SELECTION, min=1, max=20, step=1,
+        help="At most this many results from one file in one lane.",
+    )
+    mmr_lambda: dict = tunable(
+        label="Relevance vs variety", group=SELECTION, min=0.0, max=1.0, step=0.05,
+        keys=["core", "hidden", "bridges", "gaps"],
+        default_factory=lambda: {"core": 0.7, "hidden": 0.6, "bridges": 0.6, "gaps": 0.6},
+        help="MMR: 1 ranks by relevance only; lower values prefer results unlike the ones already shown "
+        "and the passages you collected.",
+    )
     mmr_pool: int = 100
-    mmr_lambda: dict = field(default_factory=lambda: {"core": 0.7, "hidden": 0.6, "bridges": 0.6, "gaps": 0.6})
     lane_prior: dict = field(
         default_factory=lambda: {"core": (3.0, 1.0), "hidden": (1.0, 1.0), "bridges": (1.0, 1.0), "gaps": (1.0, 1.0)}
     )
@@ -432,7 +506,7 @@ def related(
 
     chips = task_terms(snapshot, units, prefs, config)
     query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.banned]
-    lex = snapshot.bm25.scores([i for i, _ in query], [w for _, w in query])
+    lex = snapshot.bm25_for(config.bm25_k1, config.bm25_b).scores([i for i, _ in query], [w for _, w in query])
     lex_rank = ranks(lex, lex > 0)
     sem_rank = ranks(sem_w, np.isfinite(sem_w))
     lap("lexical")

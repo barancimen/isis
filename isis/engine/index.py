@@ -8,7 +8,7 @@ import os
 import pickle
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -50,9 +50,22 @@ class Snapshot:
     vectors: np.ndarray  # float32 [n, dim]; zero rows where has_vector is False
     has_vector: np.ndarray  # bool [n]
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
+    _bm25_variants: dict = field(default_factory=dict, repr=False)
 
     def __len__(self) -> int:
         return len(self.passages)
+
+    def bm25_for(self, k1: float, b: float) -> BM25:
+        """BM25 with other parameters, built on first use; the last few are kept."""
+        key = (round(float(k1), 4), round(float(b), 4))
+        if key == (self.bm25.k1, self.bm25.b):
+            return self.bm25
+        variant = self._bm25_variants.get(key)
+        if variant is None:
+            while len(self._bm25_variants) >= 4:
+                self._bm25_variants.pop(next(iter(self._bm25_variants)))
+            variant = self._bm25_variants[key] = self.bm25.with_params(*key)
+        return variant
 
     def term_id(self, term: str) -> int | None:
         i = self.vocab.get(term)
@@ -298,7 +311,7 @@ class Engine:
 
     # ---- queries ----
 
-    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2):
+    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None):
         from .search import search
 
         return search(
@@ -309,6 +322,7 @@ class Engine:
             embedder=self.embedder,
             context_lines=context_lines,
             read_lines=self.read_lines,
+            config=config,
         )
 
     def related(self, task_text: str, *, cursor_line: int | None = None, prefs=None, config=None, seed: int = 0):

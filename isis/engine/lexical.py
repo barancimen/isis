@@ -50,6 +50,8 @@ def term_counts(token_lists: list[list[str]], vocab: Vocabulary):
 class BM25:
     def __init__(self, indptr, term_ids, counts, n_terms: int, k1: float = 1.2, b: float = 0.75):
         n_docs = len(indptr) - 1
+        self._raw = (indptr, term_ids, counts)
+        self.k1, self.b = k1, b
         rows = np.repeat(np.arange(n_docs), np.diff(indptr))
         doc_len = np.bincount(rows, weights=counts, minlength=n_docs)
         avg_len = max(doc_len.mean(), 1e-9) if n_docs else 1.0
@@ -64,6 +66,13 @@ class BM25:
         self.matrix = sparse.csr_matrix(
             (data.astype(np.float32), term_ids, indptr), shape=(n_docs, n_terms)
         ).tocsc()
+
+    def with_params(self, k1: float, b: float) -> "BM25":
+        """The same index weighted with another k1 (how fast repeated words saturate) and b (how
+        much long passages are normalised)."""
+        if (k1, b) == (self.k1, self.b):
+            return self
+        return BM25(*self._raw, n_terms=self.n_terms, k1=k1, b=b)
 
     def scores(self, term_ids, weights) -> np.ndarray:
         """BM25 score of every passage for a query given as term ids with weights."""

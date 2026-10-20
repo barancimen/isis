@@ -15,16 +15,45 @@ from typing import Callable
 import numpy as np
 
 from .index import Snapshot
+from .params import tunable
 from .text import term_spans, tokenize_with_surface
 
 QUOTED = re.compile(r'"([^"]+)"')
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
-CANDIDATES = 300  # per signal, before fusion
-# Reciprocal-rank fusion constant. Small, so the best results of each signal stay near the top;
-# with the textbook 60, passages that are middling in both lists push them out.
-RRF_K = 10
 SNIPPET_LINES = 8  # passage lines shown per hit, centred on the first match
+
+KEYWORDS = "Keywords (BM25)"
+FUSION = "Fusion (when 'meaning' is ticked)"
+
+
+@dataclass
+class SearchConfig:
+    k1: float = tunable(
+        1.2, label="k1", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
+        help="How fast repeated words stop adding to a passage's score. 0: one occurrence counts as much as many.",
+    )
+    b: float = tunable(
+        0.75, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        help="How much long passages are penalised. 0: length ignored; 1: fully normalised.",
+    )
+    rrf_k: int = tunable(
+        10, label="Fusion k", group=FUSION, min=1, max=100, step=1,
+        help="Reciprocal-rank fusion: each list adds weight / (k + rank). Small k keeps the best of each "
+        "list on top; large k favours passages ranked fairly well in both.",
+    )
+    keyword_weight: float = tunable(
+        1.0, label="Keyword weight", group=FUSION, min=0.0, max=3.0, step=0.1,
+        help="Weight of the keyword ranking in the fusion. 0: rank by meaning only.",
+    )
+    meaning_weight: float = tunable(
+        1.0, label="Meaning weight", group=FUSION, min=0.0, max=3.0, step=0.1,
+        help="Weight of the embedding ranking in the fusion. 0: rank by keywords only.",
+    )
+    candidates: int = tunable(
+        300, label="Candidates per list", group=FUSION, min=20, max=2000, step=10,
+        help="How deep each ranking goes before fusing. A passage outside both lists can't be found.",
+    )
 
 
 @dataclass
@@ -107,21 +136,23 @@ def search(
     embedder=None,
     context_lines: int = 2,
     read_lines: Callable[[str], list[str]],
+    config: SearchConfig | None = None,
 ) -> list[Hit]:
+    config = config or SearchConfig()
     if not len(snapshot) or not query.strip():
         return []
     q = parse_query(snapshot, query)
-    lexical = snapshot.bm25.scores(q.term_ids, q.weights)
+    lexical = snapshot.bm25_for(config.k1, config.b).scores(q.term_ids, q.weights)
 
     if mode == "hybrid" and embedder is not None and snapshot.has_vector.any():
         semantic = snapshot.vectors @ embedder.embed([query], cache=True)[0]
         semantic[~snapshot.has_vector] = -np.inf
-        lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, CANDIDATES, positive=True))}
-        sem_rank = {int(row): rank for rank, row in enumerate(top_rows(semantic, CANDIDATES))}
+        lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, config.candidates, positive=True))}
+        sem_rank = {int(row): rank for rank, row in enumerate(top_rows(semantic, config.candidates))}
         fused: dict[int, float] = {}
-        for ranks in (lex_rank, sem_rank):
+        for ranks, weight in ((lex_rank, config.keyword_weight), (sem_rank, config.meaning_weight)):
             for row, rank in ranks.items():
-                fused[row] = fused.get(row, 0.0) + 1.0 / (RRF_K + rank + 1)
+                fused[row] = fused.get(row, 0.0) + weight / (config.rrf_k + rank + 1)
         ranked = sorted(fused.items(), key=lambda kv: -kv[1])
         why = lambda row: {
             "bm25": float(lexical[row]),

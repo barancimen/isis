@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import math
 import os
@@ -20,6 +21,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..engine.index import MARKDOWN, Engine
+from ..engine.params import configure, specs
+from ..engine.related import RelatedConfig
+from ..engine.search import SearchConfig
 from .tasks import Conflict, TaskError, TaskStore
 
 log = logging.getLogger("isis")
@@ -57,6 +61,7 @@ class RenameTask(BaseModel):
 class RelatedRequest(BaseModel):
     text: str
     cursor_line: int | None = None
+    params: dict = {}  # overrides of RelatedConfig, as named in /api/params
 
 
 class TermRequest(BaseModel):
@@ -139,10 +144,21 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             raise HTTPException(404, f"no such file: {path}")
         return {"path": path, "content": content}
 
+    @app.get("/api/params")
+    def params():
+        """The parameters the page may tune, with defaults, ranges and help."""
+        return {"search": specs(SearchConfig), "related": specs(RelatedConfig)}
+
     @app.get("/api/search")
-    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50):
+    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = ""):
+        try:
+            overrides = json.loads(params) if params else {}
+        except ValueError:
+            raise HTTPException(400, "params must be a JSON object")
+        if not isinstance(overrides, dict):
+            raise HTTPException(400, "params must be a JSON object")
         started = time.perf_counter()
-        hits = engine.search(q, limit=min(limit, 200), mode=mode)
+        hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides))
         return {"hits": plain(hits), "ms": round((time.perf_counter() - started) * 1000, 1)}
 
     # ---- tasks ----
@@ -176,7 +192,11 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     def related(name: str, body: RelatedRequest):
         prefs = tasks.prefs(name)
         result = engine.related(
-            body.text, cursor_line=body.cursor_line, prefs=prefs, seed=zlib.crc32(name.encode())
+            body.text,
+            cursor_line=body.cursor_line,
+            prefs=prefs,
+            config=configure(RelatedConfig, body.params),
+            seed=zlib.crc32(name.encode()),
         )
         return {**plain(result), "prefs": prefs.to_dict()}
 
