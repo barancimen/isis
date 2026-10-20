@@ -215,6 +215,13 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .chip.pinned .chip-label::before { content: "📌 "; font-size: 10px; }
 .chip.banned { background: none; }
 .chip.banned .chip-label { text-decoration: line-through; color: var(--faint); }
+.chip.excluded { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--bg)); }
+.chip.excluded .chip-label::before { content: "⊘ "; color: var(--danger); }
+.exclude-row { display: flex; flex-direction: column; gap: 4px; }
+.exclude-row[hidden] { display: none; }
+.exclude-row input { font-size: 12.5px; padding: 4px 8px; }
+.hit-actions .avoid { color: var(--danger); }
+.feedback-tag { color: var(--danger); font: 11.5px var(--sans); margin-right: 6px; }
 
 /* ---- tunable parameters ---- */
 

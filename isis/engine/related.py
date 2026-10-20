@@ -12,7 +12,8 @@
             With query="paragraphs" each paragraph is a query of its own instead, and a passage
             scores by its best match (optionally weighted toward the cursor).
 3. gate     Keep only clearly relevant passages: a strong semantic z-score, or a top lexical hit
-            with some semantic support. Drop what is already collected or was dismissed.
+            with some semantic support. Drop what is already collected or was dismissed, what
+            contains an excluded word, phrase or pattern, and what is close to an avoided passage.
 4. lanes    Rank the survivors four ways:
               core      reciprocal-rank fusion of both signals
               hidden    high meaning, low keyword overlap: the same idea in other words
@@ -38,7 +39,7 @@ import numpy as np
 from .chunker import MAX_WORDS, chunk_markdown
 from .index import Snapshot
 from .params import tunable
-from .search import Hit, make_hit, top_rows
+from .search import Hit, exclusion_filters, make_hit, top_rows
 from .text import tokenize, tokenize_with_surface
 
 LANES = ("core", "hidden", "bridges", "gaps")
@@ -110,6 +111,11 @@ class RelatedConfig:
         0.5, label="Dismissal push", group=FILTER, min=0.0, max=2.0, step=0.1,
         help="How strongly passages similar to ones you dismissed are pushed down.",
     )
+    avoid_z: float = tunable(
+        3.0, label="Avoid: similarity", group=FILTER, min=0.5, max=6.0, step=0.1,
+        help="Passages you avoid (⊘) also hide every passage at least this similar to them (z-score). "
+        "Lower hides more.",
+    )
     rrf_k: int = tunable(
         60, label="Core fusion k", group=LANES_GROUP, min=1, max=100, step=1,
         help="Core ranks by reciprocal-rank fusion. Large k favours passages good on both signals; small k "
@@ -166,13 +172,14 @@ class TaskPrefs:
 
     pins: list[str] = field(default_factory=list)
     bans: list[str] = field(default_factory=list)
-    dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line"}
+    dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line", "avoid"?}
     feedback: dict = field(default_factory=dict)  # lane -> [adds, dismisses]
+    excluded: list[str] = field(default_factory=list)  # never shown: words, "phrases" and /regexes/
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "TaskPrefs":
         data = data or {}
-        return cls(**{k: data[k] for k in ("pins", "bans", "dismissed", "feedback") if k in data})
+        return cls(**{k: data[k] for k in ("pins", "bans", "dismissed", "feedback", "excluded") if k in data})
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -181,10 +188,13 @@ class TaskPrefs:
         counts = self.feedback.setdefault(lane, [0, 0])
         counts[0 if added else 1] += 1
 
-    def dismiss(self, lane: str, path: str, text: str, start_line: int | None = None, end_line: int | None = None) -> None:
+    def dismiss(self, lane: str, path: str, text: str, start_line: int | None = None, end_line: int | None = None,
+                avoid: bool = False) -> None:
+        """Hide a passage. `avoid` also hides every passage close to it in meaning (an anti-query)."""
         self.record(lane, added=False)
         if text:
-            self.dismissed.append({"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line})
+            entry = {"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line}
+            self.dismissed.append({**entry, "avoid": True} if avoid else entry)
 
     def restore(self, path: str, text: str) -> None:
         """Undo the dismissals of a passage: it may come back, and its lanes lose those dismissals."""
@@ -365,10 +375,11 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
     scored.sort(reverse=True)
 
     bans, pins = set(prefs.bans), set(prefs.pins)
-    top = [(s, t) for s, t in scored if t not in bans][: config.n_query_terms]
+    excluded = exclusion_filters(prefs.excluded).excluded_terms
+    top = [(s, t) for s, t in scored if t not in bans and t not in excluded][: config.n_query_terms]
     best = top[0][0] if top else 1.0
     chosen = {t for _, t in top}
-    for t in sorted(pins - chosen):  # pinned terms always take part, at full weight
+    for t in sorted(pins - chosen - excluded):  # pinned terms always take part, at full weight
         if snapshot.term_id(t) is not None:
             top.append((best, t))
 
@@ -496,7 +507,7 @@ def related(
     lap("units")
 
     weights = np.array([u.weight for u in units], np.float32)
-    theme_z = second = None
+    theme_z = second = avoided = None
     if semantic:
         if config.query == "document":
             sizes = np.array([len(u.text.split()) for u in units], np.float32) * weights
@@ -508,11 +519,14 @@ def related(
             sem_any = z.max(1)
             sem_w = (z * weights).max(1)
             best_unit = (z * weights).argmax(1)
-        dismissed = [d["text"] for d in prefs.dismissed if d.get("text")]
+        dismissed = [d for d in prefs.dismissed if d.get("text")]
         if dismissed:
-            _, z_neg = zscores(snapshot, embedder.embed(dismissed, cache=True))
+            _, z_neg = zscores(snapshot, embedder.embed([d["text"] for d in dismissed], cache=True))
             penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
             sem_any, sem_w = sem_any - penalty, sem_w - penalty
+            avoid = [i for i, d in enumerate(dismissed) if d.get("avoid")]
+            if avoid:  # anti-queries: everything clearly like them is out
+                avoided = z_neg[:, avoid].max(1) >= config.avoid_z
         if len(themes) >= 2:  # each passage's z-score per theme, and its second-best theme's
             theme_of = np.array([u.theme for u in units])
             theme_z = np.stack([z[:, theme_of == t].max(1) for t in range(len(themes))], axis=1)
@@ -550,9 +564,17 @@ def related(
     dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
     excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
 
+    rows = np.array(sorted(map(int, candidates)), np.int64)
+    rows = rows[relevant[rows]]
+    if avoided is not None:
+        rows = rows[~avoided[rows]]
+    exclusions = exclusion_filters(prefs.excluded)
+    if exclusions:
+        rows = rows[exclusions.allowed(snapshot, rows)]
+
     gated = []
-    for row in sorted(map(int, candidates)):
-        if not relevant[row] or row in collected:
+    for row in map(int, rows):
+        if row in collected:
             continue
         p = snapshot.passages[row]
         if dismissed_keys or excerpts:

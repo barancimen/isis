@@ -85,7 +85,7 @@ def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     assert prefs["feedback"] == {"hidden": [0, 1], "core": [1, 0]}
 
     client.post("/api/tasks/t/terms", json={"term": "whale", "action": "pin"})
-    assert client.delete("/api/tasks/t/prefs").json() == {"pins": [], "bans": [], "dismissed": [], "feedback": {}}
+    assert client.delete("/api/tasks/t/prefs").json() == {"pins": [], "bans": [], "dismissed": [], "feedback": {}, "excluded": []}
     assert client.get("/api/tasks/t/prefs").json()["pins"] == []
     assert len(list((corpus / "_tasks" / ".trash").glob("t.*.prefs.json"))) == 1
 
@@ -100,3 +100,25 @@ def test_tasks_inside_the_corpus_are_not_indexed(client, engine):
 
 def test_page_is_served(client):
     assert client.get("/").status_code == 200
+
+
+def test_exclusions_and_avoided_passages(client):
+    client.post("/api/tasks", json={"name": "t"})
+    task = {"text": "The sperm whale and ambergris. Ahab hunted the white whale from the Pequod.", "params": {"z_weak": -1}}
+    texts = lambda: [h["text"] for lane in client.post("/api/tasks/t/related", json=task).json()["lanes"] for h in lane["items"]]
+    assert any("Ambergris" in t for t in texts())
+
+    client.post("/api/tasks/t/terms", json={"term": "ambergri", "action": "ban"})
+    prefs = client.post("/api/tasks/t/terms", json={"term": "Ambergris", "action": "exclude"}).json()
+    assert prefs["excluded"] == ["Ambergris"] and prefs["bans"] == []  # excluding takes the word out of the bans
+    assert texts() and not any("ambergris" in t.lower() for t in texts())
+    assert client.post("/api/tasks/t/terms", json={"term": "/[oops/", "action": "exclude"}).status_code == 400
+    prefs = client.post("/api/tasks/t/terms", json={"term": "Ambergris", "action": "unexclude"}).json()
+    assert prefs["excluded"] == []
+
+    first = next(t for t in texts() if "Ambergris" in t)
+    body = {"action": "avoid", "lane": "core", "path": "whales.md", "text": first}
+    prefs = client.post("/api/tasks/t/feedback", json=body).json()
+    assert prefs["dismissed"][0]["avoid"] is True
+    assert first not in texts()
+    assert client.get("/api/search", params={"q": "/(oops/"}).status_code == 400

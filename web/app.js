@@ -536,6 +536,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
   const actions = h("span", { class: "hit-actions" },
     h("button", { class: "add", title: "Add this passage to the task, at its cursor", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
     lane && h("button", { title: "Not useful: hide it and steer away from it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
+    lane && h("button", { class: "avoid", title: "Avoid: hide it and every passage like it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
   return h("article", { class: `hit${isNew ? " is-new" : ""}`, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
@@ -566,7 +567,10 @@ const runSearch = debounce(async () => {
     $("#search-status").textContent = n ? `${n}${n === 50 ? "+" : ""} passages${how} · ${result.ms} ms` : "No matches.";
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
   } catch (error) {
-    fail(error);
+    if (seq !== state.searchSeq) return;
+    if (error.status !== 400) fail(error);
+    $("#search-status").textContent = error.status === 400 ? `⚠ ${error.message}` : "";
+    $("#search-results").replaceChildren();
   }
 }, 200);
 
@@ -586,6 +590,7 @@ function renderRelatedEmpty(message) {
   $("#related-terms").replaceChildren();
   $("#related-lanes").replaceChildren();
   $("#related-feedback").hidden = true;
+  $("#related-exclude").hidden = true;
 }
 
 async function refreshRelated() {
@@ -619,6 +624,7 @@ async function refreshRelated() {
   );
   state.lastRelatedKeys = keys;
   renderChips(result.terms);
+  renderExcluded(result.prefs.excluded);
   renderFeedback(result.prefs, result.terms, result.lanes);
   $("#related-lanes").replaceChildren(...lanes);
   const s = result.stats;
@@ -637,7 +643,9 @@ function renderChips(terms) {
           title: t.banned ? "Banned: click to use it again" : t.pinned ? "Pinned: click to unpin" : "Click to pin: always search for this term",
           onclick: () => termAction(t.term, t.banned ? "unban" : t.pinned ? "unpin" : "pin").catch(fail),
         }, t.label),
-        !t.banned && h("button", { class: "chip-x", title: "Ban: never search for this term in this task", onclick: () => termAction(t.term, "ban").catch(fail) }, "×"),
+        t.banned
+          ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}”`, onclick: () => termAction(t.label, "exclude").catch(fail) }, "⊘")
+          : h("button", { class: "chip-x", title: "Ban: never search for this term in this task", onclick: () => termAction(t.term, "ban").catch(fail) }, "×"),
       ),
     ),
   );
@@ -648,10 +656,35 @@ async function termAction(term, action) {
   await refreshRelated();
 }
 
-async function dismiss(hit, lane, element) {
+// Words, phrases and patterns never to show, as chips; the input adds one.
+const excludedChip = (entry) =>
+  h("span", { class: "chip excluded" },
+    h("span", { class: "chip-label", title: "Passages containing this are never suggested" }, entry),
+    h("button", { class: "chip-x", title: "Show such passages again", onclick: () => termAction(entry, "unexclude").catch(fail) }, "×"),
+  );
+
+function renderExcluded(entries) {
+  $("#related-exclude").hidden = false;
+  $("#related-excluded").replaceChildren(...entries.map(excludedChip));
+}
+
+async function addExclusion(event) {
+  event.preventDefault();
+  const input = $("#exclude-input");
+  const entry = input.value.trim();
+  if (!entry || !state.task) return;
+  try {
+    await termAction(entry, "exclude");
+    input.value = "";
+  } catch (error) {
+    flash(error.status === 400 ? `⚠ ${error.message}` : `Error: ${error.message}`);
+  }
+}
+
+async function dismiss(hit, lane, element, avoid = false) {
   element?.remove();
   await api("POST", `/api/tasks/${enc(state.task)}/feedback`, {
-    action: "dismiss", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line,
+    action: avoid ? "avoid" : "dismiss", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line,
   });
   requestRelated(400);
 }
@@ -665,6 +698,8 @@ function renderFeedback(prefs, terms, lanes) {
   drawer.hidden = false;
   const labels = new Map(terms.map((t) => [t.term, t.label]));
   const words = [...prefs.pins, ...prefs.bans];
+  const excluded = prefs.excluded || [];
+  const avoided = prefs.dismissed.filter((d) => d.avoid).length;
   const key = JSON.stringify([state.task, prefs, words.map((t) => labels.get(t))]);
   if (drawer.dataset.key === key) return; // keep the list's scroll position while typing
   drawer.dataset.key = key;
@@ -673,12 +708,14 @@ function renderFeedback(prefs, terms, lanes) {
   const counted = Object.entries(prefs.feedback).filter(([, [adds, dismisses]]) => adds || dismisses);
   const added = counted.reduce((sum, [, [adds]]) => sum + adds, 0);
   const summary = [
-    prefs.dismissed.length && `${prefs.dismissed.length} dismissed`,
+    prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} dismissed`,
+    avoided && `${avoided} avoided`,
+    excluded.length && `${excluded.length} excluded`,
     added && `${added} added`,
     prefs.pins.length && `${prefs.pins.length} pinned`,
     prefs.bans.length && `${prefs.bans.length} banned`,
   ].filter(Boolean);
-  const empty = !prefs.dismissed.length && !words.length && !counted.length;
+  const empty = !prefs.dismissed.length && !words.length && !counted.length && !excluded.length;
 
   const dismissed = [...prefs.dismissed].reverse().map((d) => {
     const known = d.start_line !== undefined && d.start_line !== null;
@@ -690,7 +727,9 @@ function renderFeedback(prefs, terms, lanes) {
         h("button", { class: "feedback-open", title: `Open ${where} in the reader`, onclick: () => openFile(d.path, location).catch(fail) }, where),
         h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => restoreDismissed(d, e.target.closest("li")).catch(fail) }, "Restore"),
       ),
-      h("div", { class: "feedback-text" }, text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
+      h("div", { class: "feedback-text" },
+        d.avoid && h("span", { class: "feedback-tag", title: "Avoided: passages like this one are hidden too" }, "⊘ avoided"),
+        text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
     );
   });
   const word = (term, kind) =>
@@ -705,11 +744,15 @@ function renderFeedback(prefs, terms, lanes) {
     h("summary", {}, "Feedback", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
-        "Nothing yet. The passages you add (+) or dismiss (×) here, and the words you pin or ban, are remembered for this task, whatever its text."),
+        "Nothing yet. The passages you add (+), dismiss (×) or avoid (⊘) here, and the words you pin, ban or exclude, are remembered for this task, whatever its text."),
       dismissed.length > 0 && [
-        h("div", { class: "tune-group" }, "Dismissed passages"),
-        h("p", { class: "feedback-note" }, "Never suggested again, and passages like them rank lower (Parameters › Dismissal push)."),
+        h("div", { class: "tune-group" }, "Dismissed and avoided passages"),
+        h("p", { class: "feedback-note" }, "Never suggested again, and passages like them rank lower (Parameters › Dismissal push). Passages like an avoided one are hidden (Parameters › Avoid: similarity)."),
         h("ul", { class: "feedback-list" }, dismissed),
+      ],
+      excluded.length > 0 && [
+        h("div", { class: "tune-group" }, "Never shown"),
+        h("div", { class: "chips" }, excluded.map(excludedChip)),
       ],
       words.length > 0 && [
         h("div", { class: "tune-group" }, "Pinned and banned words"),
@@ -735,7 +778,7 @@ async function restoreDismissed(dismissal, element) {
 
 async function forgetFeedback() {
   const name = state.task;
-  if (!confirm(`Forget all feedback for “${name}”? Dismissed passages can come back, pins and bans are cleared, and the lanes start even.`)) return;
+  if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, pins, bans and exclusions are cleared, and the lanes start even.`)) return;
   await api("DELETE", `/api/tasks/${enc(name)}/prefs`);
   flash(`Forgot the feedback for “${name}”`);
   await refreshRelated();
@@ -910,6 +953,7 @@ function bind() {
   $("#file-filter").addEventListener("input", debounce(renderFiles, 120));
   $("#search-input").addEventListener("input", runSearch);
   $("#search-hybrid").addEventListener("change", runSearch);
+  $("#related-exclude").addEventListener("submit", (e) => addExclusion(e).catch(fail));
   for (const button of document.querySelectorAll(".side-tabs button")) {
     button.addEventListener("click", () => showPanel(button.dataset.panel));
   }

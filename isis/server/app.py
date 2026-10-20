@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from ..engine.index import MARKDOWN, Engine
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
-from ..engine.search import SearchConfig
+from ..engine.search import QueryError, SearchConfig, exclusion_filters
 from .tasks import Conflict, TaskError, TaskStore
 
 log = logging.getLogger("isis")
@@ -65,12 +65,12 @@ class RelatedRequest(BaseModel):
 
 
 class TermRequest(BaseModel):
-    term: str
-    action: Literal["pin", "unpin", "ban", "unban"]
+    term: str  # a stemmed term from the chips; to exclude: a word, "phrase" or /regex/
+    action: Literal["pin", "unpin", "ban", "unban", "exclude", "unexclude"]
 
 
 class FeedbackRequest(BaseModel):
-    action: Literal["add", "dismiss", "restore"]
+    action: Literal["add", "dismiss", "avoid", "restore"]
     lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
     path: str = ""
     text: str = ""
@@ -160,7 +160,10 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         if not isinstance(overrides, dict):
             raise HTTPException(400, "params must be a JSON object")
         started = time.perf_counter()
-        hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides))
+        try:
+            hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides))
+        except QueryError as e:
+            raise HTTPException(400, str(e))
         return {"hits": plain(hits), "ms": round((time.perf_counter() - started) * 1000, 1)}
 
     # ---- tasks ----
@@ -214,6 +217,20 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     @app.post("/api/tasks/{name}/terms")
     def terms(name: str, body: TermRequest):
         prefs = tasks.prefs(name)
+        if body.action in ("exclude", "unexclude"):
+            entry = " ".join(body.term.split())
+            if body.action == "unexclude":
+                prefs.excluded = [e for e in prefs.excluded if e != entry]
+            elif entry and entry not in prefs.excluded:
+                try:
+                    stems = exclusion_filters([entry]).excluded_terms
+                except QueryError as e:
+                    raise HTTPException(400, str(e))
+                prefs.excluded.append(entry)
+                prefs.pins = [t for t in prefs.pins if t not in stems]
+                prefs.bans = [t for t in prefs.bans if t not in stems]
+            tasks.save_prefs(name, prefs)
+            return prefs.to_dict()
         pins, bans = set(prefs.pins), set(prefs.bans)
         if body.action == "pin":
             pins.add(body.term)
@@ -236,8 +253,8 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             prefs.restore(body.path, body.text)
         elif not body.lane:
             raise HTTPException(400, "feedback needs the lane the passage was shown in")
-        elif body.action == "dismiss":
-            prefs.dismiss(body.lane, body.path, body.text, body.start_line, body.end_line)
+        elif body.action in ("dismiss", "avoid"):
+            prefs.dismiss(body.lane, body.path, body.text, body.start_line, body.end_line, avoid=body.action == "avoid")
         else:
             prefs.record(body.lane, added=True)
         tasks.save_prefs(name, prefs)

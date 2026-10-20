@@ -51,7 +51,7 @@ def main() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1600, "height": 1000})
-        page.on("console", lambda m: m.type == "error" and "409" not in m.text and errors.append(m.text))
+        page.on("console", lambda m: m.type == "error" and not re.search(r"\b(409|400)\b", m.text) and errors.append(m.text))
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("dialog", lambda d: d.accept(answers.pop(0)) if d.type == "prompt" else d.accept())
         task_text = lambda: page.evaluate("window.isis.taskView.state.doc.toString()")
@@ -90,8 +90,23 @@ def main() -> None:
         assert page.locator("#search-tune .tune-python").inner_text() == "SearchConfig(keyword_weight=0)"
         page.locator("#search-tune button", has_text="Reset to defaults").click()
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
-        page.uncheck("#search-hybrid")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
+
+        passage_lines = """() => [...document.querySelectorAll('#search-results .hit-body .line:not(.ctx)')].map(l => l.innerText)"""
+        page.fill("#search-input", "")
+        expect(page.locator("#search-results .hit")).to_have_count(0)
+        page.fill("#search-input", "whale -/Ahab/ -harpoon")
+        expect(page.locator("#search-results .hit").first).to_be_visible(timeout=15000)
+        lines = page.evaluate(passage_lines)
+        assert lines and not any("Ahab" in l or "harpoon" in l.lower() for l in lines), lines
+        page.fill("#search-input", "")
+        expect(page.locator("#search-results .hit")).to_have_count(0)
+        page.fill("#search-input", "/white whale/")
+        expect(page.locator("#search-results .hit mark").first).to_have_text(re.compile("white whale", re.I), timeout=15000)
+        page.fill("#search-input", "/(oops/")
+        expect(page.locator("#search-status")).to_contain_text("invalid pattern", timeout=15000)
+        page.uncheck("#search-hybrid")
+        step("search: exclusions hold with meaning ticked, /regex/ matches are highlighted, a bad pattern is reported")
 
         page.evaluate("""() => {
             const v = window.isis.taskView, doc = v.state.doc.toString();
@@ -165,6 +180,21 @@ def main() -> None:
         assert not (TASKS / ".meta" / f"{WHALES}.json").exists()
         drawer.locator("summary").click()
         step("feedback drawer: restored the dismissed passage, then forgot all of the task's feedback")
+
+        related_lines = """() => [...document.querySelectorAll('#related-lanes .hit-body .line:not(.ctx)')].map(l => l.innerText)"""
+        assert any("squid" in l.lower() for l in page.evaluate(related_lines))
+        page.fill("#exclude-input", "squid")
+        page.press("#exclude-input", "Enter")
+        expect(page.locator("#related-excluded .chip")).to_have_count(1, timeout=30000)
+        expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
+        lines = page.evaluate(related_lines)
+        assert lines and not any("squid" in l.lower() for l in lines), lines
+        page.locator("#related-lanes .hit button.avoid").first.click()
+        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 avoided", timeout=30000)
+        meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
+        assert meta["excluded"] == ["squid"] and meta["dismissed"][0]["avoid"] is True
+        shot(page, "excluded.png")
+        step("related: 'squid' excluded from every suggestion; ⊘ avoided a passage")
 
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")
