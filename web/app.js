@@ -937,6 +937,76 @@ async function pollStatus() {
 
 // ---------- wiring ----------
 
+// ---------- resizable panes ----------
+
+// The borders right of the task list, the side panel and the reader can be dragged (or moved with
+// the arrow keys when focused). Widths are kept in this browser; double-click a border to reset it.
+const PANE_LIMITS = { tasks: [100, 420], side: [220, 900] };
+
+function applyLayout(layout) {
+  const app = $("#app");
+  for (const name of ["tasks", "side"]) {
+    if (layout[name]) app.style.setProperty(`--w-${name}`, `${layout[name]}px`);
+    else app.style.removeProperty(`--w-${name}`);
+  }
+  if (layout.reader) {
+    app.style.setProperty("--fr-reader", `${layout.reader}fr`);
+    app.style.setProperty("--fr-task", `${1 - layout.reader}fr`);
+  } else {
+    app.style.removeProperty("--fr-reader");
+    app.style.removeProperty("--fr-task");
+  }
+}
+
+function bindResizers() {
+  let layout = {};
+  try {
+    layout = JSON.parse(store.get("layout") || "{}");
+  } catch {}
+  applyLayout(layout);
+  const save = () => store.set("layout", JSON.stringify(layout));
+  for (const handle of document.querySelectorAll(".resizer")) {
+    const name = handle.dataset.resize;
+    const pane = handle.parentElement;
+    const moveBorderTo = (x) => {
+      const left = pane.getBoundingClientRect().left;
+      if (name === "reader") {
+        const total = pane.offsetWidth + $("#task").offsetWidth;
+        layout.reader = Math.min(0.85, Math.max(0.15, (x - left) / total));
+      } else {
+        const [min, max] = PANE_LIMITS[name];
+        layout[name] = Math.round(Math.min(max, Math.max(min, x - left)));
+      }
+      applyLayout(layout);
+    };
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add("dragging");
+      document.body.classList.add("resizing");
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (handle.hasPointerCapture(e.pointerId)) moveBorderTo(e.clientX);
+    });
+    handle.addEventListener("lostpointercapture", () => {
+      handle.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+      save();
+    });
+    handle.addEventListener("dblclick", () => {
+      delete layout[name];
+      applyLayout(layout);
+      save();
+    });
+    handle.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      moveBorderTo(pane.getBoundingClientRect().right + (e.key === "ArrowLeft" ? -16 : 16));
+      save();
+    });
+  }
+}
+
 // Drawers stay open or closed across reloads.
 function rememberOpen(drawer, key) {
   drawer.open = store.get(key) === "open";
@@ -946,6 +1016,7 @@ function rememberOpen(drawer, key) {
 function bind() {
   for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-tune`), `tune-${kind}`);
   rememberOpen($("#related-feedback"), "feedback");
+  bindResizers();
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
   $("#reader-add").addEventListener("click", addReaderSelection);
   $("#conflict-load").addEventListener("click", () => resolveConflict(false).catch(fail));

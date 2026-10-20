@@ -14,6 +14,7 @@
       <button id="new-task" class="icon-btn" title="New task" aria-label="New task">+</button>
     </div>
     <ul id="task-tabs" role="tablist" aria-orientation="vertical"></ul>
+    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="tasks" title="Drag to resize (or use the arrow keys); double-click to reset"></div>
   </nav>
 
   <aside id="side">
@@ -47,6 +48,7 @@
       </form>
       <div id="related-lanes" class="results"></div>
     </section>
+    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="side" title="Drag to resize (or use the arrow keys); double-click to reset"></div>
   </aside>
 
   <main id="reader">
@@ -55,6 +57,7 @@
       <button id="reader-add" class="add-btn" title="Add the selected text to the task, at its cursor (Ctrl/⌘+Enter)" hidden>+ Add to task</button>
     </header>
     <div id="reader-editor" class="editor"></div>
+    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="reader" title="Drag to resize (or use the arrow keys); double-click to reset"></div>
   </main>
 
   <section id="task" aria-label="Task document">

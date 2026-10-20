@@ -216,6 +216,24 @@ def main() -> None:
         assert page.evaluate("window.isis.taskView.state.selection.main.head") == cursor
         step("switched tasks and back; text and cursor kept")
 
+        side_width = lambda: page.evaluate("document.querySelector('#side').getBoundingClientRect().width")
+        before = side_width()
+        box = page.locator(".resizer[data-resize=side]").bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + 200
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + 60, y, steps=4)
+        page.mouse.move(x + 120, y, steps=4)
+        page.mouse.up()
+        widened = side_width()
+        assert abs(widened - before - 120) < 6, (before, widened)
+        page.reload()
+        expect(page.locator("#index-status")).to_contain_text("passages", timeout=20000)
+        assert abs(side_width() - widened) < 2, "the width was not kept"
+        page.locator(".resizer[data-resize=side]").dblclick()
+        assert abs(side_width() - before) < 2
+        step(f"dragged the side panel from {before:.0f} to {widened:.0f}px; kept after reload; double-click reset it")
+
         page.click(".side-tabs button[data-panel=files]")
         first = page.evaluate("window.isis.state.files[0].path")
         page.fill("#file-filter", first)

@@ -76,7 +76,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 
 #app {
   display: grid;
-  grid-template-columns: 168px 360px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: var(--w-tasks, 168px) var(--w-side, 360px) minmax(0, var(--fr-reader, 1fr)) minmax(0, var(--fr-task, 1fr));
   height: calc(100vh - 26px);
 }
 
@@ -262,6 +262,14 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .feedback-text { font: 12.5px/1.4 var(--serif); color: var(--muted); overflow-wrap: anywhere; }
 .chip > span.chip-label { padding: 1px 2px 1px 7px; }
 
+/* ---- resizable panes ---- */
+
+#tasks, #side, #reader { position: relative; }
+.resizer { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; z-index: 5; outline: none; }
+.resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; }
+.resizer:hover::after, .resizer:focus-visible::after, .resizer.dragging::after { background: var(--accent); }
+body.resizing { cursor: col-resize; user-select: none; }
+
 /* ---- reader and task panes ---- */
 
 #reader, #task { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -307,11 +315,12 @@ code { font-family: var(--mono); font-size: 0.92em; }
 #flash { color: var(--accent); }
 
 @media (max-width: 1100px) {
-  #app { grid-template-columns: 140px 300px minmax(0, 1fr) minmax(0, 1fr); }
+  #app { grid-template-columns: var(--w-tasks, 140px) var(--w-side, 300px) minmax(0, var(--fr-reader, 1fr)) minmax(0, var(--fr-task, 1fr)); }
 }
 
 @media (max-width: 860px) {
   #app { display: flex; flex-direction: column; height: auto; }
+  .resizer { display: none; }
   #tasks { max-height: 160px; }
   #side { max-height: 60vh; }
   #reader, #task { height: 70vh; }
