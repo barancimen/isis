@@ -585,6 +585,7 @@ function renderRelatedEmpty(message) {
   $("#related-status").textContent = message;
   $("#related-terms").replaceChildren();
   $("#related-lanes").replaceChildren();
+  $("#related-feedback").hidden = true;
 }
 
 async function refreshRelated() {
@@ -618,6 +619,7 @@ async function refreshRelated() {
   );
   state.lastRelatedKeys = keys;
   renderChips(result.terms);
+  renderFeedback(result.prefs, result.terms, result.lanes);
   $("#related-lanes").replaceChildren(...lanes);
   const s = result.stats;
   const themes = result.themes.map((t) => t.label).join(" · ");
@@ -648,8 +650,95 @@ async function termAction(term, action) {
 
 async function dismiss(hit, lane, element) {
   element?.remove();
-  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "dismiss", lane, path: hit.path, text: hit.text });
+  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, {
+    action: "dismiss", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line,
+  });
   requestRelated(400);
+}
+
+// ---------- feedback drawer ----------
+
+// Everything the panel remembers about the task, each with its undo. It stays with the task
+// when the text changes, so it should never be out of sight.
+function renderFeedback(prefs, terms, lanes) {
+  const drawer = $("#related-feedback");
+  drawer.hidden = false;
+  const labels = new Map(terms.map((t) => [t.term, t.label]));
+  const words = [...prefs.pins, ...prefs.bans];
+  const key = JSON.stringify([state.task, prefs, words.map((t) => labels.get(t))]);
+  if (drawer.dataset.key === key) return; // keep the list's scroll position while typing
+  drawer.dataset.key = key;
+
+  const laneTitles = new Map(lanes.map((l) => [l.name, l.title]));
+  const counted = Object.entries(prefs.feedback).filter(([, [adds, dismisses]]) => adds || dismisses);
+  const added = counted.reduce((sum, [, [adds]]) => sum + adds, 0);
+  const summary = [
+    prefs.dismissed.length && `${prefs.dismissed.length} dismissed`,
+    added && `${added} added`,
+    prefs.pins.length && `${prefs.pins.length} pinned`,
+    prefs.bans.length && `${prefs.bans.length} banned`,
+  ].filter(Boolean);
+  const empty = !prefs.dismissed.length && !words.length && !counted.length;
+
+  const dismissed = [...prefs.dismissed].reverse().map((d) => {
+    const known = d.start_line !== undefined && d.start_line !== null;
+    const location = known ? { line: d.start_line, start: d.start_line, end: d.end_line ?? d.start_line } : null;
+    const text = d.text.replace(/\s+/g, " ").trim();
+    const where = known ? `${d.path}:${d.start_line + 1}` : d.path;
+    return h("li", { class: "feedback-item" },
+      h("div", { class: "feedback-head" },
+        h("button", { class: "feedback-open", title: `Open ${where} in the reader`, onclick: () => openFile(d.path, location).catch(fail) }, where),
+        h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => restoreDismissed(d, e.target.closest("li")).catch(fail) }, "Restore"),
+      ),
+      h("div", { class: "feedback-text" }, text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
+    );
+  });
+  const word = (term, kind) =>
+    h("span", { class: `chip ${kind}` },
+      h("span", { class: "chip-label" }, labels.get(term) ?? term),
+      h("button", { class: "chip-x", title: kind === "pinned" ? "Unpin" : "Unban", onclick: () => termAction(term, kind === "pinned" ? "unpin" : "unban").catch(fail) }, "×"),
+    );
+  const laneCounts = counted.map(([lane, [adds, dismisses]]) =>
+    `${laneTitles.get(lane) ?? lane}: ${[adds && `${adds} added`, dismisses && `${dismisses} dismissed`].filter(Boolean).join(", ")}`);
+
+  drawer.replaceChildren(
+    h("summary", {}, "Feedback", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
+    h("div", { class: "tune-body" },
+      empty && h("p", { class: "feedback-note" },
+        "Nothing yet. The passages you add (+) or dismiss (×) here, and the words you pin or ban, are remembered for this task, whatever its text."),
+      dismissed.length > 0 && [
+        h("div", { class: "tune-group" }, "Dismissed passages"),
+        h("p", { class: "feedback-note" }, "Never suggested again, and passages like them rank lower (Parameters › Dismissal push)."),
+        h("ul", { class: "feedback-list" }, dismissed),
+      ],
+      words.length > 0 && [
+        h("div", { class: "tune-group" }, "Pinned and banned words"),
+        h("div", { class: "chips" }, prefs.pins.map((t) => word(t, "pinned")), prefs.bans.map((t) => word(t, "banned"))),
+      ],
+      counted.length > 0 && [
+        h("div", { class: "tune-group" }, "Lane feedback"),
+        h("p", { class: "feedback-note" }, `${laneCounts.join(" · ")}. Lanes you add from get more of the results.`),
+      ],
+      !empty && h("div", { class: "tune-foot" },
+        h("button", { onclick: () => forgetFeedback().catch(fail) }, "Forget all"),
+        h("p", { class: "feedback-note" }, "Clears all of the above for this task. A copy goes to the tasks folder's .trash."),
+      ),
+    ),
+  );
+}
+
+async function restoreDismissed(dismissal, element) {
+  element?.remove();
+  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "restore", path: dismissal.path, text: dismissal.text });
+  await refreshRelated();
+}
+
+async function forgetFeedback() {
+  const name = state.task;
+  if (!confirm(`Forget all feedback for “${name}”? Dismissed passages can come back, pins and bans are cleared, and the lanes start even.`)) return;
+  await api("DELETE", `/api/tasks/${enc(name)}/prefs`);
+  flash(`Forgot the feedback for “${name}”`);
+  await refreshRelated();
 }
 
 // ---------- tunable parameters ----------
@@ -805,12 +894,15 @@ async function pollStatus() {
 
 // ---------- wiring ----------
 
+// Drawers stay open or closed across reloads.
+function rememberOpen(drawer, key) {
+  drawer.open = store.get(key) === "open";
+  drawer.addEventListener("toggle", () => store.set(key, drawer.open ? "open" : "closed"));
+}
+
 function bind() {
-  for (const kind of ["search", "related"]) {
-    const drawer = $(`#${kind}-tune`);
-    drawer.open = store.get(`tune-${kind}`) === "open";
-    drawer.addEventListener("toggle", () => store.set(`tune-${kind}`, drawer.open ? "open" : "closed"));
-  }
+  for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-tune`), `tune-${kind}`);
+  rememberOpen($("#related-feedback"), "feedback");
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
   $("#reader-add").addEventListener("click", addReaderSelection);
   $("#conflict-load").addEventListener("click", () => resolveConflict(false).catch(fail));

@@ -151,6 +151,21 @@ def main() -> None:
         assert meta["bans"] and meta["dismissed"]
         step(f"banned a term {meta['bans']} and dismissed a passage")
 
+        drawer = page.locator("#related-feedback")
+        drawer.locator("summary").click()
+        expect(drawer.locator(".tune-count")).to_contain_text("1 dismissed", timeout=30000)
+        expect(drawer.locator(".feedback-item")).to_have_count(1)
+        shot(page, "feedback.png")
+        drawer.locator(".feedback-item button", has_text="Restore").click()
+        expect(drawer.locator(".tune-count")).not_to_contain_text("dismissed", timeout=30000)
+        assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["dismissed"] == []
+        drawer.locator("button", has_text="Forget all").click()
+        expect(drawer.locator(".tune-count")).to_have_text("", timeout=30000)
+        expect(page.locator("#related-terms .chip.banned")).to_have_count(0)
+        assert not (TASKS / ".meta" / f"{WHALES}.json").exists()
+        drawer.locator("summary").click()
+        step("feedback drawer: restored the dismissed passage, then forgot all of the task's feedback")
+
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")
         page.keyboard.press("Control+End")

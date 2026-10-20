@@ -66,11 +66,28 @@ def test_related_terms_and_feedback(client):
     prefs = client.post("/api/tasks/t/terms", json={"term": "whale", "action": "pin"}).json()
     assert prefs["pins"] == ["whale"] and prefs["bans"] == []
 
-    prefs = client.post(
-        "/api/tasks/t/feedback", json={"action": "dismiss", "lane": "core", "path": "whales.md", "text": "x"}
-    ).json()
-    assert prefs["feedback"] == {"core": [0, 1]} and prefs["dismissed"] == [{"path": "whales.md", "text": "x"}]
+    dismissal = {"action": "dismiss", "lane": "core", "path": "whales.md", "text": "x", "start_line": 4, "end_line": 6}
+    prefs = client.post("/api/tasks/t/feedback", json=dismissal).json()
+    assert prefs["feedback"] == {"core": [0, 1]}
+    assert prefs["dismissed"] == [{"path": "whales.md", "text": "x", "lane": "core", "start_line": 4, "end_line": 6}]
     assert client.get("/api/tasks/t/prefs").json() == prefs
+    assert client.post("/api/tasks/t/feedback", json={"action": "add", "path": "whales.md"}).status_code == 400
+
+
+def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
+    client.post("/api/tasks", json={"name": "t"})
+    for text in ("x", "y"):
+        client.post("/api/tasks/t/feedback", json={"action": "dismiss", "lane": "hidden", "path": "whales.md", "text": text})
+    client.post("/api/tasks/t/feedback", json={"action": "add", "lane": "core", "path": "whales.md"})
+
+    prefs = client.post("/api/tasks/t/feedback", json={"action": "restore", "path": "whales.md", "text": " X "}).json()
+    assert [d["text"] for d in prefs["dismissed"]] == ["y"]
+    assert prefs["feedback"] == {"hidden": [0, 1], "core": [1, 0]}
+
+    client.post("/api/tasks/t/terms", json={"term": "whale", "action": "pin"})
+    assert client.delete("/api/tasks/t/prefs").json() == {"pins": [], "bans": [], "dismissed": [], "feedback": {}}
+    assert client.get("/api/tasks/t/prefs").json()["pins"] == []
+    assert len(list((corpus / "_tasks" / ".trash").glob("t.*.prefs.json"))) == 1
 
 
 def test_tasks_inside_the_corpus_are_not_indexed(client, engine):

@@ -70,10 +70,12 @@ class TermRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    action: Literal["add", "dismiss"]
-    lane: str
+    action: Literal["add", "dismiss", "restore"]
+    lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
     path: str = ""
     text: str = ""
+    start_line: int | None = None
+    end_line: int | None = None
 
 
 def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, watch: bool = True) -> FastAPI:
@@ -204,6 +206,11 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     def get_prefs(name: str):
         return tasks.prefs(name).to_dict()
 
+    @app.delete("/api/tasks/{name}/prefs")
+    def forget_prefs(name: str):
+        tasks.forget_prefs(name)
+        return tasks.prefs(name).to_dict()
+
     @app.post("/api/tasks/{name}/terms")
     def terms(name: str, body: TermRequest):
         prefs = tasks.prefs(name)
@@ -225,9 +232,14 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     @app.post("/api/tasks/{name}/feedback")
     def feedback(name: str, body: FeedbackRequest):
         prefs = tasks.prefs(name)
-        prefs.record(body.lane, added=body.action == "add")
-        if body.action == "dismiss" and body.text:
-            prefs.dismissed.append({"path": body.path, "text": body.text})
+        if body.action == "restore":
+            prefs.restore(body.path, body.text)
+        elif not body.lane:
+            raise HTTPException(400, "feedback needs the lane the passage was shown in")
+        elif body.action == "dismiss":
+            prefs.dismiss(body.lane, body.path, body.text, body.start_line, body.end_line)
+        else:
+            prefs.record(body.lane, added=True)
         tasks.save_prefs(name, prefs)
         return prefs.to_dict()
 

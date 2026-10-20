@@ -166,7 +166,7 @@ class TaskPrefs:
 
     pins: list[str] = field(default_factory=list)
     bans: list[str] = field(default_factory=list)
-    dismissed: list[dict] = field(default_factory=list)  # {"path", "text"}
+    dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line"}
     feedback: dict = field(default_factory=dict)  # lane -> [adds, dismisses]
 
     @classmethod
@@ -180,6 +180,23 @@ class TaskPrefs:
     def record(self, lane: str, added: bool) -> None:
         counts = self.feedback.setdefault(lane, [0, 0])
         counts[0 if added else 1] += 1
+
+    def dismiss(self, lane: str, path: str, text: str, start_line: int | None = None, end_line: int | None = None) -> None:
+        self.record(lane, added=False)
+        if text:
+            self.dismissed.append({"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line})
+
+    def restore(self, path: str, text: str) -> None:
+        """Undo the dismissals of a passage: it may come back, and its lanes lose those dismissals."""
+        key = (path, _norm(text))
+        kept = []
+        for d in self.dismissed:
+            if (d.get("path"), _norm(d.get("text", ""))) != key:
+                kept.append(d)
+            elif d.get("lane") in self.feedback:
+                counts = self.feedback[d["lane"]]
+                counts[1] = max(counts[1] - 1, 0)
+        self.dismissed = kept
 
 
 @dataclass

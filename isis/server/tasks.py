@@ -119,3 +119,10 @@ class TaskStore:
         prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
         path = self._meta_path(self._existing(name).stem)
         path.write_text(json.dumps(prefs.to_dict(), indent=1), encoding="utf-8")
+
+    def forget_prefs(self, name: str) -> None:
+        """Start the task's preferences over. The old file goes to .trash, like a deleted task."""
+        path = self._meta_path(self._existing(name).stem)
+        if path.exists():
+            self.trash.mkdir(exist_ok=True)
+            path.rename(self.trash / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.prefs.json")

@@ -87,9 +87,14 @@ def test_terms_follow_the_task_and_respect_pins_and_bans(engine):
 def test_dismissed_passages_stay_away(engine):
     task = "# Sea\nThe whale and the harpoon, the ship and its captain.\n"
     first = items(engine.related(task), "core")[0]
-    prefs = TaskPrefs(dismissed=[{"path": first.path, "text": first.text}])
+    prefs = TaskPrefs()
+    prefs.dismiss("core", first.path, first.text)
     again = engine.related(task, prefs=prefs)
     assert (first.path, first.start_line) not in {(h.path, h.start_line) for h in items(again)}
+
+    prefs.restore(first.path, first.text)
+    assert prefs.dismissed == [] and prefs.feedback == {"core": [0, 0]}
+    assert items(engine.related(task, prefs=prefs), "core")[0].text == first.text
 
 
 def test_bridges_link_two_themes(engine):
