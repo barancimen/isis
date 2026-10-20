@@ -1,10 +1,11 @@
 import {
   EditorState, EditorSelection, StateField, StateEffect,
-  EditorView, Decoration, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers,
+  EditorView, Decoration, WidgetType, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers,
   history, defaultKeymap, historyKeymap, indentWithTab,
   syntaxHighlighting, HighlightStyle, markdown, tags,
 } from "./vendor/codemirror.js";
 import { planInsertion } from "./insert.js";
+import { paragraphAt, softBreaks } from "./reflow.js";
 
 // ---------- helpers ----------
 
@@ -93,6 +94,7 @@ const theme = EditorView.theme({
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   ".cm-placeholder": { color: "var(--faint)", fontStyle: "italic" },
   ".cm-hit-line": { backgroundColor: "var(--hit-line)" },
+  ".cm-soft-break": { whiteSpace: "normal" }, // a joined line break: no stray space at the start of a wrapped line
   ".cm-hit-match": { backgroundColor: "var(--mark)", borderRadius: "2px" },
   ".cm-just-added": { backgroundColor: "var(--added)", transition: "background-color 1s" },
 });
@@ -116,6 +118,47 @@ function decorationSlot() {
 const hitSlot = decorationSlot();
 const addedSlot = decorationSlot();
 
+// Hard-wrapped paragraphs flow to the width of the pane: their line breaks show as spaces (see
+// reflow.js). In the task editor the paragraph being edited keeps its real lines while the
+// editor has focus, so pressing Enter visibly starts a new line.
+class SpaceWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-soft-break";
+    span.textContent = " ";
+    return span;
+  }
+}
+const softBreak = Decoration.replace({ widget: new SpaceWidget() });
+const setFocused = StateEffect.define();
+
+function reflow({ editable }) {
+  const build = (state, focused) => {
+    const lines = state.doc.toJSON();
+    const [lo, hi] = editable && focused ? paragraphAt(lines, state.doc.lineAt(state.selection.main.head).number - 1) : [-1, -1];
+    const decos = [];
+    for (const i of softBreaks(lines)) {
+      if (i >= lo && i < hi) continue;
+      const end = state.doc.line(i + 1).to;
+      decos.push(softBreak.range(end, end + 1));
+    }
+    return Decoration.set(decos);
+  };
+  // Line-break replacements must come from a state field, not a view plugin.
+  const field = StateField.define({
+    create: (state) => ({ focused: false, decos: build(state, false) }),
+    update(value, tr) {
+      let focused = value.focused;
+      for (const e of tr.effects) if (e.is(setFocused)) focused = e.value;
+      if (!tr.docChanged && focused === value.focused && !(editable && focused && tr.selection)) return value;
+      return { focused, decos: build(tr.state, focused) };
+    },
+    provide: (f) => EditorView.decorations.from(f, (value) => value.decos),
+  });
+  return editable ? [field, EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing))] : field;
+}
+
 function readerState(doc) {
   return EditorState.create({
     doc,
@@ -127,6 +170,7 @@ function readerState(doc) {
       markdown(),
       syntaxHighlighting(markdownStyle),
       theme,
+      reflow({ editable: false }),
       hitSlot.field,
       placeholder("Open a file from Files, or click a search result."),
       keymap.of([{ key: "Mod-Enter", run: () => (addReaderSelection(), true) }]),
@@ -146,6 +190,7 @@ function taskExtensions() {
     markdown(),
     syntaxHighlighting(markdownStyle),
     theme,
+    reflow({ editable: true }),
     addedSlot.field,
     placeholder(
       "Collect passages here: select text in the reader and press Ctrl/⌘+Enter, or use + on a result. " +

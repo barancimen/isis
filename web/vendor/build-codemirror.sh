@@ -11,7 +11,7 @@ npm install --silent --no-audit --no-fund \
   @codemirror/language@6.13.1 @codemirror/lang-markdown@6.5.2 @lezer/highlight@1.2.5 esbuild@0.28.2
 cat > entry.js <<'JS'
 export { EditorState, EditorSelection, StateField, StateEffect, Compartment } from "@codemirror/state";
-export { EditorView, Decoration, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers } from "@codemirror/view";
+export { EditorView, Decoration, WidgetType, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers } from "@codemirror/view";
 export { history, defaultKeymap, historyKeymap, indentWithTab } from "@codemirror/commands";
 export { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
 export { markdown } from "@codemirror/lang-markdown";
