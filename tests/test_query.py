@@ -45,6 +45,12 @@ def test_regex_must_match_and_ranks_with_the_words(engine):
     assert marked == ["white whale"]  # the phrase and its words make one mark
 
 
+
+def test_phrases_and_regexes_see_headings_like_words_do(engine):
+    assert paths(engine.search("/^Whales/")) == ["whales.md", "whales.md"]  # the heading starts each passage
+    assert paths(engine.search('+"The Pequod" +ahab')) == ["ships/pequod.md"]  # its body never names the ship
+    assert engine.search("ambergris -/^Whales/") == []
+
 def test_exclusions_drop_passages_in_both_modes(engine):
     for mode in ("lexical", "hybrid"):
         assert "whales.md" not in paths(engine.search("whale -squid -ambergris", mode=mode))

@@ -220,34 +220,32 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
     @app.put("/api/tasks/{name}/steer")
     def steer(name: str, body: SteerRequest):
-        prefs = tasks.prefs(name)
         try:
-            prefs.set_steer(body.text)
+            with tasks.edit_prefs(name) as prefs:
+                prefs.set_steer(body.text)
         except QueryError as e:
             raise HTTPException(400, str(e))
-        tasks.save_prefs(name, prefs)
         return prefs.to_dict()
 
     @app.post("/api/tasks/{name}/terms")
     def terms(name: str, body: TermRequest):
         """Chip shortcuts: they edit the steer line (boost, unboost, exclude) or the ignored list."""
-        prefs = tasks.prefs(name)
-        getattr(prefs, body.action)(body.term)
-        tasks.save_prefs(name, prefs)
+        with tasks.edit_prefs(name) as prefs:
+            getattr(prefs, body.action)(body.term)
         return prefs.to_dict()
 
     @app.post("/api/tasks/{name}/feedback")
     def feedback(name: str, body: FeedbackRequest):
-        prefs = tasks.prefs(name)
-        if body.action == "restore":
-            prefs.restore(body.path, body.text)
-        elif not body.lane:
+        if body.action != "restore" and not body.lane:
             raise HTTPException(400, "feedback needs the lane the passage was shown in")
-        elif body.action in ("dismiss", "avoid"):
-            prefs.dismiss(body.lane, body.path, body.text, body.start_line, body.end_line, avoid=body.action == "avoid")
-        else:
-            prefs.record(body.lane, added=True)
-        tasks.save_prefs(name, prefs)
+        with tasks.edit_prefs(name) as prefs:
+            if body.action == "restore":
+                prefs.restore(body.path, body.text)
+            elif body.action in ("dismiss", "avoid"):
+                prefs.dismiss(body.lane, body.path, body.text, body.start_line, body.end_line,
+                              avoid=body.action == "avoid")
+            else:
+                prefs.record(body.lane, added=True)
         return prefs.to_dict()
 
     app.mount("/", StaticFiles(directory=WEB, html=True), name="web")

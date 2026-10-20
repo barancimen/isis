@@ -592,10 +592,13 @@ def related(
             sem_w = (z * weights).max(1)
             best_unit = (z * weights).argmax(1)
         dismissed = [d for d in prefs.dismissed if d.get("text")]
+        if config.negative_weight <= 0:  # no penalty: only the anti-queries need scoring
+            dismissed = [d for d in dismissed if d.get("avoid")]
         if dismissed:
             _, z_neg = zscores(snapshot, embedder.embed([d["text"] for d in dismissed], cache=True))
-            penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
-            sem_any, sem_w = sem_any - penalty, sem_w - penalty
+            if config.negative_weight > 0:
+                penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
+                sem_any, sem_w = sem_any - penalty, sem_w - penalty
             avoid = [i for i, d in enumerate(dismissed) if d.get("avoid")]
             if avoid:  # anti-queries: everything clearly like them is out
                 avoided = z_neg[:, avoid].max(1) >= config.avoid_z

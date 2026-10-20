@@ -78,7 +78,7 @@ class Snapshot:
             while len(self._pattern_counts) >= 32:
                 self._pattern_counts.pop(next(iter(self._pattern_counts)))
             counts = np.fromiter(
-                (sum(1 for m in pattern.finditer(p.text) if m.end() > m.start()) for p in self.passages),
+                (sum(1 for m in pattern.finditer(p.embed_text) if m.end() > m.start()) for p in self.passages),
                 np.float32, len(self.passages),
             )
             self._pattern_counts[key] = counts

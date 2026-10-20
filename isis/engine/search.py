@@ -182,7 +182,7 @@ class Filters:
             ok &= ~containing(term)
         if self.required or self.excluded:
             for i in np.flatnonzero(ok):
-                text = snapshot.passages[rows[i]].text
+                text = snapshot.passages[rows[i]].embed_text  # heading too, as words are indexed
                 ok[i] = all(p.search(text) for p in self.required) and not any(p.search(text) for p in self.excluded)
         return ok
 

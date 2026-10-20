@@ -115,6 +115,27 @@ def test_dismissed_passages_stay_away(engine):
     assert items(engine.related(task, prefs=prefs), "core")[0].text == first.text
 
 
+
+def test_dismissals_are_only_embedded_when_they_are_used(engine, monkeypatch):
+    task = "# Sea\nThe whale and the harpoon, the ship and its captain.\n"
+    shown = items(engine.related(task), "core")
+    dismissed, avoided = shown[0], shown[1]
+    embedded = []
+    real = engine.embedder.embed
+    monkeypatch.setattr(engine.embedder, "embed", lambda texts, cache=False: embedded.extend(texts) or real(texts, cache))
+
+    prefs = TaskPrefs()
+    prefs.dismiss("core", dismissed.path, dismissed.text)
+    engine.related(task, prefs=prefs)
+    assert dismissed.text not in embedded  # negative_weight is 0: nothing to score it for
+
+    prefs.dismiss("core", avoided.path, avoided.text, avoid=True)
+    keys = {(h.path, h.start_line) for h in items(engine.related(task, prefs=prefs))}
+    assert avoided.text in embedded and dismissed.text not in embedded
+    assert (avoided.path, avoided.start_line) not in keys
+    engine.related(task, prefs=prefs, config=RelatedConfig(negative_weight=0.5))
+    assert dismissed.text in embedded
+
 def test_bridges_link_two_themes(engine):
     task = f"# Sea\n{' '.join(SEA_TASK)}.\n\n# Birds\n{' '.join(BIRD_TASK)}.\n"
     result = engine.related(task)

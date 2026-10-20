@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -128,3 +131,31 @@ def test_steer_line_and_avoided_passages(client):
     assert prefs["dismissed"][0]["avoid"] is True
     assert first not in texts()
     assert client.get("/api/search", params={"q": "/(oops/"}).status_code == 400
+
+
+def test_preference_changes_do_not_overwrite_each_other(corpus):
+    store = TaskStore(corpus / "_tasks")
+    store.create("T")
+
+    def click():
+        with store.edit_prefs("T") as prefs:
+            time.sleep(0.002)  # long enough for the threads to overlap without the lock
+            prefs.record("core", added=True)
+
+    threads = [threading.Thread(target=click) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert store.prefs("T").feedback == {"core": [20, 0]}
+    assert not list((corpus / "_tasks" / ".meta").glob(".*.tmp"))
+
+
+def test_unreadable_preferences_are_kept_aside(corpus):
+    store = TaskStore(corpus / "_tasks")
+    store.create("T")
+    (corpus / "_tasks" / ".meta").mkdir()
+    (corpus / "_tasks" / ".meta" / "T.json").write_text('{"steer": "whale', encoding="utf-8")
+    assert store.prefs("T").steer == ""
+    (kept,) = (corpus / "_tasks" / ".trash").glob("T.*.bad.json")
+    assert kept.read_text(encoding="utf-8") == '{"steer": "whale'

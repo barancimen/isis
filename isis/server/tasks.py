@@ -5,13 +5,17 @@ Deleted tasks are moved to `.trash/`, not removed."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..engine.related import TaskPrefs
 
+log = logging.getLogger("isis")
 ILLEGAL = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]')
 MAX_DISMISSED = 500
 
@@ -40,6 +44,13 @@ class TaskStore:
         self.folder.mkdir(parents=True, exist_ok=True)
         self.meta = self.folder / ".meta"
         self.trash = self.folder / ".trash"
+        self._locks: dict[str, threading.RLock] = {}
+        self._locks_lock = threading.Lock()
+
+    def lock(self, name: str) -> threading.RLock:
+        """One lock per task, held while its preferences are read, changed and saved."""
+        with self._locks_lock:
+            return self._locks.setdefault(self.clean(name), threading.RLock())
 
     @staticmethod
     def clean(name: str) -> str:
@@ -84,23 +95,25 @@ class TaskStore:
         return _mtime(path)
 
     def rename(self, name: str, new_name: str) -> dict:
-        path, target = self._existing(name), self._path(new_name)
-        if target.exists() and target != path:
-            raise TaskError(f"a task named {target.stem!r} already exists", 409)
-        path.rename(target)
-        meta = self._meta_path(path.stem)
-        if meta.exists():
-            meta.rename(self._meta_path(target.stem))
-        return self.read(target.stem)
+        with self.lock(name), self.lock(new_name):
+            path, target = self._existing(name), self._path(new_name)
+            if target.exists() and target != path:
+                raise TaskError(f"a task named {target.stem!r} already exists", 409)
+            path.rename(target)
+            meta = self._meta_path(path.stem)
+            if meta.exists():
+                meta.rename(self._meta_path(target.stem))
+            return self.read(target.stem)
 
     def delete(self, name: str) -> None:
-        path = self._existing(name)
-        self.trash.mkdir(exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        path.rename(self.trash / f"{path.stem}.{stamp}.md")
-        meta = self._meta_path(path.stem)
-        if meta.exists():
-            meta.rename(self.trash / f"{path.stem}.{stamp}.json")
+        with self.lock(name):
+            path = self._existing(name)
+            self.trash.mkdir(exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            path.rename(self.trash / f"{path.stem}.{stamp}.md")
+            meta = self._meta_path(path.stem)
+            if meta.exists():
+                meta.rename(self.trash / f"{path.stem}.{stamp}.json")
 
     # ---- preferences ----
 
@@ -110,19 +123,45 @@ class TaskStore:
     def prefs(self, name: str) -> TaskPrefs:
         path = self._meta_path(self._existing(name).stem)
         try:
-            return TaskPrefs.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return TaskPrefs()
+        try:
+            return TaskPrefs.from_dict(json.loads(text))
+        except (ValueError, TypeError, AttributeError):  # saves are atomic, so the file itself is bad: keep it
+            with self.lock(name):
+                self.trash.mkdir(exist_ok=True)
+                kept = self.trash / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.bad.json"
+                try:
+                    path.rename(kept)
+                    log.warning("unreadable preferences for task %r moved to %s", path.stem, kept)
+                except OSError:
+                    pass
             return TaskPrefs()
 
     def save_prefs(self, name: str, prefs: TaskPrefs) -> None:
         self.meta.mkdir(exist_ok=True)
         prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
         path = self._meta_path(self._existing(name).stem)
-        path.write_text(json.dumps(prefs.to_dict(), indent=1), encoding="utf-8")
+        tmp = path.with_name(f".{path.name}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(prefs.to_dict(), indent=1))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    @contextmanager
+    def edit_prefs(self, name: str):
+        """Read, change and save a task's preferences, one change at a time."""
+        with self.lock(name):
+            prefs = self.prefs(name)
+            yield prefs
+            self.save_prefs(name, prefs)
 
     def forget_prefs(self, name: str) -> None:
         """Start the task's preferences over. The old file goes to .trash, like a deleted task."""
-        path = self._meta_path(self._existing(name).stem)
-        if path.exists():
-            self.trash.mkdir(exist_ok=True)
-            path.rename(self.trash / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.prefs.json")
+        with self.lock(name):
+            path = self._meta_path(self._existing(name).stem)
+            if path.exists():
+                self.trash.mkdir(exist_ok=True)
+                path.rename(self.trash / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.prefs.json")
