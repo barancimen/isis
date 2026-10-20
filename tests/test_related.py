@@ -106,9 +106,20 @@ def test_single_theme_tasks_explain_missing_lanes(engine):
     assert "two themes" in lanes["bridges"].note and not lanes["bridges"].items
 
 
-def test_cursor_shifts_results_toward_the_nearby_paragraph(engine):
+def test_the_whole_document_is_the_query(engine):
+    task = f"{' '.join(SEA_TASK)}.\n\n{' '.join(BIRD_TASK)}.\n"
+    core = items(engine.related(task), "core")
+    assert core[0].path.startswith("voyage")  # passages about both topics fit the whole document best
+    keys = lambda r: [(h.path, h.start_line) for h in items(r)]
+    assert keys(engine.related(task, cursor_line=0)) == keys(engine.related(task, cursor_line=2))
+
+
+def test_paragraph_mode_can_follow_the_cursor(engine):
     task = "Whale harpoon ship captain sail.\n\nGranite fossil volcano basalt lava.\n"
-    share = lambda line: np.mean([h.path.startswith("rocks") for h in items(engine.related(task, cursor_line=line), "core")[:8]])
+    config = RelatedConfig(query="paragraphs", cursor_boost=3.0)
+    share = lambda line: np.mean(
+        [h.path.startswith("rocks") for h in items(engine.related(task, cursor_line=line, config=config), "core")[:8]]
+    )
     assert share(2) > share(0)
 
 

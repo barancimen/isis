@@ -178,7 +178,6 @@ const state = {
   relatedSeq: 0,
   searchSeq: 0,
   lastRelatedKeys: null,
-  lastParagraph: null,
   indexUpdated: null,
 };
 
@@ -353,29 +352,15 @@ async function resolveConflict(keepMine) {
 
 // ---------- task editor events ----------
 
-function paragraphAt(viewState) {
-  // The first line of the paragraph holding the cursor: changes when the cursor moves to another paragraph.
-  const doc = viewState.doc;
-  let n = doc.lineAt(viewState.selection.main.head).number;
-  while (n > 1 && doc.line(n - 1).text.trim() !== "") n--;
-  return n;
-}
-
+// The whole document is the related query, so only edits refresh it: moving the cursor or
+// selecting text does not.
 function onTaskUpdate(update) {
-  if (!state.task || update.state.readOnly) return;
-  if (update.docChanged) {
-    const doc = state.docs.get(state.task);
-    if (doc) doc.dirty = true;
-    setSaveState("Unsaved");
-    scheduleSave();
-    requestRelated(1500);
-  } else if (update.selectionSet) {
-    const paragraph = paragraphAt(update.state);
-    if (paragraph !== state.lastParagraph) {
-      state.lastParagraph = paragraph;
-      requestRelated(900);
-    }
-  }
+  if (!state.task || update.state.readOnly || !update.docChanged) return;
+  const doc = state.docs.get(state.task);
+  if (doc) doc.dirty = true;
+  setSaveState("Unsaved");
+  scheduleSave();
+  requestRelated(1500);
 }
 
 // ---------- adding to the task ----------
@@ -514,7 +499,7 @@ const WHY_LABELS = {
   themes: (v) => v.join(" ↔ "),
   rarity: (v) => `themes rarely meet (${Math.round(v * 100)}%)`,
   collected_in_theme: (v) => `${v} collected in theme`,
-  matches_task_line: (v) => `matches task line ${v + 1}`,
+  matches_task_line: (v) => `closest to task line ${v + 1}`,
   cosine: (v) => `cosine ${v.toFixed(2)}`,
 };
 
@@ -597,10 +582,8 @@ async function refreshRelated() {
   const name = state.task;
   const seq = ++state.relatedSeq;
   state.relatedStale = false;
-  const viewState = taskView.state;
-  const cursorLine = viewState.doc.lineAt(viewState.selection.main.head).number - 1;
   $("#related-status").textContent = "Updating…";
-  const result = await api("POST", `/api/tasks/${enc(name)}/related`, { text: viewState.doc.toString(), cursor_line: cursorLine });
+  const result = await api("POST", `/api/tasks/${enc(name)}/related`, { text: taskView.state.doc.toString() });
   if (seq !== state.relatedSeq || name !== state.task) return;
 
   const previous = state.lastRelatedKeys;

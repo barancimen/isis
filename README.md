@@ -43,7 +43,7 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 | **Files** | Filter and open any file in the reader. |
 | **Search** (Ctrl/⌘+K) | Words rank by BM25; `"quoted phrases"` must appear verbatim; a half-typed last word matches the terms it starts. Tick *meaning* to fuse in embedding similarity. Click a hit to open it at the match; **+** adds the passage to the task. |
 | **Reader** | Select text and press **Ctrl/⌘+Enter** (or *+ Add to task*). It goes in at the task's cursor, as its own paragraph. |
-| **Related** | Suggestions for the active task, refreshed as you write and as the cursor moves between paragraphs. The chips are the keywords taken from the task: click to pin one, × to ban it. On a suggestion, **+** adds it and × dismisses it. Both teach the panel which lanes you find useful, and a dismissed passage also pushes similar ones down. Hover a suggestion for its scores. |
+| **Related** | Suggestions for the whole task document, refreshed when you pause typing (moving the cursor or selecting text changes nothing). The chips are the keywords taken from the task: click to pin one, × to ban it. On a suggestion, **+** adds it and × dismisses it. Both teach the panel which lanes you find useful, and a dismissed passage also pushes similar ones down. Hover a suggestion for its scores. |
 
 Task documents are ordinary markdown files, so you can edit them elsewhere too. If a file changes on disk while it is open, the app asks before overwriting it. Per-task preferences (pins, bans, dismissals, feedback) live in `_tasks/.meta/<task>.json`.
 
@@ -51,10 +51,12 @@ Task documents are ordinary markdown files, so you can edit them elsewhere too. 
 
 The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and every threshold is a field of `RelatedConfig`:
 
-1. **Units.** The task is split into paragraphs. They are weighted by distance from the cursor, and paragraphs copied from the corpus are recognised as collected excerpts.
-2. **Signals.** Every corpus passage is scored two ways:
-   - its *robust z-score* of embedding similarity to each paragraph, meaning how far it stands out from the typical passage;
-   - BM25 for the task's ~20 most distinctive terms.
+1. **Units.** The task is split into paragraphs. Paragraphs copied from the corpus are recognised as collected excerpts, and headings (or clusters of similar paragraphs) become themes.
+2. **Signals.** The whole document is the query. Every corpus passage is scored two ways:
+   - its *robust z-score* of embedding similarity to the document vector (the length-weighted mean of the paragraph embeddings), meaning how far it stands out from the typical passage;
+   - BM25 for the document's ~20 most distinctive terms.
+
+   With `RelatedConfig(query="paragraphs")`, each paragraph is a query of its own instead. A passage then scores by its best match, and `cursor_boost` can weight the paragraph at the cursor. Use this when a document covers unrelated topics and you want strong matches to any one of them, not to their overlap.
 3. **Gate.** Only clearly relevant passages survive: a strong z-score, a top keyword hit with some semantic support, or a clear relation to two themes at once. Already-collected and dismissed passages are dropped.
 4. **Lanes.**
    - *Core:* reciprocal-rank fusion of both signals.

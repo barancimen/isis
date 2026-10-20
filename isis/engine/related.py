@@ -1,13 +1,16 @@
 """Related passages for a task document: the task itself is the query.
 
-1. units    Split the task into paragraphs ("units"). Weight them by distance from the cursor
-            and recognise the ones that are excerpts already collected from the corpus.
-2. signals  Score every corpus passage two ways:
-              semantic  robust z-score of its cosine similarity to each unit: how far it
-                        stands out from the typical passage (median, and median absolute
-                        deviation), so thresholds mean the same for every unit and every model;
-              lexical   BM25 for the task's most distinctive terms (TF-IDF), with the user's
-                        pinned and banned terms applied.
+1. units    Split the task into paragraphs ("units") and recognise the ones that are excerpts
+            already collected from the corpus. Headings (or clusters of paragraphs) are themes.
+2. signals  Score every corpus passage against the whole document, two ways:
+              semantic  robust z-score of its cosine similarity to the document vector (the
+                        length-weighted mean of the paragraph embeddings): how far it stands out
+                        from the typical passage (median, and median absolute deviation), so
+                        thresholds mean the same for every task and every model;
+              lexical   BM25 for the document's most distinctive terms (TF-IDF), with the
+                        user's pinned and banned terms applied.
+            With query="paragraphs" each paragraph is a query of its own instead, and a passage
+            scores by its best match (optionally weighted toward the cursor).
 3. gate     Keep only clearly relevant passages: a strong semantic z-score, or a top lexical hit
             with some semantic support. Drop what is already collected or was dismissed.
 4. lanes    Rank the survivors four ways:
@@ -56,8 +59,9 @@ EMPTY_NOTE = {
 
 @dataclass
 class RelatedConfig:
+    query: str = "document"  # "document": the whole task is one query; "paragraphs": each paragraph is
     n_query_terms: int = 20  # lexical query = the task's top TF-IDF terms
-    cursor_boost: float = 3.0  # weight of the paragraph at the cursor relative to distant ones
+    cursor_boost: float = 1.0  # > 1 weights the paragraph at the cursor up (1 = the whole document counts equally)
     cursor_decay: float = 1.0  # paragraphs over which that boost fades (1/e per this many)
     excerpt_weight: float = 1.0  # weight of collected excerpts relative to your own writing
     candidates: int = 300  # per signal
@@ -402,9 +406,16 @@ def related(
     weights = np.array([u.weight for u in units], np.float32)
     theme_z = second = None
     if semantic:
-        sem_any = z.max(1)
-        sem_w = (z * weights).max(1)
-        best_unit = (z * weights).argmax(1)
+        if config.query == "document":
+            sizes = np.array([len(u.text.split()) for u in units], np.float32) * weights
+            document = (sizes[:, None] * unit_vecs).sum(0)
+            _, z_doc = zscores(snapshot, (document / max(np.linalg.norm(document), 1e-9))[None, :])
+            sem_any = sem_w = z_doc[:, 0]
+            best_unit = np.where(np.isfinite(cos[:, 0]), cos.argmax(1), 0)  # closest paragraph, for display
+        else:
+            sem_any = z.max(1)
+            sem_w = (z * weights).max(1)
+            best_unit = (z * weights).argmax(1)
         dismissed = [d["text"] for d in prefs.dismissed if d.get("text")]
         if dismissed:
             _, z_neg = zscores(snapshot, embedder.embed(dismissed, cache=True))
