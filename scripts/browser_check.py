@@ -27,8 +27,16 @@ STAMP = time.strftime("%H%M%S")
 WHALES, ISLANDS = f"e2e-whales-{STAMP}", f"e2e-islands-{STAMP}"
 
 
-def step(n, message):
-    print(f"{n:>2}. {message}", flush=True)
+STEPS = [0]
+
+
+def step(message):
+    STEPS[0] += 1
+    print(f"{STEPS[0]:>2}. {message}", flush=True)
+
+
+def set_slider(page, selector, value):
+    page.eval_on_selector(selector, "(el, v) => { el.value = v; el.dispatchEvent(new Event('input', {bubbles: true})); }", str(value))
 
 
 def shot(page, name):
@@ -59,7 +67,7 @@ def main() -> None:
         page.keyboard.type("# Whales\nThe sperm whale dives deep to hunt giant squid.\n\n# Selection\nNatural selection preserves useful variations.")
         saved()
         assert (TASKS / f"{WHALES}.md").read_text().startswith("# Whales")
-        step(1, "created a task, typed in it, autosaved to disk")
+        step("created a task, typed in it, autosaved to disk")
 
         page.click(".side-tabs button[data-panel=search]")
         page.fill("#search-input", '"white whale"')
@@ -68,8 +76,22 @@ def main() -> None:
         page.locator("#search-results .hit .hit-body").first.click()
         expect(page.locator("#reader-path")).to_have_text(location.rsplit(":", 1)[0])
         expect(page.locator("#reader-editor .cm-hit-match").first).to_be_visible()
-        step(2, f"search hit opened at its match: {location}")
+        step(f"search hit opened at its match: {location}")
         shot(page, "search.png")
+
+        searches: list[str] = []
+        page.on("request", lambda r: "/api/search" in r.url and searches.append(urllib.parse.unquote(r.url)))
+        page.check("#search-hybrid")
+        page.locator("#search-tune > summary").click()
+        set_slider(page, "#search-tune [data-name=keyword_weight] input", 0)
+        expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
+        expect(page.locator("#search-results .hit .hit-why").first).to_have_text(re.compile(r"meaning #1$"), timeout=15000)
+        assert any('"keyword_weight":0' in u for u in searches), searches
+        assert page.locator("#search-tune .tune-python").inner_text() == "SearchConfig(keyword_weight=0)"
+        page.locator("#search-tune button", has_text="Reset to defaults").click()
+        expect(page.locator("#search-tune .tune-count")).to_have_text("")
+        page.uncheck("#search-hybrid")
+        step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
 
         page.evaluate("""() => {
             const v = window.isis.taskView, doc = v.state.doc.toString();
@@ -84,14 +106,24 @@ def main() -> None:
         doc = task_text()
         assert doc.index("squid.") < doc.index(selected) < doc.index("# Selection"), doc
         saved()
-        step(3, "reader selection inserted at the task cursor (Ctrl+Enter)")
+        step("reader selection inserted at the task cursor (Ctrl+Enter)")
 
         page.click(".side-tabs button[data-panel=related]")
         expect(page.locator("#related-lanes .lane")).to_have_count(4, timeout=30000)
         expect(page.locator("#related-lanes .hit").first).to_be_visible(timeout=30000)
         counts = page.evaluate("""() => [...document.querySelectorAll('#related-lanes .lane h3')].map(h => h.innerText.replace(/\\n/g, ' '))""")
-        step(4, f"related lanes: {counts}")
+        step(f"related lanes: {counts}")
         shot(page, "related.png")
+
+        page.locator("#related-tune > summary").click()
+        set_slider(page, "#related-tune [data-name=total_slots] input", 6)
+        expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
+        page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length <= 6", timeout=30000)
+        shot(page, "related-tuned.png")
+        page.locator("#related-tune button", has_text="Reset to defaults").click()
+        page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
+        page.locator("#related-tune > summary").click()
+        step("related parameters: 'Results' at 6 shows at most 6; reset restores the defaults")
 
         refreshes: list[str] = []
         page.on("request", lambda r: "/related" in r.url and refreshes.append(r.url))
@@ -102,14 +134,14 @@ def main() -> None:
         }""")
         page.wait_for_timeout(2500)
         assert not refreshes, "selecting text or moving the cursor refreshed the related panel"
-        step(5, "selecting text and moving the cursor leave the related panel alone")
+        step("selecting text and moving the cursor leave the related panel alone")
 
         before = len(task_text())
         page.locator("#related-lanes .hit .add").first.click()
         assert len(task_text()) > before
         saved()
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
-        step(6, f"+ inserted a related passage and recorded feedback {meta['feedback']}")
+        step(f"+ inserted a related passage and recorded feedback {meta['feedback']}")
 
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.banned")).to_have_count(1, timeout=30000)
@@ -117,7 +149,7 @@ def main() -> None:
         expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["bans"] and meta["dismissed"]
-        step(7, f"banned a term {meta['bans']} and dismissed a passage")
+        step(f"banned a term {meta['bans']} and dismissed a passage")
 
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")
@@ -127,7 +159,7 @@ def main() -> None:
         page.click("#conflict-keep")
         saved()
         assert (TASKS / f"{WHALES}.md").read_text().endswith("More.")
-        step(8, "a change on disk was detected; 'Keep mine' overwrote it")
+        step("a change on disk was detected; 'Keep mine' overwrote it")
 
         cursor = page.evaluate("window.isis.taskView.state.selection.main.head")
         answers.append(ISLANDS)
@@ -137,7 +169,7 @@ def main() -> None:
         expect(page.locator(".task-tab.active")).to_contain_text(WHALES)
         assert task_text().endswith("More.")
         assert page.evaluate("window.isis.taskView.state.selection.main.head") == cursor
-        step(9, "switched tasks and back; text and cursor kept")
+        step("switched tasks and back; text and cursor kept")
 
         page.click(".side-tabs button[data-panel=files]")
         first = page.evaluate("window.isis.state.files[0].path")
@@ -145,7 +177,7 @@ def main() -> None:
         expect(page.locator("#file-list .file").first).to_have_attribute("data-path", first)
         page.locator("#file-list .file").first.click()
         expect(page.locator("#reader-path")).to_have_text(first)
-        step(10, f"files panel filtered and opened {first}")
+        step(f"files panel filtered and opened {first}")
         shot(page, "files.png")
         browser.close()
 

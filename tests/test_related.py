@@ -127,6 +127,8 @@ def test_slot_allocation_adds_up_and_learns():
     config = RelatedConfig()
     slots = allocate_slots(list(LANES), TaskPrefs(), config, seed=3)
     assert sum(slots.values()) == config.total_slots and min(slots.values()) >= config.min_slots
+    for total in (6, 3):  # fewer slots than the per-lane minimums add up to: the total still holds
+        assert sum(allocate_slots(list(LANES), TaskPrefs(), RelatedConfig(total_slots=total), seed=3).values()) == total
     assert allocate_slots(list(LANES), TaskPrefs(), config, seed=3) == slots
 
     keen = TaskPrefs(feedback={"hidden": [20, 0], "core": [0, 20]})

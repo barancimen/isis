@@ -179,6 +179,8 @@ const state = {
   searchSeq: 0,
   lastRelatedKeys: null,
   indexUpdated: null,
+  paramSpecs: { search: [], related: [] }, // from /api/params
+  params: loadParams(), // this browser's overrides: {search: {name: value}, related: {...}}
 };
 
 // ---------- tasks ----------
@@ -556,7 +558,8 @@ const runSearch = debounce(async () => {
     return;
   }
   try {
-    const result = await api("GET", `/api/search?q=${enc(q)}&mode=${mode}&limit=50`);
+    const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
+    const result = await api("GET", `/api/search?q=${enc(q)}&mode=${mode}&limit=50${tuned}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
     const how = mode === "hybrid" ? " by keywords and meaning" : "";
@@ -593,7 +596,10 @@ async function refreshRelated() {
   const seq = ++state.relatedSeq;
   state.relatedStale = false;
   $("#related-status").textContent = "Updating…";
-  const result = await api("POST", `/api/tasks/${enc(name)}/related`, { text: taskView.state.doc.toString() });
+  const result = await api("POST", `/api/tasks/${enc(name)}/related`, {
+    text: taskView.state.doc.toString(),
+    params: state.params.related,
+  });
   if (seq !== state.relatedSeq || name !== state.task) return;
 
   const previous = state.lastRelatedKeys;
@@ -646,6 +652,120 @@ async function dismiss(hit, lane, element) {
   requestRelated(400);
 }
 
+// ---------- tunable parameters ----------
+
+// Each panel has a drawer of sliders built from /api/params. Overrides live in this browser and
+// travel with every request, so the server's defaults never change.
+
+function loadParams() {
+  try {
+    const saved = JSON.parse(store.get("params") || "{}");
+    return { search: saved.search || {}, related: saved.related || {} };
+  } catch {
+    return { search: {}, related: {} };
+  }
+}
+
+function saveParams() {
+  store.set("params", JSON.stringify(state.params));
+}
+
+function formatValue(spec, value) {
+  if (spec.type !== "float") return String(value);
+  const digits = String(spec.step).split(".")[1]?.length ?? 0;
+  return Number(value).toFixed(digits);
+}
+
+const pythonValue = (v) => (typeof v === "string" ? JSON.stringify(v) : String(v));
+
+// The same settings as Python, e.g. RelatedConfig(z_strong=2.0), for the notebook.
+function pythonSnippet(kind) {
+  const overrides = state.params[kind];
+  const specs = state.paramSpecs[kind];
+  const args = [];
+  const done = new Set();
+  for (const spec of specs) {
+    const [field, key] = spec.name.split(".");
+    if (!key) {
+      if (spec.name in overrides) args.push(`${field}=${pythonValue(overrides[spec.name])}`);
+      continue;
+    }
+    if (done.has(field)) continue;
+    done.add(field);
+    const members = specs.filter((s) => s.name.startsWith(`${field}.`));
+    if (!members.some((s) => s.name in overrides)) continue;
+    const entries = members.map((s) => `"${s.name.slice(field.length + 1)}": ${pythonValue(overrides[s.name] ?? s.default)}`);
+    args.push(`${field}={${entries.join(", ")}}`);
+  }
+  return `${kind === "search" ? "SearchConfig" : "RelatedConfig"}(${args.join(", ")})`;
+}
+
+function paramRow(kind, spec) {
+  const value = state.params[kind][spec.name] ?? spec.default;
+  const output = h("output", {}, formatValue(spec, value));
+  const input = spec.type === "choice"
+    ? h("select", {}, spec.choices.map((c) => h("option", { value: c, selected: c === value }, c)))
+    : h("input", { type: "range", min: spec.min, max: spec.max, step: spec.step, value });
+  input.addEventListener("input", () => {
+    const v = spec.type === "choice" ? input.value : Number(input.value);
+    output.textContent = formatValue(spec, v);
+    if (v === spec.default) delete state.params[kind][spec.name];
+    else state.params[kind][spec.name] = v;
+    saveParams();
+    updateTuner(kind);
+    if (kind === "search") runSearch();
+    else requestRelated(250);
+  });
+  return h("label", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nDefault: ${formatValue(spec, spec.default)}` },
+    h("span", { class: "tune-label" }, spec.label), input, spec.type === "choice" ? null : output);
+}
+
+function buildTuner(kind) {
+  const rows = [];
+  let group = null;
+  for (const spec of state.paramSpecs[kind]) {
+    if (spec.group !== group) rows.push(h("div", { class: "tune-group" }, (group = spec.group)));
+    rows.push(paramRow(kind, spec));
+  }
+  $(`#${kind}-tune`).replaceChildren(
+    h("summary", {}, "Parameters", h("span", { class: "tune-count" })),
+    h("div", { class: "tune-body" },
+      rows,
+      h("div", { class: "tune-foot" },
+        h("button", { onclick: () => resetParams(kind) }, "Reset to defaults"),
+        h("code", { class: "tune-python", title: "The same settings in Python, for notebooks/explore.ipynb" }),
+      ),
+    ),
+  );
+  updateTuner(kind);
+}
+
+function updateTuner(kind) {
+  const el = $(`#${kind}-tune`);
+  const changed = Object.keys(state.params[kind]).length;
+  el.querySelector(".tune-count").textContent = changed ? ` · ${changed} changed` : "";
+  for (const row of el.querySelectorAll(".tune-row")) row.classList.toggle("changed", row.dataset.name in state.params[kind]);
+  el.querySelector(".tune-python").textContent = pythonSnippet(kind);
+}
+
+function resetParams(kind) {
+  state.params[kind] = {};
+  saveParams();
+  buildTuner(kind);
+  if (kind === "search") runSearch();
+  else requestRelated(0);
+}
+
+async function loadParamSpecs() {
+  state.paramSpecs = await api("GET", "/api/params");
+  for (const kind of ["search", "related"]) {
+    const known = new Set(state.paramSpecs[kind].map((s) => s.name));
+    for (const name of Object.keys(state.params[kind])) if (!known.has(name)) delete state.params[kind][name];
+    buildTuner(kind);
+  }
+  saveParams();
+}
+
 // ---------- panels ----------
 
 function showPanel(name) {
@@ -686,6 +806,11 @@ async function pollStatus() {
 // ---------- wiring ----------
 
 function bind() {
+  for (const kind of ["search", "related"]) {
+    const drawer = $(`#${kind}-tune`);
+    drawer.open = store.get(`tune-${kind}`) === "open";
+    drawer.addEventListener("toggle", () => store.set(`tune-${kind}`, drawer.open ? "open" : "closed"));
+  }
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
   $("#reader-add").addEventListener("click", addReaderSelection);
   $("#conflict-load").addEventListener("click", () => resolveConflict(false).catch(fail));
@@ -712,6 +837,7 @@ function bind() {
 
 async function init() {
   bind();
+  await loadParamSpecs();
   showPanel(store.get("panel") || "search");
   await Promise.all([loadTasks(), loadFiles()]);
   const last = store.get("task");

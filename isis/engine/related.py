@@ -120,7 +120,7 @@ class RelatedConfig:
         help="Meaning z-score a hidden connection needs.",
     )
     hidden_max_obviousness: float = tunable(
-        0.3, label="Hidden: max keyword overlap", group=LANES_GROUP, min=0.0, max=1.0, step=0.05,
+        0.3, label="Hidden: max overlap", group=LANES_GROUP, min=0.0, max=1.0, step=0.05,
         help="A hidden connection's keyword score may be at most this share of the best keyword match.",
     )
     bridge_z: float = tunable(
@@ -384,12 +384,13 @@ def allocate_slots(lanes: list[str], prefs: TaskPrefs, config: RelatedConfig, se
         a, b = config.lane_prior.get(lane, (1.0, 1.0))
         adds, dismisses = prefs.feedback.get(lane, [0, 0])
         draws.append(rng.beta(a + adds, b + dismisses))
-    spare = max(0, config.total_slots - config.min_slots * len(lanes))
+    base = min(config.min_slots, config.total_slots // len(lanes))  # the total always wins
+    spare = config.total_slots - base * len(lanes)
     shares = np.array(draws) / sum(draws) * spare
     slots = np.floor(shares).astype(int)
     for i in np.argsort(-(shares - slots))[: spare - slots.sum()]:  # largest remainders
         slots[i] += 1
-    return {lane: config.min_slots + int(n) for lane, n in zip(lanes, slots)}
+    return {lane: base + int(n) for lane, n in zip(lanes, slots)}
 
 
 def mmr_select(

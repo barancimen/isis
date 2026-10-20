@@ -41,9 +41,9 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 |---|---|
 | **Tasks** (left column) | **+** creates a task. Click a tab to switch; hover for rename ✎ and delete × (deleted tasks go to `_tasks/.trash/`). Each task keeps its own cursor and undo history while the page is open. |
 | **Files** | Filter and open any file in the reader. |
-| **Search** (Ctrl/⌘+K) | Words rank by BM25; `"quoted phrases"` must appear verbatim; a half-typed last word matches the terms it starts. Tick *meaning* to blend in embedding similarity; each hit then shows its rank by keywords and by meaning. Click a hit to open it at the match; **+** adds the passage to the task. |
+| **Search** (Ctrl/⌘+K) | Words rank by BM25; `"quoted phrases"` must appear verbatim; a half-typed last word matches the terms it starts. Tick *meaning* to blend in embedding similarity; each hit then shows its rank by keywords and by meaning. **Parameters** opens sliders for BM25 and the fusion. Click a hit to open it at the match; **+** adds the passage to the task. |
 | **Reader** | Select text and press **Ctrl/⌘+Enter** (or *+ Add to task*). It goes in at the task's cursor, as its own paragraph. |
-| **Related** | Suggestions for the whole task document, refreshed when you pause typing (moving the cursor or selecting text changes nothing). The chips are the keywords taken from the task: click to pin one, × to ban it. On a suggestion, **+** adds it and × dismisses it. Both teach the panel which lanes you find useful, and a dismissed passage also pushes similar ones down. Hover a suggestion for its scores. |
+| **Related** | Suggestions for the whole task document, refreshed when you pause typing (moving the cursor or selecting text changes nothing). The chips are the keywords taken from the task: click to pin one, × to ban it. On a suggestion, **+** adds it and × dismisses it. Both teach the panel which lanes you find useful, and a dismissed passage also pushes similar ones down. Hover a suggestion for its scores. **Parameters** opens sliders for every threshold of the pipeline below. |
 
 Task documents are ordinary markdown files, so you can edit them elsewhere too. If a file changes on disk while it is open, the app asks before overwriting it. Per-task preferences (pins, bans, dismissals, feedback) live in `_tasks/.meta/<task>.json`.
 
@@ -71,7 +71,9 @@ The default thresholds were calibrated by hand on the sample corpus with bge-mic
 
 ## Playing with the algorithm
 
-[`notebooks/explore.ipynb`](notebooks/explore.ipynb) walks through it: typed search, `related()` with different configs and preferences, the z-score distributions, and a **hold-out evaluation**. That evaluation (`isis.engine.evaluate`) hides some of a task's excerpts and measures how many come back, and through which lane. `compare()` runs it over several tasks and configs.
+**In the page:** open **Parameters** in the Search or Related panel. Every slider re-runs the panel as you move it; hover one for what it does and its default. Your settings stay in this browser only and are sent with each request, so the server's defaults never change. The drawer also shows the same settings as Python (`SearchConfig(...)` or `RelatedConfig(...)`) to paste into the notebook.
+
+**In a notebook:** [`notebooks/explore.ipynb`](notebooks/explore.ipynb) walks through it: typed search, `related()` with different configs and preferences, the z-score distributions, and a **hold-out evaluation**. That evaluation (`isis.engine.evaluate`) hides some of a task's excerpts and measures how many come back, and through which lane. `compare()` runs it over several tasks and configs.
 
 ```python
 from isis.engine.index import Engine
