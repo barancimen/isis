@@ -36,3 +36,24 @@ def test_bge_micro_ranks_paraphrase_above_unrelated_and_handles_long_text():
     assert np.isclose(np.linalg.norm(v), 1) and v @ a > 0.8
     cached = e.embed(["The whale swam through the cold ocean."], cache=True)
     assert np.allclose(cached[0], a, atol=1e-5)
+
+
+def test_a_cached_model_never_touches_the_network(monkeypatch, tmp_path):
+    import huggingface_hub
+
+    from isis.engine.semantic import Embedder
+
+    cached = tmp_path / "tokenizer.json"
+    cached.write_text("{}")
+    downloads = []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **k: downloads.append(a) or str(tmp_path / "new"))
+    lookups = {"tokenizer.json": str(cached), "1_Pooling/config.json": object(), "missing.json": None}
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda repo, name: lookups[name])
+    e = Embedder.__new__(Embedder)
+    e.model_id = "some/model"
+    assert e._fetch("tokenizer.json") == str(cached)
+    with pytest.raises(FileNotFoundError):
+        e._fetch("1_Pooling/config.json")  # known to be absent: no request either
+    assert downloads == []
+    e._fetch("missing.json")  # not in the cache yet: the one case that downloads
+    assert downloads == [("some/model", "missing.json")]

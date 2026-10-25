@@ -32,6 +32,8 @@ Point `isis serve` at any folder of `.md` files.
   - `--reload`: restart when the Python code changes, handy while you tune the algorithm.
 - `isis index CORPUS` builds the index without starting the server.
 
+**Nothing leaves the machine.** Once the model is cached (after the first run), isis makes no network requests at all: model files are read from the local Hugging Face cache without asking the network, Hugging Face telemetry is off, the page loads nothing from outside (no fonts, CDNs or analytics; FastAPI's `/docs` pages, which load from a CDN, are turned off), and the search fields have spellcheck off so a browser's cloud spellcheck never sees them. The only downloads are `pip install`, the model on the first run, and `scripts/fetch_sample_corpus.py`. To be certain, set `HF_HUB_OFFLINE=1`, or run it without network access.
+
 The server has no authentication. Keep the default `--host 127.0.0.1`, and use an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 yourserver`) to reach it on a remote machine. It answers only requests addressed to this machine or to the `--host` address, so a web page can't reach it by pointing its own domain at 127.0.0.1 (DNS rebinding); `--allow-host` adds names. With `--host 0.0.0.0` and no `--allow-host`, any name is answered.
 
 ## Using it

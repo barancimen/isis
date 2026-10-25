@@ -263,3 +263,8 @@ def test_a_task_that_is_not_utf8_gives_a_clear_error(client, corpus):
     (corpus / "_tasks" / "t.md").write_bytes("caf\xe9".encode("latin-1"))
     response = client.get("/api/tasks/t")
     assert response.status_code == 422 and "UTF-8" in response.json()["detail"]
+
+
+def test_no_pages_that_load_from_a_cdn(client):
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404

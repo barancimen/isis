@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import zlib
 from collections import OrderedDict
@@ -12,6 +13,8 @@ from functools import lru_cache
 import numpy as np
 
 from .text import tokenize
+
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")  # read when huggingface_hub is imported
 
 DEFAULT_MODEL = "TaylorAI/bge-micro-v2"
 
@@ -65,13 +68,17 @@ class Embedder:
         self._cache_lock = threading.Lock()  # searches and the related panel embed at the same time
 
     def _fetch(self, filename: str) -> str:
-        """A model file from the local Hugging Face cache, downloading it only if it isn't there."""
-        from huggingface_hub import hf_hub_download
+        """A model file from the local Hugging Face cache. Only a file the cache doesn't have is
+        downloaded (the first run); with the model cached, nothing goes over the network. A file
+        the repo is known not to have raises FileNotFoundError, also without the network."""
+        from huggingface_hub import hf_hub_download, try_to_load_from_cache
 
-        try:
-            return hf_hub_download(self.model_id, filename, local_files_only=True)
-        except Exception:
-            return hf_hub_download(self.model_id, filename)
+        cached = try_to_load_from_cache(self.model_id, filename)  # reads the cache folder only
+        if isinstance(cached, str):
+            return cached
+        if cached is not None:  # cached as missing from the repo
+            raise FileNotFoundError(f"{self.model_id} has no {filename}")
+        return hf_hub_download(self.model_id, filename)
 
     def embed(self, texts: list[str], cache: bool = False) -> np.ndarray:
         """One normalised row per text. `cache=True` remembers results (for task paragraphs,

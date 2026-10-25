@@ -124,7 +124,8 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         yield
         stop.set()
 
-    app = FastAPI(title="isis", lifespan=lifespan)
+    # No /docs or /redoc: FastAPI's pages for them load scripts from a public CDN.
+    app = FastAPI(title="isis", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     if allowed_hosts is not None:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 

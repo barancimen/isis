@@ -24,12 +24,12 @@
       <button role="tab" data-panel="related">Related</button>
     </div>
     <section id="panel-files" class="panel" role="tabpanel">
-      <input id="file-filter" type="search" placeholder="Filter files…" aria-label="Filter files">
+      <input id="file-filter" spellcheck="false" type="search" placeholder="Filter files…" aria-label="Filter files">
       <ul id="file-list"></ul>
     </section>
     <section id="panel-search" class="panel" role="tabpanel">
       <div class="search-row">
-        <input id="search-input" type="search" placeholder="Search the corpus…" aria-label="Search the corpus">
+        <input id="search-input" spellcheck="false" type="search" placeholder="Search the corpus…" aria-label="Search the corpus">
         <label class="toggle" title="Also match by meaning (fuses BM25 with embeddings)"><input id="search-hybrid" type="checkbox"> meaning</label>
       </div>
       <div class="hint">Words rank by BM25. A <code>"phrase"</code> or <code>/regex/</code> ranks like a word; <code>+x</code> requires x and <code>-x</code> excludes it, even with <em>meaning</em> ticked. Ctrl/⌘+K jumps here.</div>
