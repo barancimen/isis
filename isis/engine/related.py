@@ -127,6 +127,11 @@ class RelatedConfig:
         help="Core ranks by reciprocal-rank fusion. Large k favours passages good on both signals; small k "
         "lets the best of either signal through.",
     )
+    unembedded_weight: float = tunable(
+        1.0, label="Core: not embedded", group=LANES_GROUP, min=0.0, max=3.0, step=0.1,
+        help="A passage without embeddings has no meaning rank, so its keyword rank counts in its place, times "
+        "this. 0: keywords only.",
+    )
     hidden_z: float = tunable(
         2.5, label="Hidden: meaning", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
         help="Meaning z-score a hidden connection needs.",
@@ -769,7 +774,10 @@ def related(
     lex_best = float(lex.max()) if n else 0.0
 
     for row in gated:
-        lane_scores["core"][row] = 1 / (config.rrf_k + lex_rank[row] + 1) + 1 / (config.rrf_k + sem_rank[row] + 1)
+        keyword = 1 / (config.rrf_k + lex_rank[row] + 1)
+        no_vector = semantic and not snapshot.has_vector[row]  # the keyword rank stands in for the meaning rank
+        meaning = config.unembedded_weight * keyword if no_vector else 1 / (config.rrf_k + sem_rank[row] + 1)
+        lane_scores["core"][row] = keyword + meaning
 
     if not semantic:
         for lane in ("hidden", "bridges", "gaps"):

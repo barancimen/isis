@@ -308,3 +308,25 @@ def test_the_watcher_follows_links_and_moved_folders(engine, corpus, tmp_path):
         (tmp_path / "moved").rename(corpus / "moved")
         assert wait_until(lambda: engine.search("tapirword"))
 
+
+def test_the_watcher_sees_no_embed_files_and_every_folder(tmp_path):
+    from isis.engine.index import Engine
+    from isis.engine.semantic import HashEmbedder
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "one.md").write_text("Newtword is here.\n")
+    (b / "two.md").write_text("Oryxword is here.\n")
+    engine = Engine([a, b], embedder=HashEmbedder())
+    engine.refresh()
+    with TestClient(create_app(engine, TaskStore(tmp_path / "tasks"), background=False, watch=True)) as c:
+        time.sleep(1)
+        (b / "three.md").write_text("Pumaword arrives in the second folder.\n")
+        assert wait_until(lambda: engine.search("pumaword"))
+        assert c.get("/api/file", params={"path": "b/three.md"}).status_code == 200
+        (b / ".no-embed").touch()
+        assert wait_until(lambda: engine.status.unembedded == 2)
+        assert c.get("/api/status").json()["unembedded"] == 2
+        (b / ".no-embed").unlink()
+        assert wait_until(lambda: engine.status.unembedded == 0)

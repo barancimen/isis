@@ -7,18 +7,26 @@ import os
 import sys
 from pathlib import Path
 
-from .engine.index import configure_logging
+from .engine.index import configure_logging, corpus_exclude
 from .engine.semantic import DEFAULT_MODEL
 
 
-def make_engine(corpus: str, tasks: str | None, model: str | None):
+def folders_of(corpus: list[str]) -> list[Path]:
+    folders = [Path(d).resolve() for d in corpus]
+    for d in folders:
+        if not d.is_dir():
+            sys.exit(f"isis: not a folder: {d}")
+    return folders
+
+
+def make_engine(corpus: list[str], tasks: str | None, model: str | None):
     from .engine.index import Engine
     from .engine.semantic import Embedder
 
-    root = Path(corpus).resolve()
-    tasks_dir = Path(tasks).resolve() if tasks else root / "_tasks"
+    folders = folders_of(corpus)
+    tasks_dir = Path(tasks).resolve() if tasks else folders[0] / "_tasks"
     embedder = Embedder(model) if model else None
-    return Engine(root, embedder=embedder, exclude=(tasks_dir,)), tasks_dir
+    return Engine(folders, embedder=embedder, exclude=corpus_exclude(folders, tasks_dir)), tasks_dir
 
 
 def cmd_index(args) -> None:
@@ -40,7 +48,7 @@ def allowed_hosts(host: str, extra: list[str]) -> list[str]:
 def cmd_serve(args) -> None:
     import uvicorn
 
-    os.environ["ISIS_CORPUS"] = str(Path(args.corpus).resolve())
+    os.environ["ISIS_CORPUS"] = os.pathsep.join(map(str, folders_of(args.corpus)))
     if args.tasks:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
     os.environ["ISIS_MODEL"] = "" if args.no_model else args.model
@@ -64,8 +72,8 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("corpus", help="folder of markdown files")
-        p.add_argument("--tasks", help="folder for task documents (default: <corpus>/_tasks)")
+        p.add_argument("corpus", nargs="+", help="one or more folders of markdown files")
+        p.add_argument("--tasks", help="folder for task documents (default: _tasks in the first folder)")
         p.add_argument("--model", default=DEFAULT_MODEL, help=f"embedding model (default: {DEFAULT_MODEL})")
         p.add_argument("--no-model", action="store_true", help="lexical search only, no embeddings")
 

@@ -271,3 +271,103 @@ def test_the_index_says_what_it_did(tmp_path, caplog):
     again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
     fourth = said(again.refresh)
     assert "3 markdown files, no changes since the last run" in fourth
+
+
+def test_a_no_embed_file_keeps_a_folder_to_keywords(corpus, tmp_path):
+    index = tmp_path / "index"
+    (corpus / "ships" / ".no-embed").touch()
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    e.refresh()
+    has = {p.path: bool(v) for p, v in zip(e.snapshot.passages, e.snapshot.has_vector)}
+    assert has["whales.md"] and not has["ships/pequod.md"]
+    assert e.status.unembedded == sum(p.path.startswith("ships/") for p in e.snapshot.passages)
+    assert paths(e.search("pequod")) and paths(e.search("pequod"))[0] == "ships/pequod.md"  # still found by keywords
+    assert ".no-embed" not in " ".join(e.snapshot.file_rows)
+
+    (corpus / "ships" / "deep").mkdir()  # subfolders too
+    (corpus / "ships" / "deep" / "more.md").write_text("Walrusword below the marker.\n")
+    assert e.refresh()["embedded"] == 0
+
+    (corpus / "ships" / ".no-embed").unlink()  # removing it embeds the folder
+    stats = e.refresh()
+    assert stats["embedded"] == sum(p.path.startswith("ships/") for p in e.snapshot.passages) and e.status.unembedded == 0
+
+    (corpus / ".no-embed").touch()  # at the top: the whole corpus; embeddings already made are dropped
+    assert e.refresh()["embedded"] == 0
+    assert not e.snapshot.has_vector.any() and e.status.unembedded == len(e.snapshot)
+    again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    assert not again.snapshot.has_vector.any() and again.refresh()["embedded"] == 0
+
+
+def test_hybrid_search_does_not_bury_passages_without_embeddings(tmp_path):
+    from isis.engine.search import SearchConfig
+
+    root = tmp_path / "c"
+    (root / "plain").mkdir(parents=True)
+    (root / "plain" / ".no-embed").touch()
+    (root / "plain" / "exact.md").write_text("Coral reefs and coral atolls.\n")
+    for i in range(6):  # embedded passages that share a word and so are close in meaning
+        (root / f"e{i}.md").write_text(f"Coral and the sea, number {i}, with other words here.\n")
+    e = Engine(root, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    e.refresh()
+    rank = lambda w: paths(e.search("coral reefs", mode="hybrid", config=SearchConfig(unembedded_weight=w))).index("plain/exact.md")
+    assert rank(1.0) == 0 and rank(0.0) > 0
+    hit = next(h for h in e.search("coral reefs", mode="hybrid") if h.path == "plain/exact.md")
+    assert hit.why["embedded"] is False and hit.why["meaning_rank"] is None
+
+
+def two_folders(tmp_path):
+    a, b = tmp_path / "x" / "notes", tmp_path / "books"
+    (a / "sub").mkdir(parents=True)
+    b.mkdir()
+    (a / "sub" / "n.md").write_text("Aardvarkword in the notes.\n")
+    (b / "b.md").write_text("Bisonword in the books.\n")
+    return a, b
+
+
+def test_several_folders_are_one_corpus(tmp_path):
+    a, b = two_folders(tmp_path)
+    e = Engine([a, b], embedder=HashEmbedder())
+    e.refresh()
+    assert sorted(e.snapshot.file_rows) == ["books/b.md", "notes/sub/n.md"]
+    assert paths(e.search("bisonword")) == ["books/b.md"]
+    assert e.read_lines("notes/sub/n.md")[0].startswith("Aardvarkword")
+    for bad in ("sub/n.md", "other/b.md", "notes/../../books/b.md", "notes"):
+        with pytest.raises(ValueError):
+            e.resolve(bad)
+
+    (b / "c.md").write_text("Camelword arrives later.\n")  # edits and removals work per folder
+    (a / "sub" / "n.md").unlink()
+    stats = e.refresh()
+    assert (stats["new"], stats["removed"]) == (1, 1)
+    assert sorted(e.snapshot.file_rows) == ["books/b.md", "books/c.md"]
+
+
+def test_each_folder_keeps_its_own_cache(tmp_path):
+    a, b = two_folders(tmp_path)
+    Engine([a, b], embedder=HashEmbedder()).refresh()
+    assert (a / ".isis" / "index.json").exists() and (b / ".isis" / "index.json").exists()
+
+    alone = Engine(b, embedder=HashEmbedder())  # served alone later: nothing to embed again
+    assert alone.snapshot.has_vector.all()
+    assert alone.refresh()["embedded"] == 0 and paths(alone.search("bisonword")) == ["b.md"]
+
+    alone2 = Engine([b, a], embedder=HashEmbedder())  # either order, and terms keep their meaning
+    assert alone2.refresh()["embedded"] == 0
+    assert paths(alone2.search("aardvarkword")) == ["notes/sub/n.md"] and paths(alone2.search("bisonword")) == ["books/b.md"]
+    assert alone2.index_bytes() > 0
+
+
+def test_folders_with_the_same_name_or_inside_each_other(tmp_path):
+    a, b = tmp_path / "one" / "notes", tmp_path / "two" / "notes"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    (a / "a.md").write_text("Aardvarkword.\n")
+    (b / "b.md").write_text("Bisonword.\n")
+    e = Engine([a, b], index_dir=tmp_path / "i")
+    e.refresh()
+    assert sorted(e.snapshot.file_rows) == ["notes-2/b.md", "notes/a.md"]
+
+    nested = Engine([tmp_path / "one", a, tmp_path / "one"], index_dir=tmp_path / "j")  # a repeat, and a folder inside another
+    nested.refresh()
+    assert sorted(nested.snapshot.file_rows) == ["one/notes/a.md"]

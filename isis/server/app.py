@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
-from ..engine.index import MARKDOWN, Engine, configure_logging
+from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
 from ..engine.search import QueryError, SearchConfig
@@ -100,14 +100,18 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         from watchfiles import watch as watch_files
 
         tasks_dir = tasks.folder.resolve()
+        roots = list(engine.roots.values())
 
         def relevant(_, path: str) -> bool:
             p = Path(path)
-            try:
-                hidden = any(part.startswith(".") for part in p.relative_to(engine.root).parts)
-            except ValueError:
+            root = next((r for r in roots if r == p or r in p.parents), None)
+            if root is None:
                 return False
-            if hidden or p == tasks_dir or tasks_dir in p.parents:
+            if p.name == NO_EMBED:  # a hidden file, but it changes what gets embedded
+                return True
+            if any(part.startswith(".") for part in p.relative_to(root).parts):
+                return False
+            if any(x == p or x in p.parents for x in (tasks_dir, *engine.exclude)):
                 return False
             # Besides markdown files: folders and links, which may bring many files at once (a
             # moved folder is one event), and deleted paths, which may have been either.
@@ -115,7 +119,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
         while not stop.is_set():  # a watch covers the linked folders that exist when it starts
             links = engine.links
-            for _ in watch_files(engine.root, watch_filter=relevant, stop_event=stop, debounce=800):
+            for _ in watch_files(*roots, watch_filter=relevant, stop_event=stop, debounce=800):
                 refresh()
                 if engine.links != links:
                     break
@@ -151,7 +155,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         return {
             **plain(engine.status),
             "index_bytes": engine.index_bytes(),
-            "corpus": str(engine.root),
+            "corpus": ", ".join(map(str, engine.roots.values())),
             "model": getattr(engine.embedder, "model_id", None),
         }
 
@@ -274,14 +278,15 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
 
 def app_from_env() -> FastAPI:
-    """The app `isis serve` runs, configured through ISIS_CORPUS, ISIS_TASKS, ISIS_MODEL and
-    ISIS_HOSTS (comma-separated Host names to answer, or "*"; default: this machine only)."""
+    """The app `isis serve` runs, configured through ISIS_CORPUS (folders separated like PATH),
+    ISIS_TASKS, ISIS_MODEL and ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
+    this machine only)."""
     from ..engine.semantic import Embedder
 
     configure_logging()
-    corpus = Path(os.environ["ISIS_CORPUS"])
-    tasks_dir = Path(os.environ.get("ISIS_TASKS") or corpus / "_tasks")
+    folders = [Path(d) for d in os.environ["ISIS_CORPUS"].split(os.pathsep)]
+    tasks_dir = Path(os.environ.get("ISIS_TASKS") or folders[0] / "_tasks")
     model = os.environ.get("ISIS_MODEL", "")
-    engine = Engine(corpus, embedder=Embedder(model) if model else None, exclude=(tasks_dir,))
+    engine = Engine(folders, embedder=Embedder(model) if model else None, exclude=corpus_exclude(folders, tasks_dir))
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
     return create_app(engine, TaskStore(tasks_dir), allowed_hosts=hosts)

@@ -19,18 +19,21 @@ python3 -m venv .venv
 .venv/bin/isis serve sample_corpus           # then open http://127.0.0.1:8000
 ```
 
-Point `isis serve` at any folder of `.md` files. Subfolders are scanned at any depth, and symlinked folders and files are followed, so a folder from elsewhere can join the corpus through a link (a link loop ends, and anything reachable twice is indexed once). Hidden files and folders are skipped. The terminal reports what happens: how many files are new, changed or removed, embedding progress, and links it follows or skips.
+Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1 dir2`. Subfolders are scanned at any depth, and symlinked folders and files are followed, so a folder from elsewhere can join the corpus through a link (a link loop ends, and anything reachable twice is indexed once). Hidden files and folders are skipped. The terminal reports what happens: how many files are new, changed or removed, embedding progress, and links it follows or skips.
+
+- **Several folders.** They act as one corpus, and each appears under its own name in Files (two folders with the same name become `notes` and `notes-2`). Each keeps its own index in its `.isis/`, so it can later be served alone, or with other folders, without embedding it again. Task documents go in `_tasks` of the first folder, unless you pass `--tasks`.
+- **Folders too large to embed.** Put an empty file named `.no-embed` in a folder (`touch big/.no-embed`): it and its subfolders are then searched by keywords only. Adding the file drops embeddings already made for that folder; removing it embeds the folder. Meaning search can't find those passages. In a hybrid search their keyword rank counts in place of the meaning rank they lack, so strong keyword matches aren't buried; **Parameters › Not embedded** sets how much it counts, in both Search and Related. Related shows them in Core only, and they get in on a top keyword rank alone, with no check on meaning.
 
 - **First run.** It downloads the model (67 MB) and embeds every passage in the background. That runs at about 15 passages/s on one slow CPU core, and much faster on a laptop. Keyword search works while it runs.
 - **Later runs.** The index is cached in `<corpus>/.isis/`, and only changed files are re-read. The server watches the folder, so edits show up in search within seconds.
 - **Options:**
-  - `--tasks DIR`: where task documents live (default `<corpus>/_tasks`, which is never indexed).
+  - `--tasks DIR`: where task documents live (default `_tasks` in the first folder). Task folders are never indexed.
   - `--no-model`: keyword search only.
   - `--model REPO`: another Hugging Face model with ONNX weights, such as `BAAI/bge-small-en-v1.5`.
   - `--port`, `--host`.
   - `--allow-host NAME`: also answer requests addressed to this name (repeatable; see below).
   - `--reload`: restart when the Python code changes, handy while you tune the algorithm.
-- `isis index CORPUS` builds the index without starting the server.
+- `isis index DIR...` builds the index without starting the server.
 
 **Nothing leaves the machine.** Once the model is cached (after the first run), isis makes no network requests at all: model files are read from the local Hugging Face cache without asking the network, Hugging Face telemetry is off, the page loads nothing from outside (no fonts, CDNs or analytics; FastAPI's `/docs` pages, which load from a CDN, are turned off), and the search fields have spellcheck off so a browser's cloud spellcheck never sees them. The only downloads are `pip install`, the model on the first run, and `scripts/fetch_sample_corpus.py`. To be certain, set `HF_HUB_OFFLINE=1`, or run it without network access.
 

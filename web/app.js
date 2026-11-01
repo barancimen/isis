@@ -589,7 +589,7 @@ function describeSignals(why) {
   if (!("meaning_rank" in why)) return "";
   return [
     why.keyword_rank ? `keywords #${why.keyword_rank}` : "not a top keyword match",
-    why.meaning_rank ? `meaning #${why.meaning_rank}` : "not a top meaning match",
+    why.embedded === false ? "not embedded" : why.meaning_rank ? `meaning #${why.meaning_rank}` : "not a top meaning match",
   ].join(" · ");
 }
 
@@ -1009,7 +1009,8 @@ async function pollStatus() {
     const s = await api("GET", "/api/status");
     ready = s.state === "ready";
     const model = s.model ? s.model.split("/").pop() : "keywords only";
-    let text = `${s.passages.toLocaleString()} passages · ${model}`;
+    const keywordsOnly = s.model && s.unembedded ? ` (${s.unembedded.toLocaleString()} keywords only)` : "";
+    let text = `${s.passages.toLocaleString()} passages${keywordsOnly} · ${model}`;
     const documents = `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`;
     $("#index-size").textContent = s.index_bytes ? `${documents} · index ${formatBytes(s.index_bytes)}` : documents;
     if (s.state === "embedding") text = `Embedding ${s.embedded.toLocaleString()} / ${s.to_embed.toLocaleString()} passages… (search works meanwhile)`;

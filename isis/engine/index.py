@@ -32,6 +32,12 @@ def configure_logging() -> None:
     logging.getLogger("isis").setLevel(logging.INFO)
 
 
+def corpus_exclude(folders: list[Path], tasks_dir: Path) -> tuple[Path, ...]:
+    """Task folders stay out of the index: the one in use, and the default place in each other
+    corpus folder (which holds its tasks when it is served on its own)."""
+    return (tasks_dir, *(Path(d) / "_tasks" for d in folders[1:]))
+
+
 def _count(n: int, noun: str) -> str:
     return f"{n:,} {noun}" + ("" if n == 1 else "s")
 
@@ -56,6 +62,7 @@ def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
 
 INDEX_VERSION = 2
 MARKDOWN = (".md", ".markdown")
+NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
 EMBED_GROUP = 256  # passages per embedding call while indexing
 PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
 SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
@@ -133,16 +140,18 @@ class IndexStatus:
     passages: int = 0
     embedded: int = 0  # progress of the current embedding run
     to_embed: int = 0
+    unembedded: int = 0  # passages without embeddings
     updated: float = 0.0  # time.time() when the snapshot last changed
 
 
 class Engine:
-    """Owns the index of one corpus folder. `refresh()` brings it up to date with the files on
-    disk; `snapshot` is what searches read."""
+    """Owns the index of one or more corpus folders. `refresh()` brings it up to date with the
+    files on disk; `snapshot` is what searches read. With several folders, a corpus path starts
+    with its folder's name, and each folder keeps its own cache, so it can be served alone later."""
 
     def __init__(
         self,
-        corpus_dir: str | Path,
+        corpus_dir: str | Path | list[str | Path],
         *,
         embedder=None,
         index_dir: str | Path | None = None,
@@ -150,8 +159,10 @@ class Engine:
         target_words: int = TARGET_WORDS,
         max_words: int = MAX_WORDS,
     ):
-        self.root = Path(corpus_dir).resolve()
-        self.index_dir = Path(index_dir).resolve() if index_dir else self.root / ".isis"
+        dirs = list(dict.fromkeys(Path(d).resolve() for d in (corpus_dir if isinstance(corpus_dir, (list, tuple)) else [corpus_dir])))
+        self.root = dirs[0]
+        self.roots: dict[str, Path] = {"": dirs[0]} if len(dirs) == 1 else self._named(dirs)  # path prefix -> folder
+        self.index_dir = Path(index_dir).resolve() if index_dir else None
         self.embedder = embedder
         self.exclude = {Path(p).resolve() for p in exclude}
         self.chunking = (target_words, max_words)
@@ -161,12 +172,25 @@ class Engine:
         self._lock = threading.Lock()
         # The model the cached vectors came from. Without a model they are kept as they are, so a
         # keyword-only run never throws away embeddings that took hours to compute.
-        self._vectors_from = getattr(embedder, "name", None)
+        self._vectors_from = {prefix: getattr(embedder, "name", None) for prefix in self.roots}
+        self.no_embed: set[str] = set()  # corpus-relative folders with a .no-embed file ("" is the whole corpus)
         self.links: set[str] = set()  # corpus-relative paths of the folder links the last scan met
         self._said: set[str] = set()  # one-time messages about links, so rescans stay quiet
         self._refreshed = False
         self._load()
         self._publish()
+
+    @staticmethod
+    def _named(dirs: list[Path]) -> dict[str, Path]:
+        """Each folder by its name, numbered when two share one."""
+        named: dict[str, Path] = {}
+        for d in dirs:
+            name, n = d.name or "root", 1
+            while name in named:
+                n += 1
+                name = f"{d.name}-{n}"
+            named[name] = d
+        return named
 
     @property
     def dim(self) -> int:
@@ -179,11 +203,17 @@ class Engine:
         Links inside the corpus are followed wherever they point (that is how a folder from
         elsewhere joins it), as long as what they reach is markdown too."""
         rel = Path(path)
-        full = self.root / rel
-        if (rel.is_absolute() or ".." in rel.parts or full.suffix.lower() not in MARKDOWN
-                or full.resolve().suffix.lower() not in MARKDOWN):
+        full = self._located(path) if not rel.is_absolute() and ".." not in rel.parts else None
+        if full is None or full.suffix.lower() not in MARKDOWN or full.resolve().suffix.lower() not in MARKDOWN:
             raise ValueError(f"not a markdown file in the corpus: {path}")
         return full
+
+    def _located(self, path: str) -> Path | None:
+        """Where a corpus path is on disk; None if it starts with no folder's name."""
+        if "" in self.roots:
+            return self.root / path
+        head, _, rest = path.partition("/")
+        return self.roots[head] / rest if head in self.roots and rest else None
 
     def read_lines(self, path: str) -> list[str]:
         return split_lines(self.resolve(path).read_text(encoding="utf-8", errors="replace"))
@@ -194,13 +224,19 @@ class Engine:
             log.log(level, message)
 
     def _scan(self) -> dict[str, os.stat_result]:
-        """Every markdown file under the corpus, following symlinks. The real folders come first and
-        links after them, and each folder or file is taken once (by device and inode), so a link
-        loop ends and something reachable both ways keeps its real path."""
+        """Every markdown file under the corpus folders, following symlinks. The real folders come
+        first and links after them, and each folder or file is taken once (by device and inode), so
+        a link loop ends and something reachable both ways keeps its real path."""
         found: dict[str, os.stat_result] = {}
         folders, files = set(), set()
-        folder_links: list[Path] = []
-        file_links: list[Path] = []
+        folder_links: list[tuple[Path, Path, str]] = []
+        file_links: list[tuple[Path, str]] = []
+        no_embed: set[str] = set()
+
+        def label(path: Path, root: Path, prefix: str) -> str:
+            rel = path.relative_to(root).as_posix()
+            rel = "" if rel == "." else rel
+            return f"{prefix}/{rel}".rstrip("/") if prefix else rel
 
         def excluded(path: Path) -> bool:
             real = path.resolve()
@@ -214,7 +250,7 @@ class Engine:
             folders.add(key)
             return True
 
-        def walk(top: Path) -> None:
+        def walk(top: Path, root: Path, prefix: str) -> None:
             for dirpath, dirnames, filenames in os.walk(top):
                 here = Path(dirpath)
                 keep = []
@@ -224,7 +260,7 @@ class Engine:
                         continue
                     try:
                         if path.is_symlink():
-                            folder_links.append(path)
+                            folder_links.append((path, root, prefix))
                         elif first_visit(path):
                             keep.append(d)
                     except OSError:  # deleted since os.walk listed it
@@ -232,29 +268,36 @@ class Engine:
                 dirnames[:] = keep
                 for name in filenames:
                     path = here / name
+                    if name == NO_EMBED:
+                        no_embed.add(label(here, root, prefix))
                     if name.startswith("."):
                         continue
                     if not name.lower().endswith(MARKDOWN):
                         if path.is_symlink() and not path.exists():  # a linked folder that has gone away
-                            rel = path.relative_to(self.root).as_posix()
-                            self._say_once(logging.WARNING, f"link {rel} skipped: its target doesn't exist")
+                            self._say_once(logging.WARNING, f"link {label(path, root, prefix)} skipped: its target doesn't exist")
                         continue
                     try:
                         st = path.lstat()
                     except OSError:
                         continue
                     if statmode.S_ISLNK(st.st_mode):
-                        file_links.append(path)
+                        file_links.append((path, label(path, root, prefix)))
                     else:
-                        found[path.relative_to(self.root).as_posix()] = st
+                        found[label(path, root, prefix)] = st
                         files.add((st.st_dev, st.st_ino))
 
-        first_visit(self.root)
-        walk(self.root)
+        for prefix, root in self.roots.items():
+            try:
+                if first_visit(root):
+                    walk(root, root, prefix)
+                else:
+                    self._say_once(logging.INFO, f"{root} skipped: it is already inside another folder being scanned")
+            except OSError as e:
+                self._say_once(logging.WARNING, f"{root} skipped: {e.strerror or e}")
         links = set()
         while folder_links:  # walking a linked folder can find more links
-            link = folder_links.pop(0)
-            rel = link.relative_to(self.root).as_posix()
+            link, root, prefix = folder_links.pop(0)
+            rel = label(link, root, prefix)
             links.add(rel)
             try:
                 if excluded(link):
@@ -266,10 +309,9 @@ class Engine:
                 self._say_once(logging.WARNING, f"link {rel} skipped: {e.strerror or e}")
                 continue
             self._say_once(logging.INFO, f"following link {rel} -> {link.resolve()}")
-            walk(link)
+            walk(link, root, prefix)
         self.links = links
-        for link in file_links:
-            rel = link.relative_to(self.root).as_posix()
+        for link, rel in file_links:
             try:
                 st = link.stat()
             except OSError as e:
@@ -280,10 +322,15 @@ class Engine:
             elif (st.st_dev, st.st_ino) not in files:
                 found[rel] = st
                 files.add((st.st_dev, st.st_ino))
+        self.no_embed = no_embed
         return found
 
+    def _embeds(self, path: str) -> bool:
+        """Whether this file gets embeddings: not under a folder with a .no-embed file."""
+        return not any(not d or path.startswith(f"{d}/") for d in self.no_embed)
+
     def _read(self, path: str, stat: os.stat_result) -> FileRecord:
-        text = (self.root / path).read_text(encoding="utf-8", errors="replace")
+        text = self._located(path).read_text(encoding="utf-8", errors="replace")
         passages = chunk_markdown(path, text, *self.chunking)
         tokens = [tokenize(p.heading) + tokenize(p.text) for p in passages]
         return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *term_counts(tokens, self.vocab))
@@ -306,7 +353,7 @@ class Engine:
         self._refreshed = True
         self._set_state("scanning", on_progress)
         if first:
-            log.info("scanning %s", self.root)
+            log.info("scanning %s", ", ".join(map(str, self.roots.values())))
         found = self._scan()
         removed = [p for p in self.files if p not in found]
         changed = [
@@ -321,7 +368,7 @@ class Engine:
             log.info("%s%s", total, _changes(new, modified, removed))
         elif first:
             log.info("%s, no changes since the last run" if found else "no markdown files found in %s",
-                     _count(len(found), "markdown file") if found else self.root)
+                     _count(len(found), "markdown file") if found else ", ".join(map(str, self.roots.values())))
         for path in removed:
             del self.files[path]
         for path in changed:
@@ -336,16 +383,27 @@ class Engine:
                 # An edit changes a few passages: the others keep their vectors.
                 record.reuse = {p.embed_text: v for p, v in zip(old.passages, old.vectors)}
             self.files[path] = record
-        if removed or changed:
+        for folder in sorted(self.no_embed):
+            where = folder or "the corpus"
+            self._say_once(logging.INFO, f"keywords only in {where}: it has a {NO_EMBED} file")
+        dropped = 0
+        for path, record in self.files.items():
+            if not self._embeds(path):
+                record.reuse = None
+                if record.vectors is not None:  # the folder got its .no-embed file after it was embedded
+                    record.vectors = None
+                    dropped += 1
+        if removed or changed or dropped:
             self._publish()
 
         embedded = self._embed_missing(on_progress)
-        if removed or changed or embedded:
+        if removed or changed or embedded or dropped:
             self._publish()
             self._save()
         self._set_state("ready", on_progress)
-        if first or removed or changed or embedded:
-            meaning = "" if self.embedder is not None else ", keywords only"
+        if first or removed or changed or embedded or dropped:
+            meaning = ", keywords only" if self.embedder is None else (
+                f", {self.status.unembedded:,} of them keywords only" if self.status.unembedded else "")
             log.info("index ready: %s, %s%s (%s)", _count(len(self.files), "file"), _count(len(self.snapshot), "passage"),
                      meaning, _duration(time.perf_counter() - started))
         return {
@@ -360,7 +418,7 @@ class Engine:
     def _embed_missing(self, on_progress) -> int:
         if self.embedder is None:
             return 0
-        pending = [r for r in self.files.values() if r.vectors is None or r.vectors.shape[1:] != (self.dim,)]
+        pending = [r for path, r in self.files.items() if self._embeds(path) and (r.vectors is None or r.vectors.shape[1:] != (self.dim,))]
         todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {})] for r in pending}
         self.status.embedded, self.status.to_embed = 0, sum(map(len, todo.values()))
         if self.status.to_embed:
@@ -417,6 +475,7 @@ class Engine:
         self.snapshot = self._compile()
         self.status.files = len(self.files)
         self.status.passages = len(self.snapshot)
+        self.status.unembedded = len(self.snapshot) - int(self.snapshot.has_vector.sum())
         self.status.updated = time.time()
 
     def _compile(self) -> Snapshot:
@@ -455,33 +514,44 @@ class Engine:
 
     # ---- cache ----
 
-    @property
-    def _cache_paths(self) -> tuple[Path, Path]:
-        return self.index_dir / "index.json", self.index_dir / "index.npz"
+    def _cache_dir(self, prefix: str) -> Path:
+        """Each corpus folder has its own cache, in its .isis folder."""
+        if self.index_dir is not None:
+            return self.index_dir / prefix if prefix else self.index_dir
+        return self.roots[prefix] / ".isis"
 
     def index_bytes(self) -> int:
         """The size of the index on disk."""
         total = 0
-        for path in self._cache_paths:
-            try:
-                total += path.stat().st_size
-            except OSError:
-                pass  # not saved yet, or being replaced
+        for prefix in self.roots:
+            for name in ("index.json", "index.npz"):
+                try:
+                    total += (self._cache_dir(prefix) / name).stat().st_size
+                except OSError:
+                    pass  # not saved yet, or being replaced
         return total
 
     def _save(self) -> None:
-        self.index_dir.mkdir(parents=True, exist_ok=True)
-        paths = sorted(self.files)
+        for prefix in self.roots:
+            self._save_folder(prefix)
+
+    def _save_folder(self, prefix: str) -> None:
+        folder = self._cache_dir(prefix)
+        folder.mkdir(parents=True, exist_ok=True)
+        lead = f"{prefix}/" if prefix else ""
+        paths = sorted(p for p in self.files if p.startswith(lead))
         records = [self.files[p] for p in paths]
         embedded = [r for r in records if r.vectors is not None]
+        term_ids = np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32)
+        used, local_ids = np.unique(term_ids, return_inverse=True)  # the cache names only its own terms
         meta = {
             "version": INDEX_VERSION,
             "chunking": list(self.chunking),
-            "embedder": self._vectors_from,
-            "vocab": self.vocab.terms,
+            "embedder": self._vectors_from[prefix],
+            "vocab": [self.vocab.terms[i] for i in used],
             "files": [
                 {
-                    "path": path,
+                    "path": path[len(lead):],
                     "mtime_ns": r.mtime_ns,
                     "size": r.size,
                     "embedded": r.vectors is not None,
@@ -493,26 +563,30 @@ class Engine:
         dim = embedded[0].vectors.shape[1] if embedded else 0
         arrays = {
             "indptr": np.concatenate([r.indptr for r in records]) if records else np.zeros(0, np.int64),
-            "term_ids": np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32),
+            "term_ids": local_ids.astype(np.int32),
             "counts": np.concatenate([r.counts for r in records]) if records else np.zeros(0, np.float32),
             "vectors": np.concatenate([r.vectors for r in embedded]) if embedded else np.zeros((0, dim), np.float16),
         }
-        json_path, npz_path = self._cache_paths
         # The arrays go first: a cache is only used when its JSON matches them (see _load).
         unique = f"{os.getpid()}-{threading.get_ident()}"  # another process may share the folder
-        tmp = npz_path.with_name(f"index.{unique}.tmp.npz")
+        tmp = folder / f"index.{unique}.tmp.npz"
         np.savez(tmp, **arrays)
-        os.replace(tmp, npz_path)
-        tmp = json_path.with_name(f"index.{unique}.tmp")
+        os.replace(tmp, folder / "index.npz")
+        tmp = folder / f"index.{unique}.tmp"
         tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, json_path)
-        old = self.index_dir / "index.pkl"
+        os.replace(tmp, folder / "index.json")
+        old = folder / "index.pkl"
         if old.exists():  # the version 1 cache, which this one replaces
             old.unlink()
 
     def _load(self) -> None:
-        json_path, npz_path = self._cache_paths
-        if (self.index_dir / "index.pkl").exists() and not json_path.exists():
+        for prefix in self.roots:
+            self._load_folder(prefix)
+
+    def _load_folder(self, prefix: str) -> None:
+        folder = self._cache_dir(prefix)
+        json_path, npz_path = folder / "index.json", folder / "index.npz"
+        if (folder / "index.pkl").exists() and not json_path.exists():
             log.info("ignoring the old index cache (index.pkl); the index will be rebuilt")
         if not json_path.exists() or not npz_path.exists():
             return
@@ -522,40 +596,43 @@ class Engine:
                 return
             with np.load(npz_path, allow_pickle=False) as data:
                 arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
-            files = self._records(meta["files"], arrays)
-            vocab = Vocabulary(meta["vocab"])
+            terms = list(meta["vocab"])
             saved = meta.get("embedder")
+            lead = f"{prefix}/" if prefix else ""
+            ids = np.fromiter((self.vocab.add(t) for t in terms), np.int32, len(terms))  # into the shared vocabulary
+            arrays["term_ids"] = ids[arrays["term_ids"]] if len(ids) else arrays["term_ids"]
+            files = self._records(meta["files"], arrays, lead)
         except Exception as e:
-            log.warning("ignoring unreadable index cache: %s", e)
+            log.warning("ignoring unreadable index cache in %s: %s", folder, e)
             return
-        self.vocab = vocab
-        self.files = files
-        log.info("loaded the index cache: %s, %s", _count(len(files), "file"),
+        self.files.update(files)
+        log.info("loaded the index cache%s: %s, %s", f" of {prefix}" if prefix else "", _count(len(files), "file"),
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
         if self.embedder is None:
-            self._vectors_from = saved
+            self._vectors_from[prefix] = saved
         elif saved != self.embedder.name:  # a different model: keep the text, re-embed
             log.info("the embedding model changed: every passage will be embedded again")
-            for record in self.files.values():
+            for record in files.values():
                 record.vectors = None
 
     @staticmethod
-    def _records(entries: list[dict], arrays: dict) -> dict[str, FileRecord]:
-        """FileRecords from the cache's JSON entries and the arrays they index into, in order."""
+    def _records(entries: list[dict], arrays: dict, lead: str = "") -> dict[str, FileRecord]:
+        """FileRecords from a cache's JSON entries and the arrays they index into, in order."""
         files = {}
         at_indptr = at_nnz = at_vec = 0
         for e in entries:
             n = len(e["passages"])
+            path = lead + e["path"]
             indptr = arrays["indptr"][at_indptr : at_indptr + n + 1]
             nnz = int(indptr[-1])
             vectors = None
             if e["embedded"]:
                 vectors = arrays["vectors"][at_vec : at_vec + n]
                 at_vec += n
-            files[e["path"]] = FileRecord(
+            files[path] = FileRecord(
                 e["mtime_ns"],
                 e["size"],
-                [Passage(e["path"], h, s, end, t) for h, s, end, t in e["passages"]],
+                [Passage(path, h, s, end, t) for h, s, end, t in e["passages"]],
                 indptr.astype(np.int64),
                 arrays["term_ids"][at_nnz : at_nnz + nnz],
                 arrays["counts"][at_nnz : at_nnz + nnz],

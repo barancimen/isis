@@ -199,6 +199,20 @@ that keeps growing. Five long tasks were added and about 230 more suggestions ju
 - **Overall**, on the same 968 judgments: utility 7.68 → 8.21 (short 6.86 → 7.18, long 10.0 →
   11.1), precision 76% → 77%, gaps lane 89% → 93% precise. Search is unchanged.
 
+### Folders without embeddings (`.no-embed`, 2026-11)
+
+Measured by removing the embeddings of the Beagle book (1,647 of 4,951 passages). With no embedding, a passage only scored on the keyword list, and exact matches sank below weaker passages from embedded books: `coral reefs subsidence` kept 3 Beagle hits in its top 10, against 10 with everything embedded. Its keyword rank now also counts in place of the missing meaning rank, times `unembedded_weight`:
+
+| `unembedded_weight` | search nDCG@10 | keyword queries | paraphrases |
+|---:|---:|---:|---:|
+| 0 (the old behaviour) | 0.553 | 0.673 | 0.455 |
+| 0.5 | 0.636 | 0.816 | 0.447 |
+| **1 (default)** | **0.647** | **0.851** | **0.417** |
+| 1.5 | 0.625 | 0.857 | 0.370 |
+| 2 | 0.595 | 0.839 | 0.319 |
+
+Higher values favour keyword queries at the cost of paraphrases. Keyword-only search scores 0.659 on the same queries, and with everything embedded hybrid search scores 0.708 and nothing changes. Related hardly moved (utility 4.71 to 4.84, against 8.21 with everything embedded), but about a quarter of its suggestions in this setup were never judged and count as zero, so its numbers are only rough.
+
 Known limits of this calibration:
 
 - One person judged everything, on one small corpus.

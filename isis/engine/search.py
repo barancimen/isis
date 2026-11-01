@@ -62,6 +62,11 @@ class SearchConfig:
         1.0, label="Meaning weight", group=FUSION, min=0.0, max=3.0, step=0.1,
         help="Weight of the embedding ranking in the fusion. 0: rank by keywords only.",
     )
+    unembedded_weight: float = tunable(
+        1.0, label="Not embedded", group=FUSION, min=0.0, max=3.0, step=0.1,
+        help="A passage without embeddings has no meaning rank, so its keyword rank counts in its place, times "
+        "this. 0: keywords only, which buries it below passages that score on both lists.",
+    )
     candidates: int = tunable(
         300, label="Candidates per list", group=FUSION, min=20, max=2000, step=10,
         help="How deep each ranking goes before fusing. A passage outside both lists can't be found.",
@@ -323,12 +328,18 @@ def search(
         for ranks, weight in ((lex_rank, config.keyword_weight), (sem_rank, config.meaning_weight)):
             for row, rank in ranks.items():
                 fused[row] = fused.get(row, 0.0) + weight / (config.rrf_k + rank + 1)
+        if config.keyword_weight > 0:  # no embeddings: the keyword rank stands in for the meaning rank
+            stand_in = config.meaning_weight * config.unembedded_weight
+            for row, rank in lex_rank.items():
+                if not snapshot.has_vector[row]:
+                    fused[row] += stand_in / (config.rrf_k + rank + 1)
         ranked = sorted(fused.items(), key=lambda kv: -kv[1])
         why = lambda row: {
             "bm25": float(lexical[row]),
             "cosine": float(semantic[row]),
             "keyword_rank": lex_rank[row] + 1 if row in lex_rank else None,  # None: not among the top keyword hits
             "meaning_rank": sem_rank[row] + 1 if row in sem_rank else None,
+            "embedded": bool(snapshot.has_vector[row]),
         }
     else:
         rows = top_rows(lexical, len(lexical), positive=True)
