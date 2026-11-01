@@ -90,6 +90,7 @@ def main() -> None:
         expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
         location = page.locator("#search-results .hit .hit-loc").first.inner_text()
         opens_as_shown(page, page.locator("#search-results .hit").first)
+        expect(page.locator("#search-results .hit").first).to_have_class(re.compile("opened"))  # stays marked
         expect(page.locator("#reader-path")).to_have_text(location.rsplit(":", 1)[0])
         page.fill("#search-input", "")  # or the old results could be swapped out under the clicks below
         expect(page.locator("#search-results .hit")).to_have_count(0)
@@ -171,6 +172,9 @@ def main() -> None:
         counts = page.evaluate("""() => [...document.querySelectorAll('#related-lanes .lane h3')].map(h => h.innerText.replace(/\\n/g, ' '))""")
         for card in page.locator("#related-lanes .hit").all()[:6]:
             opens_as_shown(page, card)
+        last = page.locator("#related-lanes .hit").nth(5)
+        expect(last).to_have_class(re.compile("opened"))
+        expect(page.locator("#related-lanes .hit.opened")).to_have_count(1)  # only the last one clicked
         step(f"related lanes: {counts}; suggestions open highlighted exactly as their cards show them")
         shot(page, "related.png")
 
@@ -351,22 +355,21 @@ def main() -> None:
         expect(page.locator("#reader-path")).to_contain_text("017-chapter")
         measure = """() => { const e = document.querySelector('#reader-editor .cm-scroller'); const r = e.getBoundingClientRect();
             return [e.scrollTop, e.scrollHeight, e.clientHeight, r.right, r.top]; }"""
-        def thumb(top, height, client):  # 15 px arrow buttons at each end of the track
-            track = client - 30
-            size = max(track * client / height, 18)
-            return 15 + top / max(height - client, 1) * (track - size), size
+        def thumb(top, height, client):  # as styled: no arrow buttons, at least 40 px tall
+            size = max(client * client / height, 40)
+            return top / max(height - client, 1) * (client - size), size
         top, height, client, right, y0 = page.evaluate(measure)
         start, size = thumb(top, height, client)
-        page.mouse.move(right - 8, y0 + start + size / 2)
+        page.mouse.move(right - 6, y0 + start + size / 2)
         page.mouse.down()
         for i in range(1, 11):
-            page.mouse.move(right - 8, y0 + start + size / 2 + 30 * i, steps=2)
+            page.mouse.move(right - 6, y0 + start + size / 2 + 30 * i, steps=2)
             page.wait_for_timeout(80)
         page.wait_for_timeout(200)
         now = page.evaluate(measure)
         moved = thumb(now[0], now[1], now[2])[0] - start
         page.mouse.up()
-        assert 270 <= moved <= 330, f"the mouse moved 300 px, the scrollbar {moved:.0f} px"
+        assert 285 <= moved <= 315, f"the mouse moved 300 px, the scrollbar {moved:.0f} px"
         step(f"reader scrollbar follows a first drag: mouse 300 px, thumb {moved:.0f} px")
 
         sample = CORPUS / "e2e-envelopes.md"

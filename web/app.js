@@ -86,7 +86,7 @@ const markdownStyle = HighlightStyle.define([
 const theme = EditorView.theme({
   "&": { height: "100%", fontSize: "15.5px", backgroundColor: "var(--bg)", color: "var(--fg)" },
   "&.cm-focused": { outline: "none" },
-  ".cm-scroller": { fontFamily: "var(--serif)", lineHeight: "1.62" },
+  ".cm-scroller": { fontFamily: "var(--serif)", lineHeight: "1.62", overflowY: "scroll" },
   ".cm-content": { padding: "18px 0 40vh", maxWidth: "44em", caretColor: "var(--fg)" },
   ".cm-line": { padding: "0 22px" },
   ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--faint)", border: "none", fontFamily: "var(--sans)", fontSize: "11px" },
@@ -165,24 +165,41 @@ const envelopedBlocks = {
 // corrected, and the thumb falls behind the mouse by a third. So lay out the whole document once,
 // when it opens and when its width changes: heights it has measured, it keeps. Nothing on screen
 // moves. This is the mode CodeMirror prints in, viewState.printing, not a public API: if it goes
-// away in an update, the scrollbar is merely back to lagging. Very long documents are left alone,
-// since this holds up the page (about 0.4 s per 80 KB on a slow CPU).
-const MAX_MEASURED_CHARS = 500_000;
+// away in an update, the scrollbar is merely back to lagging. It holds up the page (about 0.4 s
+// per 80 KB on a slow CPU), so a very long document waits until its scrollbar is pressed.
+const MEASURE_AT_ONCE_CHARS = 500_000;
 const measuredWidths = new WeakMap();
+const measureOnDrag = new WeakSet();
+const remeasureTimers = new WeakMap();
 
-function measureWholeDocument(view) {
-  measuredWidths.set(view, view.contentDOM.clientWidth);
-  if (view.state.doc.length > MAX_MEASURED_CHARS || !view.dom.offsetHeight) return;
+function layOutWholeDocument(view) {
+  measureOnDrag.delete(view);
   view.viewState.printing = true;
   view.measure();
   view.viewState.printing = false;
   view.requestMeasure();
 }
 
-const remeasureSoon = debounce((view) => measureWholeDocument(view), 200);
+function measureWholeDocument(view) {
+  measuredWidths.set(view, view.contentDOM.clientWidth);
+  if (!view.dom.offsetHeight) return;
+  if (view.state.doc.length > MEASURE_AT_ONCE_CHARS) measureOnDrag.add(view);
+  else layOutWholeDocument(view);
+}
+
 const remeasureOnResize = EditorView.updateListener.of((update) => {
-  if (update.geometryChanged && measuredWidths.get(update.view) !== update.view.contentDOM.clientWidth) remeasureSoon(update.view);
+  const view = update.view;
+  if (!update.geometryChanged || measuredWidths.get(view) === view.contentDOM.clientWidth) return;
+  clearTimeout(remeasureTimers.get(view)); // one timer per editor: a window resize changes both
+  remeasureTimers.set(view, setTimeout(() => measureWholeDocument(view), 200));
 });
+
+function measureWhenScrollbarPressed(view) {
+  view.scrollDOM.addEventListener("pointerdown", (event) => {
+    const onScrollbar = event.target === view.scrollDOM && event.offsetX >= view.scrollDOM.clientWidth;
+    if (onScrollbar && measureOnDrag.has(view)) layOutWholeDocument(view);
+  });
+}
 
 const hitSlot = decorationSlot();
 const addedSlot = decorationSlot();
@@ -295,6 +312,9 @@ const taskView = new EditorView({
   }),
 });
 
+measureWhenScrollbarPressed(reader);
+measureWhenScrollbarPressed(taskView);
+
 // ---------- state ----------
 
 const state = {
@@ -302,6 +322,7 @@ const state = {
   tasks: [], // [{name, mtime}]
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again}
   readerPath: null,
+  openedHit: null, // the result last opened in the reader, which stays marked
   files: [],
   openFolders: new Set(), // folders open in the Files panel; all are closed at first
   skipped: { search: loadSkipped("search"), related: loadSkipped("related") }, // corpus folders left out, per panel
@@ -690,8 +711,11 @@ function describeWhy(why) {
 
 function renderHit(hit, { lane = null, isNew = false } = {}) {
   const file = hit.path.slice(hit.path.lastIndexOf("/") + 1).replace(/\.(md|markdown)$/i, "");
+  const key = `${hit.path}:${hit.start_line}`;
   const open = (event) => {
     if (event.target.closest("button")) return;
+    state.openedHit = key;
+    for (const card of document.querySelectorAll(".hit")) card.classList.toggle("opened", card.dataset.key === key);
     openFile(hit.path, {
       line: hit.focus_line,
       ch: hit.match ? hit.match[1] : 0,
@@ -713,7 +737,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     lane && h("button", { class: "avoid", title: "Avoid: hide it and every passage like it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
-  return h("article", { class: `hit${isNew ? " is-new" : ""}`, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
+  return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
     h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hit.heading || file), actions),
     h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
