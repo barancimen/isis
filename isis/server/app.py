@@ -150,6 +150,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     def status():
         return {
             **plain(engine.status),
+            "index_bytes": engine.index_bytes(),
             "corpus": str(engine.root),
             "model": getattr(engine.embedder, "model_id", None),
         }

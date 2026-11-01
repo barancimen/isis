@@ -213,9 +213,10 @@ def main() -> None:
         lines = page.evaluate(related_lines)
         assert lines and not any("squid" in l.lower() for l in lines), lines
         page.fill("#steer-input", "-squid +/[Ww]hal/")
-        page.press("#steer-input", "Enter")
+        with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
+            page.press("#steer-input", "Enter")
         expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(300)  # the response is rendered
         hits = page.evaluate("""() => [...document.querySelectorAll('#related-lanes .hit')].map(h =>
             [...h.querySelectorAll('.hit-body .line:not(.ctx)')].map(l => l.innerText).join(' '))""")
         assert hits and all(re.search("[Ww]hal", t) for t in hits), hits
@@ -269,7 +270,24 @@ def main() -> None:
         assert abs(side_width() - before) < 2
         step(f"dragged the side panel from {before:.0f} to {widened:.0f}px; kept after reload; double-click reset it")
 
+        expect(page.locator("#index-size")).to_have_text(re.compile(r"^[\d,]+ documents · index [\d.]+ [KMG]B$"))
+        step(f"status bar: {page.locator('#index-size').inner_text()}")
+
+        page.reload()
         page.click(".side-tabs button[data-panel=files]")
+        expect(page.locator("#file-list .dir").first).to_be_visible(timeout=10000)
+        expect(page.locator("#file-list .file")).to_have_count(0)  # folders start collapsed
+        folder = page.locator("#file-list .dir").first
+        folder.click()
+        expect(page.locator("#file-list .file").first).to_be_visible()
+        expect(page.locator("#file-list .dir").first).to_have_attribute("aria-expanded", "true")
+        page.locator("#file-list .dir").first.click()
+        expect(page.locator("#file-list .file")).to_have_count(0)
+        target = page.evaluate("window.isis.state.files[window.isis.state.files.length - 1].path")
+        page.evaluate("(path) => window.isis.openFile(path)", target)
+        expect(page.locator("#file-list .file.current")).to_have_attribute("data-path", target)  # revealed
+        step("files panel: folders start collapsed and toggle; the file in the reader is revealed")
+
         first = page.evaluate("window.isis.state.files[0].path")
         page.fill("#file-filter", first)
         expect(page.locator("#file-list .file").first).to_have_attribute("data-path", first)

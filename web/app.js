@@ -4,6 +4,7 @@ import {
   history, defaultKeymap, historyKeymap, indentWithTab,
   syntaxHighlighting, HighlightStyle, markdown, tags,
 } from "./vendor/codemirror.js";
+import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { planInsertion } from "./insert.js";
 import { paragraphAt, softBreaks } from "./reflow.js";
 
@@ -218,6 +219,7 @@ const state = {
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again}
   readerPath: null,
   files: [],
+  openFolders: new Set(), // folders open in the Files panel; all are closed at first
   panel: "search",
   relatedStale: true,
   relatedSeq: 0,
@@ -456,7 +458,7 @@ async function openFile(path, location = null) {
     $("#reader-path").textContent = path;
     $("#reader-path").title = path;
     $("#reader-add").hidden = true;
-    markCurrentFile();
+    revealCurrentFile();
   }
   if (!location) {
     reader.dispatch({ effects: hitSlot.set.of(Decoration.none) });
@@ -493,26 +495,47 @@ const MAX_FILES_SHOWN = 2000;
 
 function renderFiles() {
   const filter = $("#file-filter").value.trim().toLowerCase();
-  const matches = state.files.filter((f) => !filter || f.path.toLowerCase().includes(filter));
+  const matches = state.files.map((f) => f.path).filter((path) => !filter || path.toLowerCase().includes(filter));
+  // While filtering, every folder that holds a match is open.
+  const { rows, more } = visibleRows(fileTree(matches), (folder) => Boolean(filter) || state.openFolders.has(folder), MAX_FILES_SHOWN);
+  const indent = (depth, base) => `padding-left: ${base + depth * 14}px`;
   const list = $("#file-list");
   list.replaceChildren();
-  let folder = null;
-  for (const { path } of matches.slice(0, MAX_FILES_SHOWN)) {
-    const slash = path.lastIndexOf("/");
-    const dir = slash === -1 ? "" : path.slice(0, slash);
-    if (dir !== folder) {
-      folder = dir;
-      if (dir) list.append(h("li", { class: "folder" }, `${dir}/`));
+  for (const row of rows) {
+    if (row.kind === "folder") {
+      list.append(
+        h("li", { class: "dir-row" },
+          h("button", { class: "dir", "data-dir": row.path, title: row.path, "aria-expanded": String(row.open), style: indent(row.depth, 4), disabled: Boolean(filter), onclick: () => toggleFolder(row.path) },
+            h("span", { class: "dir-arrow" }, row.open ? "▾" : "▸"),
+            h("span", { class: "dir-name" }, row.name),
+            h("span", { class: "dir-count" }, row.count.toLocaleString()),
+          ),
+        ),
+      );
+    } else {
+      list.append(
+        h("li", { class: `file${row.path === state.readerPath ? " current" : ""}`, "data-path": row.path, title: row.path, style: indent(row.depth, 20), onclick: () => openFile(row.path).catch(fail) },
+          row.name.replace(/\.(md|markdown)$/i, "")),
+      );
     }
-    list.append(
-      h("li", { class: `file${path === state.readerPath ? " current" : ""}`, "data-path": path, title: path, onclick: () => openFile(path).catch(fail) },
-        path.slice(slash + 1).replace(/\.(md|markdown)$/i, "")),
-    );
   }
-  if (matches.length > MAX_FILES_SHOWN) {
-    list.append(h("li", { class: "folder" }, `…and ${matches.length - MAX_FILES_SHOWN} more: narrow the filter.`));
-  }
+  if (more) list.append(h("li", { class: "folder" }, `…and ${more.toLocaleString()} more: narrow the filter.`));
   if (!matches.length) list.append(h("li", { class: "folder" }, state.files.length ? "No matching files." : "No markdown files indexed yet."));
+}
+
+function toggleFolder(folder) {
+  if (!state.openFolders.delete(folder)) state.openFolders.add(folder);
+  renderFiles();
+  $(`#file-list [data-dir="${CSS.escape(folder)}"]`)?.focus();
+}
+
+// The file in the reader stays findable: opening one, from anywhere, opens the folders above it.
+function revealCurrentFile() {
+  const closed = ancestors(state.readerPath).filter((folder) => !state.openFolders.has(folder));
+  for (const folder of closed) state.openFolders.add(folder);
+  if (closed.length) renderFiles();
+  else markCurrentFile();
+  $("#file-list .file.current")?.scrollIntoView({ block: "nearest" });
 }
 
 function markCurrentFile() {
@@ -975,13 +998,20 @@ function showPanel(name) {
 
 // ---------- index status ----------
 
+function formatBytes(bytes) {
+  if (bytes < 1e6) return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+  return bytes < 1e9 ? `${(bytes / 1e6).toFixed(1)} MB` : `${(bytes / 1e9).toFixed(2)} GB`;
+}
+
 async function pollStatus() {
   let ready = true;
   try {
     const s = await api("GET", "/api/status");
     ready = s.state === "ready";
     const model = s.model ? s.model.split("/").pop() : "keywords only";
-    let text = `${s.files.toLocaleString()} files · ${s.passages.toLocaleString()} passages · ${model}`;
+    let text = `${s.passages.toLocaleString()} passages · ${model}`;
+    const documents = `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`;
+    $("#index-size").textContent = s.index_bytes ? `${documents} · index ${formatBytes(s.index_bytes)}` : documents;
     if (s.state === "embedding") text = `Embedding ${s.embedded.toLocaleString()} / ${s.to_embed.toLocaleString()} passages… (search works meanwhile)`;
     else if (s.state === "error") text = `Indexing failed: ${s.error} (see the server log; it retries when files change)`;
     else if (s.state !== "ready") text = "Indexing…";

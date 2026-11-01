@@ -159,6 +159,27 @@ code { font-family: var(--mono); font-size: 0.92em; }
 
 #file-list { list-style: none; margin: 0; padding: 0; }
 #file-list .folder { color: var(--faint); font-size: 12px; padding: 8px 4px 2px; }
+#file-list .dir {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  padding-right: 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+#file-list .dir:not(:disabled) { cursor: pointer; }
+#file-list .dir:not(:disabled):hover { background: var(--panel-2); }
+#file-list .dir:disabled { cursor: default; opacity: 1; }
+.dir-arrow { flex: none; width: 10px; color: var(--faint); font-size: 11px; }
+.dir-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dir-count { margin-left: auto; flex: none; color: var(--faint); font-size: 12px; }
 #file-list .file {
   padding: 3px 6px 3px 14px;
   border-radius: 4px;
@@ -305,7 +326,6 @@ body.resizing { cursor: col-resize; user-select: none; }
 #statusbar {
   height: 26px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
   padding: 0 12px;
   font-size: 12px;
@@ -313,7 +333,8 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--panel);
   border-top: 1px solid var(--border);
 }
-#flash { color: var(--accent); }
+#flash { margin-left: auto; color: var(--accent); }
+#index-size { margin-left: 16px; white-space: nowrap; }
 
 @media (max-width: 1100px) {
   #app { grid-template-columns: var(--w-tasks, 140px) var(--w-side, 300px) minmax(0, var(--fr-reader, 1fr)) minmax(0, var(--fr-task, 1fr)); }

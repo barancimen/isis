@@ -459,6 +459,16 @@ class Engine:
     def _cache_paths(self) -> tuple[Path, Path]:
         return self.index_dir / "index.json", self.index_dir / "index.npz"
 
+    def index_bytes(self) -> int:
+        """The size of the index on disk."""
+        total = 0
+        for path in self._cache_paths:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass  # not saved yet, or being replaced
+        return total
+
     def _save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         paths = sorted(self.files)

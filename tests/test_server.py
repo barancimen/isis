@@ -18,7 +18,7 @@ def client(engine, corpus):
 
 def test_status_files_and_file_content(client):
     status = client.get("/api/status").json()
-    assert status["state"] == "ready" and status["files"] == 3
+    assert status["state"] == "ready" and status["files"] == 3 and status["index_bytes"] > 0
     assert [f["path"] for f in client.get("/api/files").json()] == ["finches.md", "ships/pequod.md", "whales.md"]
     assert client.get("/api/file", params={"path": "whales.md"}).json()["content"].startswith("# Whales")
 
