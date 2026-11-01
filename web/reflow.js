@@ -3,7 +3,7 @@
 // renders it. The text itself is unchanged. Markdown structure keeps its line breaks.
 
 const FENCE = /^\s*(```|~~~)/;
-const STARTS_BLOCK = /^(#{1,6}(\s|$)|[-*+]\s|\d+[.)]\s|>|\||<|(?:[-*_]\s*){3,}$|=+\s*$)/; // heading, list item, quote, table, HTML, rule, underline
+const STARTS_BLOCK = /^(#{1,6}(\s|$)|[-*+•◦▪‣]\s|\d+[.)]\s|>|\||<|(?:[-*_]\s*){3,}$|=+\s*$)/; // heading, list item, quote, table, HTML, rule, underline
 const ENDS_LINE = /^(#{1,6}(\s|$)|\||(?:[-*_]\s*){3,}$|=+\s*$)|( {2}|\\)$/; // heading, table row, rule, underline, hard break
 
 const DASHES = /^-{3,}\s*$/;
@@ -48,7 +48,7 @@ export function structure(lines) {
   return { envelopes, rules };
 }
 
-const ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)/;
+const ITEM = /^(\s*)([-*+•◦▪‣]|\d+[.)])(\s+)/;
 const indentOf = (line) => {
   let width = 0;
   for (const c of /^\s*/.exec(line)[0]) width += c === "\t" ? 4 - (width % 4) : 1;
@@ -59,14 +59,11 @@ const indentOf = (line) => {
 // is indented compared with the items above it, however many spaces that takes) and where its text
 // starts. `continuations`: indented lines that carry on an item, with the depth of that item;
 // `joined` means right below it, so it flows on, and not after a blank line. Not code: nothing in a
-// fence, or indented that far without a list above it, and not what is inside an enveloped block.
+// fence, or indented that far without a list above it.
 export function listStructure(lines) {
   const items = [];
   const continuations = [];
-  const skip = new Set();
-  for (const { open, close } of structure(lines).envelopes) {
-    for (let i = open; i <= close; i++) skip.add(i);
-  }
+  const edges = new Set(structure(lines).envelopes.flatMap(({ open, close }) => [open, close]));
   let stack = [];
   let fence = false;
   for (let i = 0; i < lines.length; i++) {
@@ -76,7 +73,7 @@ export function listStructure(lines) {
       stack = [];
       continue;
     }
-    if (fence || skip.has(i)) {
+    if (fence || edges.has(i)) {
       stack = [];
       continue;
     }

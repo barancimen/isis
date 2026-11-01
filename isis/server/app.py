@@ -32,6 +32,16 @@ WEB = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 
 
+class PageFiles(StaticFiles):
+    """The page's files, which the browser must check are current before using its copy. Without
+    this a normal reload can keep running an old script long after an update."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def plain(x):
     """Dataclasses, tuples and numpy scalars -> JSON-ready Python values."""
     if dataclasses.is_dataclass(x):
@@ -282,7 +292,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
                 prefs.record(body.lane, added=True)
         return prefs.summary()
 
-    app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
+    app.mount("/", PageFiles(directory=WEB, html=True), name="web")
     return app
 
 

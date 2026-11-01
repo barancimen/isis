@@ -107,6 +107,11 @@ def test_tasks_inside_the_corpus_are_not_indexed(client, engine):
     assert [h["path"] for h in client.get("/api/search", params={"q": "ambergris"}).json()["hits"]] == ["whales.md"]
 
 
+def test_the_browser_must_check_the_page_is_current(client):
+    for path in ("/", "/app.js", "/reflow.js", "/style.css"):
+        assert client.get(path).headers["cache-control"] == "no-cache", path
+
+
 def test_page_is_served(client):
     assert client.get("/").status_code == 200
 

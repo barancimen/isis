@@ -75,9 +75,9 @@ test("what each item is", () => {
   assert.deepEqual(items.map((i) => [i.marker, i.ordered, i.textFrom]), [["*", false, 2], ["+", false, 2], ["12.", true, 4], ["3)", true, 3], ["-", false, 4]]);
 });
 
-test("not lists: rules, code, fences, envelopes, or a dash with no space", () => {
+test("not lists: rules, code, fences, or a dash with no space", () => {
   const not = [["---"], ["* * *"], ["- - -"], ["-word"], ["2.5 is a number"], ["", "    - indented code"],
-    ["```", "- in a fence", "```"], ["---", "- yaml: 1", "---"]];
+    ["```", "- in a fence", "```"]];
   for (const lines of not) assert.deepEqual(depths(lines), [], lines.join("|"));
   assert.deepEqual(depths(["- a", "```", "- b", "```", "- c"]), [[0, 0], [4, 0]]);
 });
@@ -89,4 +89,11 @@ test("continuation lines flow on, and a later paragraph keeps its item's indent"
   assert.deepEqual(softBreaks(lines), [0, 5]);
   assert.deepEqual(items.map((i) => i.line), [0, 4, 5, 9]);
   assert.equal(items[3].depth, 0); // the list above ended at the plain text
+});
+
+test("lists inside --- sections, and text that already has bullet characters", () => {
+  assert.deepEqual(depths(["Text", "", "---", "- a", "  - b", "---", "", "After"]), [[3, 0], [4, 1]]);
+  assert.deepEqual(depths(["---", "title: x", "tags:", "  - one", "---"]), [[3, 0]]);
+  assert.deepEqual(depths(["• pasted", "• bullets", "  ◦ nested"]), [[0, 0], [1, 0], [2, 1]]);
+  assert.deepEqual(softBreaks(["• pasted", "• bullets"]), []); // each stays on its own line
 });
