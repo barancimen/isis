@@ -420,6 +420,23 @@ def main() -> None:
             step("--- sections: metadata and prose cards, a real heading and a rule each render as themselves")
         finally:
             sample.unlink()
+
+        sample = CORPUS / "e2e-lists.md"
+        sample.write_text("- top\n  - sub\n    - subsub\n- hard wrapped\n  and more\n\n1. one\n   - under one\n\n    code, not a list\n")
+        try:
+            page.evaluate("(p) => window.isis.openFile(p)", sample.name)
+            items = page.locator("#reader-editor .cm-li")
+            expect(items.first).to_be_visible()
+            pad = lambda text: page.locator("#reader-editor .cm-line", has_text=text).first.evaluate("e => parseFloat(getComputedStyle(e).paddingLeft)")
+            top, sub, subsub = pad("top"), pad("sub"), pad("subsub")
+            assert sub - top >= 18 and subsub - sub >= 18, (top, sub, subsub)  # each level clearly further in
+            assert page.locator("#reader-editor .cm-li-marker").all_inner_texts() == ["•", "◦", "▪", "•", "1.", "◦"]
+            wrapped = page.locator("#reader-editor .cm-line", has_text="hard wrapped").first.inner_text()
+            assert wrapped.replace("•", "").split() == ["hard", "wrapped", "and", "more"], wrapped  # it flows on
+            assert (CORPUS / sample.name).read_text().startswith("- top\n  - sub")  # the file is unchanged
+            step("lists: bullets per level, each clearly indented; hard-wrapped items flow; numbers stay")
+        finally:
+            sample.unlink()
         browser.close()
 
     for name in (WHALES, ISLANDS):

@@ -6,7 +6,7 @@ import {
 } from "./vendor/codemirror.js";
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { planInsertion } from "./insert.js";
-import { envelopeAt, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
 
 // ---------- helpers ----------
 
@@ -106,6 +106,10 @@ const theme = EditorView.theme({
     backgroundPosition: "center",
     backgroundRepeat: "no-repeat",
   },
+  // Each level is well indented, and wrapped lines align under the text, not under the bullet.
+  ".cm-line.cm-li": { paddingLeft: "calc(22px + (var(--li-depth) + 1) * 1.7em)", textIndent: "-1.4em" },
+  ".cm-line.cm-li-raw": { textIndent: "0" },
+  ".cm-li-marker": { display: "inline-block", minWidth: "1.4em", textIndent: "0", color: "var(--muted)" },
   ".cm-soft-break": { whiteSpace: "normal" }, // a joined line break: no stray space at the start of a wrapped line
   ".cm-hit-match": { backgroundColor: "var(--mark)", borderRadius: "2px" },
   ".cm-just-added": { backgroundColor: "var(--added)", transition: "background-color 1s" },
@@ -217,6 +221,23 @@ class SpaceWidget extends WidgetType {
   }
 }
 const softBreak = Decoration.replace({ widget: new SpaceWidget() });
+
+// What a list item's marker shows as: a bullet that changes with the level, or its number.
+class ListMarker extends WidgetType {
+  constructor(text) {
+    super();
+    this.text = text;
+  }
+  eq(other) { return other.text === this.text; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-li-marker";
+    span.textContent = this.text;
+    return span;
+  }
+}
+const BULLETS = ["•", "◦", "▪"];
+const hidden = Decoration.replace({});
 const setFocused = StateEffect.define();
 
 function reflow({ editable }) {
@@ -224,11 +245,29 @@ function reflow({ editable }) {
     const lines = state.doc.toJSON();
     const [lo, hi] = editable && focused ? paragraphAt(lines, state.doc.lineAt(state.selection.main.head).number - 1) : [-1, -1];
     const editing = (i) => i >= lo && i <= hi;
+    const cursorLine = editable && focused ? state.doc.lineAt(state.selection.main.head).number - 1 : -1;
     const decos = [];
     for (const i of softBreaks(lines)) {
       if (i >= lo && i < hi) continue;
       const end = state.doc.line(i + 1).to;
-      decos.push(softBreak.range(end, end + 1));
+      // The break, and the indent of a list item's next line.
+      decos.push(softBreak.range(end, end + 1 + /^\s*/.exec(lines[i + 1])[0].length));
+    }
+    const lists = listStructure(lines);
+    for (const { line: i, depth, ordered, marker, textFrom } of lists.items) {
+      const line = state.doc.line(i + 1);
+      const raw = i === cursorLine; // the line being edited shows what is in the file
+      decos.push(Decoration.line({ class: raw ? "cm-li cm-li-raw" : "cm-li", attributes: { style: `--li-depth: ${depth}` } }).range(line.from));
+      if (!raw) {
+        const shown = ordered ? marker : BULLETS[depth % BULLETS.length];
+        decos.push(Decoration.replace({ widget: new ListMarker(shown) }).range(line.from, line.from + textFrom));
+      }
+    }
+    for (const { line: i, depth, indent, joined } of lists.continuations) {
+      if (joined && !editing(i - 1)) continue; // it flows on from the line above
+      const line = state.doc.line(i + 1);
+      decos.push(Decoration.line({ class: "cm-li cm-li-raw", attributes: { style: `--li-depth: ${depth}` } }).range(line.from));
+      if (i !== cursorLine && indent) decos.push(hidden.range(line.from, line.from + indent));
     }
     const { envelopes, rules } = structure(lines);
     for (const { open, close, meta } of envelopes) {

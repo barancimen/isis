@@ -48,9 +48,65 @@ export function structure(lines) {
   return { envelopes, rules };
 }
 
+const ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)/;
+const indentOf = (line) => {
+  let width = 0;
+  for (const c of /^\s*/.exec(line)[0]) width += c === "\t" ? 4 - (width % 4) : 1;
+  return width;
+};
+
+// The lists of a document. `items`: each bullet or number, with its nesting depth (from how far it
+// is indented compared with the items above it, however many spaces that takes) and where its text
+// starts. `continuations`: indented lines that carry on an item, with the depth of that item;
+// `joined` means right below it, so it flows on, and not after a blank line. Not code: nothing in a
+// fence, or indented that far without a list above it, and not what is inside an enveloped block.
+export function listStructure(lines) {
+  const items = [];
+  const continuations = [];
+  const skip = new Set();
+  for (const { open, close } of structure(lines).envelopes) {
+    for (let i = open; i <= close; i++) skip.add(i);
+  }
+  let stack = [];
+  let fence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE.test(line)) {
+      fence = !fence;
+      stack = [];
+      continue;
+    }
+    if (fence || skip.has(i)) {
+      stack = [];
+      continue;
+    }
+    if (!line.trim()) continue;
+    const indent = indentOf(line);
+    const item = RULE.test(line) ? null : ITEM.exec(line);
+    if (item && (stack.length || indent < 4)) {
+      while (stack.length && stack[stack.length - 1] > indent) stack.pop();
+      if (!stack.length || stack[stack.length - 1] < indent) stack.push(indent);
+      items.push({
+        line: i,
+        depth: stack.length - 1,
+        ordered: /\d/.test(item[2]),
+        marker: item[2],
+        textFrom: item[0].length,
+      });
+    } else if (stack.length && indent > stack[0]) {
+      const depth = Math.max(stack.filter((width) => width < indent).length - 1, 0);
+      continuations.push({ line: i, depth, indent: /^\s*/.exec(line)[0].length, joined: Boolean(lines[i - 1].trim()) });
+    } else if (stack.length && !lines[i - 1].trim()) {
+      stack = []; // plain text after a blank line ends the list
+    }
+  }
+  return { items, continuations };
+}
+
 // Indices i of the lines whose break to line i + 1 shows as a space.
 export function softBreaks(lines) {
   const out = [];
+  const carriesOn = new Set(listStructure(lines).continuations.filter((c) => c.joined).map((c) => c.line));
   const keep = new Set();
   for (const { open, close, meta } of structure(lines).envelopes) {
     if (meta) for (let i = open; i <= close; i++) keep.add(i);
@@ -65,7 +121,7 @@ export function softBreaks(lines) {
     if (keep.has(i)) continue;
     const next = lines[i + 1];
     if (fence || !line.trim() || !next.trim() || ENDS_LINE.test(line)) continue;
-    if (/^\s/.test(next) || STARTS_BLOCK.test(next) || FENCE.test(next)) continue; // indented: verse, code, list body
+    if ((/^\s/.test(next) && !carriesOn.has(i + 1)) || STARTS_BLOCK.test(next) || FENCE.test(next)) continue; // indented: verse, code
     out.push(i);
   }
   return out;
