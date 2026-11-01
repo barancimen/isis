@@ -68,7 +68,7 @@ class BM25:
             (data.astype(np.float32), term_ids, indptr), shape=(n_docs, n_terms)
         ).tocsc()
 
-    def with_params(self, k1: float, b: float) -> "BM25":
+    def with_params(self, k1: float, b: float) -> BM25:
         """The same index weighted with another k1 (how fast repeated words saturate) and b (how
         much long passages are normalised)."""
         if (k1, b) == (self.k1, self.b):

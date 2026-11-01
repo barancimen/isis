@@ -10,6 +10,9 @@ const DASHES = /^-{3,}\s*$/;
 const RULE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const YAML = /^\s*([\w.-]+:(\s|$)|-\s|#)/;
 const MAX_ENVELOPE = 200; // lines
+const ITEM = /^(\s*)([-*+•◦▪‣]|\d+[.)])(\s+)/;
+
+const leadingSpace = (line) => /^\s*/.exec(line)[0];
 
 // A block enveloped by --- lines, opening at line i: front matter at the top of a file (which may
 // have blank lines, and may end with ...), or further down, a --- after a blank line, lines with
@@ -48,10 +51,9 @@ export function structure(lines) {
   return { envelopes, rules };
 }
 
-const ITEM = /^(\s*)([-*+•◦▪‣]|\d+[.)])(\s+)/;
 const indentOf = (line) => {
   let width = 0;
-  for (const c of /^\s*/.exec(line)[0]) width += c === "\t" ? 4 - (width % 4) : 1;
+  for (const c of leadingSpace(line)) width += c === "\t" ? 4 - (width % 4) : 1;
   return width;
 };
 
@@ -94,7 +96,7 @@ export function listStructure(lines) {
       });
     } else if (stack.length && indent > stack[0]) {
       const depth = Math.max(stack.filter((width) => width < indent).length - 1, 0);
-      continuations.push({ line: i, depth, indent: /^\s*/.exec(line)[0].length, joined: Boolean(lines[i - 1].trim()) });
+      continuations.push({ line: i, depth, indent: leadingSpace(line).length, joined: Boolean(lines[i - 1].trim()) });
     } else if (stack.length && !lines[i - 1].trim()) {
       stack = []; // plain text after a blank line ends the list
     }
@@ -121,8 +123,7 @@ export function enterInList(lines, n, ch) {
   let marker = owner.marker;
   if (owner.ordered) {
     const number = parseInt(owner.marker, 10);
-    const close = owner.marker.slice(-1);
-    marker = `${number + 1}${close}`;
+    marker = `${number + 1}${owner.marker.slice(-1)}`;
     let next = number + 1;
     for (const item of items.filter((other) => other.line > owner.line)) {
       if (item.depth < owner.depth) break;

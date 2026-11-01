@@ -59,6 +59,6 @@ def test_vocabulary_only_grows():
 
 
 def test_empty_index():
-    vocab, bm25 = build([])
+    _, bm25 = build([])
     assert bm25.n_docs == 0 and bm25.scores([], []).shape == (0,)
     assert np.isfinite(bm25.idf).all()

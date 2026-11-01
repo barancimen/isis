@@ -10,6 +10,8 @@ from pathlib import Path
 from .engine.index import configure_logging, corpus_exclude
 from .engine.semantic import DEFAULT_MODEL
 
+EVERY_INTERFACE = ("0.0.0.0", "::", "")
+
 
 def folders_of(corpus: list[str]) -> list[Path]:
     folders = [Path(d).resolve() for d in corpus]
@@ -19,30 +21,27 @@ def folders_of(corpus: list[str]) -> list[Path]:
     return folders
 
 
-def make_engine(corpus: list[str], tasks: str | None, model: str | None):
+def cmd_index(args) -> None:
     from .engine.index import Engine
     from .engine.semantic import Embedder
 
-    folders = folders_of(corpus)
-    tasks_dir = Path(tasks).resolve() if tasks else folders[0] / "_tasks"
-    embedder = Embedder(model) if model else None
-    return Engine(folders, embedder=embedder, exclude=corpus_exclude(folders, tasks_dir)), tasks_dir
-
-
-def cmd_index(args) -> None:
-    engine, _ = make_engine(args.corpus, args.tasks, None if args.no_model else args.model)
+    folders = folders_of(args.corpus)
+    tasks_dir = Path(args.tasks).resolve() if args.tasks else folders[0] / "_tasks"
+    embedder = Embedder(args.model) if args.model and not args.no_model else None
+    engine = Engine(folders, embedder=embedder, exclude=corpus_exclude(folders, tasks_dir))
     engine.refresh()  # it reports its progress
 
 
 def allowed_hosts(host: str, extra: list[str]) -> list[str]:
     """Host headers the server answers: this machine, the address it listens on, and --allow-host.
     Listening on every interface without --allow-host answers any name, as before."""
-    if host in ("0.0.0.0", "::", "") and not extra:
+    every_interface = host in EVERY_INTERFACE
+    if every_interface and not extra:
         print("isis: listening on every interface; add --allow-host NAME to answer only that name", flush=True)
         return ["*"]
     from .server.app import LOOPBACK
 
-    return list(dict.fromkeys([*LOOPBACK, *([] if host in ("0.0.0.0", "::", "") else [host]), *extra]))
+    return list(dict.fromkeys([*LOOPBACK, *([] if every_interface else [host]), *extra]))
 
 
 def cmd_serve(args) -> None:
@@ -92,7 +91,3 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     args.func(args)
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -11,12 +11,12 @@ import re
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from ..engine.related import TaskPrefs
 
-log = logging.getLogger("isis")
+log = logging.getLogger(__name__)
 ILLEGAL = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]')
 MAX_DISMISSED = 500
 
@@ -159,20 +159,28 @@ class TaskStore:
     def delete(self, name: str) -> None:
         with self.lock(name):
             path = self._existing(name)
-            self.trash.mkdir(exist_ok=True)
             stamp = _stamp()
-            path.rename(self.trash / f"{path.stem}.{stamp}.md")
+            self._to_trash(path, f"{path.stem}.{stamp}.md")
             meta = self._meta_path(path.stem)
             if meta.exists():
-                meta.rename(self.trash / f"{path.stem}.{stamp}.json")
+                self._to_trash(meta, f"{path.stem}.{stamp}.json")
+
+    def _to_trash(self, path: Path, name: str) -> Path:
+        self.trash.mkdir(exist_ok=True)
+        kept = self.trash / name
+        path.rename(kept)
+        return kept
 
     # ---- preferences ----
 
     def _meta_path(self, name: str) -> Path:
         return self.meta / f"{name}.json"
 
+    def _existing_meta_path(self, name: str) -> Path:
+        return self._meta_path(self._existing(name).stem)
+
     def prefs(self, name: str) -> TaskPrefs:
-        path = self._meta_path(self._existing(name).stem)
+        path = self._existing_meta_path(name)
         try:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -182,21 +190,15 @@ class TaskStore:
         try:
             return TaskPrefs.from_dict(json.loads(text))
         except (ValueError, TypeError, AttributeError):  # saves are atomic, so the file itself is bad: keep it
-            with self.lock(name):
-                self.trash.mkdir(exist_ok=True)
-                kept = self.trash / f"{path.stem}.{_stamp()}.bad.json"
-                try:
-                    path.rename(kept)
-                    log.warning("unreadable preferences for task %r moved to %s", path.stem, kept)
-                except OSError:
-                    pass
+            with self.lock(name), suppress(OSError):
+                kept = self._to_trash(path, f"{path.stem}.{_stamp()}.bad.json")
+                log.warning("unreadable preferences for task %r moved to %s", path.stem, kept)
             return TaskPrefs()
 
     def save_prefs(self, name: str, prefs: TaskPrefs) -> None:
         self.meta.mkdir(exist_ok=True)
         prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
-        path = self._meta_path(self._existing(name).stem)
-        _replace(path, json.dumps(prefs.to_dict(), indent=1))
+        _replace(self._existing_meta_path(name), json.dumps(prefs.to_dict(), indent=1))
 
     @contextmanager
     def edit_prefs(self, name: str):
@@ -209,7 +211,6 @@ class TaskStore:
     def forget_prefs(self, name: str) -> None:
         """Start the task's preferences over. The old file goes to .trash, like a deleted task."""
         with self.lock(name):
-            path = self._meta_path(self._existing(name).stem)
+            path = self._existing_meta_path(name)
             if path.exists():
-                self.trash.mkdir(exist_ok=True)
-                path.rename(self.trash / f"{path.stem}.{_stamp()}.prefs.json")
+                self._to_trash(path, f"{path.stem}.{_stamp()}.prefs.json")

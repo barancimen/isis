@@ -1,7 +1,9 @@
 // The Files panel: corpus paths as a tree of folders, of which only the open ones are listed.
 
+const folderNode = (name, path) => ({ name, path, count: 0, folders: new Map(), files: [] });
+
 export function fileTree(paths) {
-  const root = { name: "", path: "", count: 0, folders: new Map(), files: [] };
+  const root = folderNode("", "");
   for (const path of paths) {
     const parts = path.split("/");
     const name = parts.pop();
@@ -9,8 +11,7 @@ export function fileTree(paths) {
     node.count++;
     for (const part of parts) {
       if (!node.folders.has(part)) {
-        const folder = node.path ? `${node.path}/${part}` : part;
-        node.folders.set(part, { name: part, path: folder, count: 0, folders: new Map(), files: [] });
+        node.folders.set(part, folderNode(part, node.path ? `${node.path}/${part}` : part));
       }
       node = node.folders.get(part);
       node.count++;

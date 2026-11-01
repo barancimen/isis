@@ -18,8 +18,8 @@ from __future__ import annotations
 import bisect
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 
@@ -97,8 +97,6 @@ class Hit:
     snippet: list[SnippetLine]
     why: dict = field(default_factory=dict)
     marks: list[tuple[int, int, int]] = field(default_factory=list)  # (line, start, end) of every highlight in the passage
-
-
 
 
 class QueryError(ValueError):
@@ -206,6 +204,11 @@ class Steering:
     filters: Filters = field(default_factory=Filters)
     text: str = ""  # what the meaning side embeds: the words and phrases to prefer or require
 
+    @property
+    def highlight(self) -> list[re.Pattern]:
+        """The phrases and regexes to mark in what is shown."""
+        return self.patterns + [p for p in self.filters.required if p not in self.patterns]
+
 
 def steering(clauses: list[Clause]) -> Steering:
     """Compile clauses (raises QueryError for an invalid regex)."""
@@ -281,15 +284,14 @@ def parse_query(snapshot: Snapshot, query: str) -> Query:
             for t in expand_prefix(snapshot, pairs[-1][1]):  # a partly typed last word
                 weights.setdefault(snapshot.term_id(t), 1.0)
                 terms.add(t)
-    highlight = steer.patterns + [p for p in steer.filters.required if p not in steer.patterns]
-    return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, highlight)
+    return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, steer.highlight)
 
 
-def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns, pattern_weight: float = 1.0) -> np.ndarray:
+def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns) -> np.ndarray:
     """BM25 for weighted terms, plus each phrase or regex scored as one more term."""
     scores = bm25.scores(term_ids, weights)
     for p in patterns:
-        scores = scores + pattern_weight * bm25.pattern_scores(snapshot.pattern_counts(p))
+        scores = scores + bm25.pattern_scores(snapshot.pattern_counts(p))
     return scores
 
 
@@ -299,6 +301,22 @@ def top_rows(scores: np.ndarray, k: int, positive: bool = False) -> np.ndarray:
     if len(rows) > k:
         rows = rows[np.argpartition(-scores[rows], k)[:k]]
     return rows[np.argsort(-scores[rows], kind="stable")]
+
+
+def remembering_lines(read_lines: Callable[[str], list[str]]) -> Callable[[str], list[str] | None]:
+    """`read_lines` that reads each file once for the results being built, and gives None for a file
+    deleted since indexing (the next refresh drops it)."""
+    known: dict[str, list[str] | None] = {}
+
+    def lines_of(path: str) -> list[str] | None:
+        if path not in known:
+            try:
+                known[path] = read_lines(path)
+            except (OSError, ValueError):
+                known[path] = None
+        return known[path]
+
+    return lines_of
 
 
 def search(
@@ -344,32 +362,32 @@ def search(
             if not snapshot.has_vector[row]:
                 fused[row] += stand_in / (config.rrf_k + rank + 1)
         ranked = sorted(((row, score) for row, score in fused.items() if score > 0), key=lambda kv: -kv[1])
-        why = lambda row: {
-            "bm25": float(lexical[row]),
-            "cosine": float(semantic[row]),
-            "keyword_rank": lex_rank[row] + 1 if row in lex_rank else None,  # None: not among the top keyword hits
-            "meaning_rank": sem_rank[row] + 1 if row in sem_rank else None,
-            "embedded": bool(snapshot.has_vector[row]),
-        }
+
+        def why(row: int) -> dict:
+            return {
+                "bm25": float(lexical[row]),
+                "cosine": float(semantic[row]),
+                "keyword_rank": lex_rank[row] + 1 if row in lex_rank else None,  # None: not among the top keyword hits
+                "meaning_rank": sem_rank[row] + 1 if row in sem_rank else None,
+                "embedded": bool(snapshot.has_vector[row]),
+            }
     else:
         rows = top_rows(lexical, len(lexical), positive=True)
         ranked = [(int(r), float(lexical[r])) for r in rows]
-        why = lambda row: {"bm25": float(lexical[row])}
+
+        def why(row: int) -> dict:
+            return {"bm25": float(lexical[row])}
+
     if q.filters.requires:  # passages that match every + clause, but none of the others
         seen = {r for r, _ in ranked}
         ranked += [(int(r), 0.0) for r in np.flatnonzero(allowed) if r not in seen]
 
-    lines_cache: dict[str, list[str] | None] = {}
+    lines_of = remembering_lines(read_lines)
     hits = []
     for row, score in ranked:
-        path = snapshot.passages[row].path
-        if path not in lines_cache:
-            try:
-                lines_cache[path] = read_lines(path)
-            except (OSError, ValueError):
-                lines_cache[path] = None  # deleted since indexing; the next refresh drops it
-        if lines_cache[path]:
-            hits.append(make_hit(snapshot, row, score, q.terms, lines_cache[path], context_lines, why(row), q.highlight))
+        lines = lines_of(snapshot.passages[row].path)
+        if lines:
+            hits.append(make_hit(snapshot, row, score, q.terms, lines, context_lines, why(row), q.highlight))
             if len(hits) >= limit:
                 break
     return hits
@@ -404,39 +422,38 @@ def make_hit(
     terms: set[str],
     lines: list[str],
     context_lines: int,
-    why: dict | None = None,
-    patterns: list[re.Pattern] = (),
+    why: dict,
+    patterns: list[re.Pattern],
 ) -> Hit:
     p = snapshot.passages[row]
     last_line = len(lines) - 1
     start, end = min(p.start_line, last_line), min(p.end_line, last_line)
-    patterns = list(patterns)
 
-    match = None
-    for n in range(start, end + 1):
-        spans = _spans(lines[n], terms, patterns)
-        if spans:
-            match = (n, spans[0][0], spans[0][1] - spans[0][0])
-            break
+    def spans_on(n: int) -> list[tuple[int, int]]:
+        return _spans(lines[n], terms, patterns)
+
+    def first_match_on(n: int) -> tuple[int, int, int] | None:
+        spans = spans_on(n)
+        return (n, spans[0][0], spans[0][1] - spans[0][0]) if spans else None
+
+    match = next((m for n in range(start, end + 1) if (m := first_match_on(n))), None)
     above = None  # a heading line that holds the only match (phrases and regexes see headings)
     if match is None and p.heading:
         n = heading_line(lines, start, p.heading)
-        if n is not None and (spans := _spans(lines[n], terms, patterns)):
-            above, match = n, (n, spans[0][0], spans[0][1] - spans[0][0])
+        if n is not None and (match := first_match_on(n)):
+            above = n
 
     # The whole passage (what + adds to the task, and what the reader highlights), with a few
     # dimmed lines of context around it.
     first = max(0, start - context_lines)
     snippet = []
     if above is not None and above < first:  # show the heading, then the passage
-        snippet += [SnippetLine(above, lines[above], False, _spans(lines[above], terms, patterns)),
+        snippet += [SnippetLine(above, lines[above], False, spans_on(above)),
                     SnippetLine(above, "", False, [])]
     for n in range(first, min(last_line, end + context_lines) + 1):
         inside = start <= n <= end
-        marks = _spans(lines[n], terms, patterns) if inside or n == above else []
-        snippet.append(SnippetLine(n, lines[n], inside, marks))
+        snippet.append(SnippetLine(n, lines[n], inside, spans_on(n) if inside or n == above else []))
     focus = match[0] if match else start
-    marks = [(n, s, e) for n in ([above] if above is not None else []) + list(range(start, end + 1))
-             for s, e in _spans(lines[n], terms, patterns)]
+    marks = [(n, s, e) for n in ([above] if above is not None else []) + list(range(start, end + 1)) for s, e in spans_on(n)]
 
-    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why or {}, marks)
+    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why, marks)

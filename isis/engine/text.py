@@ -39,19 +39,19 @@ def _words(text: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def stem(word: str) -> str:
-    return _stemmer().stemWord(word.lower())
+def _stems(words: list[tuple[int, int, str]]) -> list[str]:
+    return _stemmer().stemWords([w for _, _, w in words])
 
 
 def tokenize(text: str) -> list[str]:
     """Search terms in `text`, in order."""
-    return _stemmer().stemWords([w for _, _, w in _words(text)])
+    return _stems(_words(text))
 
 
 def tokenize_with_surface(text: str) -> list[tuple[str, str]]:
     """(term, the word as written) pairs, used to show readable labels for stemmed terms."""
     words = _words(text)
-    return list(zip(_stemmer().stemWords([w for _, _, w in words]), (w for _, _, w in words)))
+    return [(term, word) for term, (_, _, word) in zip(_stems(words), words)]
 
 
 def term_spans(text: str, terms: set[str]) -> list[tuple[int, int]]:
@@ -59,5 +59,4 @@ def term_spans(text: str, terms: set[str]) -> list[tuple[int, int]]:
     if not terms:
         return []
     words = _words(text)
-    stems = _stemmer().stemWords([w for _, _, w in words])
-    return [(s, e) for (s, e, _), t in zip(words, stems) if t in terms]
+    return [(s, e) for (s, e, _), t in zip(words, _stems(words)) if t in terms]

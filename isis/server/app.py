@@ -18,8 +18,8 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
@@ -27,9 +27,10 @@ from ..engine.related import RelatedConfig
 from ..engine.search import QueryError, SearchConfig
 from .tasks import Conflict, TaskError, TaskStore
 
-log = logging.getLogger("isis")
+log = logging.getLogger(__name__)
 WEB = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
+WATCH_RETRY = 30  # seconds
 
 
 class PageFiles(StaticFiles):
@@ -75,9 +76,6 @@ class RelatedRequest(BaseModel):
     cursor_line: int | None = None
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
     skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
-
-
-WATCH_RETRY = 30  # seconds
 
 
 class TermRequest(BaseModel):
@@ -178,7 +176,6 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             **plain(engine.status),
             "index_bytes": engine.index_bytes(),
             "folders": [name for name in engine.roots if name],  # when serving several folders
-            "corpus": ", ".join(map(str, engine.roots.values())),
             "model": getattr(engine.embedder, "model_id", None),
         }
 

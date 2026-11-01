@@ -8,6 +8,7 @@ hand-edited override can never break a query.
 
 from __future__ import annotations
 
+import math
 from dataclasses import MISSING, field, fields
 
 
@@ -37,9 +38,10 @@ def specs(cls) -> list[dict]:
     out = []
     for f, meta in _tunables(cls):
         value = getattr(defaults, f.name)
-        entries = [(f"{f.name}.{k}", f"{meta['label']}: {k}", value[k]) for k in meta["keys"]] if meta["keys"] else [
-            (f.name, meta["label"], value)
-        ]
+        if meta["keys"]:
+            entries = [(f"{f.name}.{k}", f"{meta['label']}: {k}", value[k]) for k in meta["keys"]]
+        else:
+            entries = [(f.name, meta["label"], value)]
         for name, label, default in entries:
             out.append({
                 "name": name,
@@ -64,13 +66,13 @@ def _coerce(value, default, meta):
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if number != number:  # NaN
+    if math.isnan(number):
         return None
     if meta["min"] is not None:
         number = max(meta["min"], number)
     if meta["max"] is not None:
         number = min(meta["max"], number)
-    return int(round(number)) if kind == "int" else number
+    return round(number) if kind == "int" else number
 
 
 def configure(cls, overrides: dict | None):
@@ -84,10 +86,6 @@ def configure(cls, overrides: dict | None):
             continue
         current = getattr(config, field_name)
         coerced = _coerce(value, current[key] if key else current, meta)
-        if coerced is None:
-            continue
-        if key:
-            setattr(config, field_name, {**current, key: coerced})
-        else:
-            setattr(config, field_name, coerced)
+        if coerced is not None:
+            setattr(config, field_name, {**current, key: coerced} if key else coerced)
     return config

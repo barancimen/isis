@@ -13,14 +13,16 @@ import { enterInList, envelopeAt, listStructure, paragraphAt, softBreaks, struct
 const $ = (sel) => document.querySelector(sel);
 const enc = encodeURIComponent;
 
+const absent = (v) => v === null || v === undefined || v === false;
+
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "class") el.className = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
-    else if (v !== undefined && v !== null && v !== false) el.setAttribute(k, v === true ? "" : v);
+    else if (!absent(v)) el.setAttribute(k, v === true ? "" : v);
   }
-  el.append(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
+  el.append(...children.flat().filter((c) => !absent(c)));
   return el;
 }
 
@@ -54,10 +56,11 @@ async function api(method, url, body, options = {}) {
 const store = {
   get(key) { try { return localStorage.getItem(`isis.${key}`); } catch { return null; } },
   set(key, value) { try { localStorage.setItem(`isis.${key}`, value); } catch {} },
+  // A saved JSON value; `fallback` when there is none or it can't be read.
+  json(key, fallback) { try { return JSON.parse(this.get(key)) ?? fallback; } catch { return fallback; } },
 };
 
 let flashTimer;
-let addedTimer;
 function flash(message) {
   $("#flash").textContent = message;
   clearTimeout(flashTimer);
@@ -79,7 +82,7 @@ const markdownStyle = HighlightStyle.define([
   { tag: tags.strong, fontWeight: "700" },
   { tag: tags.link, color: "var(--accent)" },
   { tag: tags.url, color: "var(--muted)" },
-  { tag: tags.monospace, fontFamily: "var(--mono)", fontSize: "0.9em" },
+  { tag: tags.monospace, fontSize: "0.9em" },
   { tag: tags.quote, color: "var(--muted)" },
   { tag: [tags.processingInstruction, tags.meta, tags.contentSeparator], color: "var(--faint)" },
 ]);
@@ -87,17 +90,17 @@ const markdownStyle = HighlightStyle.define([
 const theme = EditorView.theme({
   "&": { height: "100%", fontSize: "15.5px", backgroundColor: "var(--bg)", color: "var(--fg)" },
   "&.cm-focused": { outline: "none" },
-  ".cm-scroller": { fontFamily: "var(--serif)", lineHeight: "1.62", overflowY: "scroll" },
+  ".cm-scroller": { fontFamily: "var(--font)", lineHeight: "1.62", overflowY: "scroll" },
   ".cm-content": { padding: "18px 0 40vh", maxWidth: "44em", caretColor: "var(--fg)" },
   ".cm-line": { padding: "0 22px" },
-  ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--faint)", border: "none", fontFamily: "var(--sans)", fontSize: "11px" },
+  ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--faint)", border: "none", fontSize: "11px" },
   ".cm-cursor": { borderLeftColor: "var(--fg)", borderLeftWidth: "2px" },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selection) !important" },
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   ".cm-placeholder": { color: "var(--faint)", fontStyle: "italic" },
   ".cm-hit-range": { backgroundColor: "var(--hit-line)" },
   ".cm-env": { backgroundColor: "var(--panel)", boxShadow: "inset 3px 0 0 var(--border)" },
-  ".cm-env-meta": { fontFamily: "var(--sans)", fontSize: "0.8em", lineHeight: "1.55", color: "var(--muted)" },
+  ".cm-env-meta": { fontSize: "0.8em", lineHeight: "1.55", color: "var(--muted)" },
   ".cm-env-key": { fontWeight: "600" },
   ".cm-env-edge": { fontSize: "6px", lineHeight: "16px", userSelect: "none" },
   ".cm-env-edge, .cm-env-edge span, .cm-rule, .cm-rule span": { color: "transparent !important" },
@@ -225,6 +228,10 @@ class SpaceWidget extends WidgetType {
 }
 const softBreak = Decoration.replace({ widget: new SpaceWidget() });
 
+const BULLETS = ["•", "◦", "▪"];
+const hidden = Decoration.replace({});
+const markerClass = (bullet) => (bullet ? "cm-li-marker cm-li-bullet" : "cm-li-marker");
+
 // What a list item's marker shows as: a bullet that changes with the level, or its number.
 class ListMarker extends WidgetType {
   constructor(text, bullet) {
@@ -240,9 +247,6 @@ class ListMarker extends WidgetType {
     return span;
   }
 }
-const BULLETS = ["•", "◦", "▪"];
-const hidden = Decoration.replace({});
-const markerClass = (bullet) => (bullet ? "cm-li-marker cm-li-bullet" : "cm-li-marker");
 
 // Enter in a list: the next item, straight below (see reflow.js). A plain Enter would copy a blank
 // line from a list that has them, and CodeMirror's has no option against that.
@@ -269,14 +273,15 @@ function continueList(view) {
   });
   return true;
 }
+
 const setFocused = StateEffect.define();
 
 function reflow({ editable }) {
   const build = (state, focused) => {
     const lines = state.doc.toJSON();
-    const [lo, hi] = editable && focused ? paragraphAt(lines, state.doc.lineAt(state.selection.main.head).number - 1) : [-1, -1];
-    const editing = (i) => i >= lo && i <= hi;
     const cursorLine = editable && focused ? state.doc.lineAt(state.selection.main.head).number - 1 : -1;
+    const [lo, hi] = cursorLine >= 0 ? paragraphAt(lines, cursorLine) : [-1, -1];
+    const editing = (i) => i >= lo && i <= hi;
     const decos = [];
     const lists = listStructure(lines);
     const inList = new Set([...lists.items, ...lists.continuations].map((entry) => entry.line));
@@ -348,7 +353,13 @@ function readerState(doc) {
       reflow({ editable: false }),
       hitSlot.field,
       placeholder("Open a file from Files, or click a search result."),
-      keymap.of([{ key: "Mod-Enter", run: () => (addReaderSelection(), true) }]),
+      keymap.of([{
+        key: "Mod-Enter",
+        run: () => {
+          addReaderSelection();
+          return true;
+        },
+      }]),
       remeasureOnResize,
       EditorView.updateListener.of((u) => {
         if (u.selectionSet) $("#reader-add").hidden = u.state.selection.main.empty;
@@ -379,14 +390,14 @@ function taskExtensions() {
   ];
 }
 
-const reader = new EditorView({ parent: $("#reader-editor"), state: readerState("") });
-const taskView = new EditorView({
-  parent: $("#task-editor"),
-  state: EditorState.create({
-    doc: "",
-    extensions: [theme, EditorState.readOnly.of(true), placeholder("Create a task with + to start collecting.")],
-  }),
+const taskState = (doc) => EditorState.create({ doc, extensions: taskExtensions() });
+const noTaskState = () => EditorState.create({
+  doc: "",
+  extensions: [theme, EditorState.readOnly.of(true), placeholder("Create a task with + to start collecting.")],
 });
+
+const reader = new EditorView({ parent: $("#reader-editor"), state: readerState("") });
+const taskView = new EditorView({ parent: $("#task-editor"), state: noTaskState() });
 
 measureWhenScrollbarPressed(reader);
 measureWhenScrollbarPressed(taskView);
@@ -396,7 +407,7 @@ measureWhenScrollbarPressed(taskView);
 const state = {
   task: null, // active task name
   tasks: [], // [{name, mtime}]
-  docs: new Map(), // task name -> {state, mtime, dirty, saving, again}
+  docs: new Map(), // task name -> {state, mtime, dirty, saving, again, conflictMtime}
   readerPath: null,
   openedHit: null, // the result last opened in the reader, which stays marked
   files: [],
@@ -408,12 +419,12 @@ const state = {
   relatedTerms: [],
   relatedLanes: [],
   likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
-  relatedSeq: 0,
   searchSeq: 0,
   lastRelatedKeys: null,
   indexUpdated: null,
   paramSpecs: { search: [], related: [] }, // from /api/params
   params: loadParams(), // this browser's overrides: {search: {name: value}, related: {...}}
+  meaningWeightBefore: null, // what the Meaning button restores
 };
 
 // ---------- tasks ----------
@@ -453,7 +464,7 @@ async function switchTask(name) {
   let doc = state.docs.get(name);
   if (!doc) {
     const task = await api("GET", `/api/tasks/${enc(name)}`);
-    doc = { state: EditorState.create({ doc: task.content, extensions: taskExtensions() }), mtime: task.mtime, dirty: false };
+    doc = { state: taskState(task.content), mtime: task.mtime, dirty: false };
     state.docs.set(name, doc);
   }
   state.task = name;
@@ -477,11 +488,9 @@ function showNoTask() {
   updateRefreshButton();
   $("#task-name").textContent = "No task";
   setSaveState("");
-  taskView.setState(
-    EditorState.create({ doc: "", extensions: [theme, EditorState.readOnly.of(true), placeholder("Create a task with + to start collecting.")] }),
-  );
+  taskView.setState(noTaskState());
   renderTaskTabs();
-  renderRelatedEmpty("Create a task to see related passages.");
+  renderRelatedEmpty(NO_TASK_RELATED);
 }
 
 async function newTask() {
@@ -584,7 +593,7 @@ async function resolveConflict(keepMine) {
     await saveTask(name);
   } else {
     const task = await api("GET", `/api/tasks/${enc(name)}`);
-    doc.state = EditorState.create({ doc: task.content, extensions: taskExtensions() });
+    doc.state = taskState(task.content);
     doc.mtime = task.mtime;
     doc.dirty = false;
     doc.conflictMtime = null;
@@ -610,6 +619,8 @@ function onTaskUpdate(update) {
 }
 
 // ---------- adding to the task ----------
+
+let addedTimer;
 
 async function addToTask(text, origin = null) {
   if (!text.trim()) return;
@@ -663,7 +674,6 @@ async function openFile(path, location = null) {
   const doc = reader.state.doc;
   const line = doc.line(Math.min(location.line + 1, doc.lines));
   const from = line.from + Math.min(location.ch ?? 0, line.length);
-  const to = Math.min(from + (location.len ?? 0), line.to);
   const decos = [];
   if (location.start !== undefined) {
     // The passage itself, exactly: it may start or end inside a paragraph, which flows as one line.
@@ -671,8 +681,7 @@ async function openFile(path, location = null) {
     const end = doc.line(Math.min(location.end + 1, doc.lines)).to;
     if (end > start) decos.push(Decoration.mark({ class: "cm-hit-range" }).range(start, end));
   }
-  const words = location.marks ?? (to > from ? [[location.line, location.ch, location.len + location.ch]] : []);
-  for (const [n, s, e] of words) {
+  for (const [n, s, e] of location.marks ?? []) {
     if (n >= doc.lines) continue;
     const l = doc.line(n + 1);
     const a = l.from + Math.min(s, l.length);
@@ -689,6 +698,8 @@ async function openFile(path, location = null) {
 
 const MAX_FILES_SHOWN = 2000;
 
+const withoutExtension = (name) => name.replace(/\.(md|markdown)$/i, "");
+
 function renderFiles() {
   const filter = $("#file-filter").value.trim().toLowerCase();
   const matches = state.files.map((f) => f.path).filter((path) => !filter || path.toLowerCase().includes(filter));
@@ -700,7 +711,7 @@ function renderFiles() {
   for (const row of rows) {
     if (row.kind === "folder") {
       list.append(
-        h("li", { class: "dir-row" },
+        h("li", {},
           h("button", { class: "dir", "data-dir": row.path, title: row.path, "aria-expanded": String(row.open), style: indent(row.depth, 4), disabled: Boolean(filter), onclick: () => toggleFolder(row.path) },
             h("span", { class: "dir-arrow" }, row.open ? "▾" : "▸"),
             h("span", { class: "dir-name" }, row.name),
@@ -711,7 +722,7 @@ function renderFiles() {
     } else {
       list.append(
         h("li", { class: `file${row.path === state.readerPath ? " current" : ""}`, "data-path": row.path, title: row.path, style: indent(row.depth, 20), onclick: () => openFile(row.path).catch(fail) },
-          row.name.replace(/\.(md|markdown)$/i, "")),
+          withoutExtension(row.name)),
       );
     }
   }
@@ -745,6 +756,9 @@ async function loadFiles() {
 
 // ---------- results ----------
 
+const passageKey = (passage) => `${passage.path}:${passage.start_line}`;
+const LIKE_TITLE = "More like this: pull the suggestions toward this passage, without adding it";
+
 // Snippet lines flow as prose (hard-wrapped text would otherwise wrap twice in a narrow
 // panel); blank lines start a new paragraph. Context lines around the passage are dimmed.
 function renderSnippet(hit) {
@@ -755,7 +769,10 @@ function renderSnippet(hit) {
       para = null;
       continue;
     }
-    if (!para) body.append((para = h("p")));
+    if (!para) {
+      para = h("p");
+      body.append(para);
+    }
     const span = h("span", { class: line.in_passage ? "line" : "line ctx" });
     let pos = 0;
     for (const [start, end] of line.marks) {
@@ -777,7 +794,6 @@ const WHY_LABELS = {
   rarity: (v) => `themes rarely meet (${Math.round(v * 100)}%)`,
   collected_in_theme: (v) => `${v} collected in theme`,
   matches_task_line: (v) => `closest to task line ${v + 1}`,
-  cosine: (v) => `cosine ${v.toFixed(2)}`,
 };
 
 // For search hits found with Meaning on: where each signal ranked the passage.
@@ -797,16 +813,15 @@ function describeWhy(why) {
 }
 
 function renderHit(hit, { lane = null, isNew = false } = {}) {
-  const file = hit.path.slice(hit.path.lastIndexOf("/") + 1).replace(/\.(md|markdown)$/i, "");
-  const key = `${hit.path}:${hit.start_line}`;
+  const file = withoutExtension(hit.path.split("/").pop());
+  const key = passageKey(hit);
   const open = (event) => {
     if (event.target.closest("button")) return;
     state.openedHit = key;
     for (const card of document.querySelectorAll(".hit")) card.classList.toggle("opened", card.dataset.key === key);
     openFile(hit.path, {
       line: hit.focus_line,
-      ch: hit.match ? hit.match[1] : 0,
-      len: hit.match ? hit.match[2] : 0,
+      ch: hit.match?.[1] ?? 0,
       start: hit.start_line,
       end: hit.end_line,
       marks: hit.marks,
@@ -817,7 +832,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     lane && h("button", {
       class: "like",
       "aria-pressed": String(Boolean(hit.why.liked)),
-      title: "More like this: pull the suggestions toward this passage, without adding it",
+      title: LIKE_TITLE,
       onclick: () => likeHit(hit, lane).catch(fail),
     }, "↑"),
     lane && h("button", { title: "Not useful: hide it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
@@ -834,9 +849,10 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
 
 // ---------- search panel ----------
 
+const SEARCH_LIMIT = 50;
+
 const runSearch = debounce(async () => {
   const q = $("#search-input").value;
-  const mode = "hybrid"; // Meaning off is meaning_weight 0, which the server ranks by keywords alone
   const seq = ++state.searchSeq;
   if (!q.trim()) {
     $("#search-status").textContent = "";
@@ -846,11 +862,12 @@ const runSearch = debounce(async () => {
   try {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
     const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
-    const result = await api("GET", `/api/search?q=${enc(q)}&mode=${mode}&limit=50${tuned}${skip}`);
+    // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
+    const result = await api("GET", `/api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
     const how = result.hits.some((hit) => "meaning_rank" in hit.why) ? " by keywords and meaning" : "";
-    $("#search-status").textContent = n ? `${n}${n === 50 ? "+" : ""} passages${how} · ${result.ms} ms` : "No matches.";
+    $("#search-status").textContent = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} passages${how} · ${result.ms} ms` : "No matches.";
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
   } catch (error) {
     if (seq !== state.searchSeq) return;
@@ -861,6 +878,14 @@ const runSearch = debounce(async () => {
 }, 200);
 
 // ---------- related panel ----------
+
+const NO_TASK_RELATED = "Create a task to see related passages.";
+
+// One refresh at a time: on a long task they can take longer than a pause in typing, and the server
+// can't stop one it has started. A request during a refresh is served once that one ends, and any
+// number of them become a single refresh of the latest text.
+let relatedRunning = null;
+let relatedAgain = false;
 
 // The suggestions change only when asked to: something may be read, and is not rewritten under the
 // reader. A change only marks them out of date and arms the Refresh button. They load by themselves
@@ -881,12 +906,6 @@ function renderRelatedEmpty(message) {
   $("#related-feedback").hidden = true;
   $("#related-steer").hidden = true;
 }
-
-// One refresh at a time: on a long task they can take longer than a pause in typing, and the server
-// can't stop one it has started. A request during a refresh is served once that one ends, and any
-// number of them become a single refresh of the latest text.
-let relatedRunning = null;
-let relatedAgain = false;
 
 function refreshRelated() {
   if (relatedRunning) {
@@ -914,11 +933,10 @@ function refreshRelated() {
 
 async function fetchRelated() {
   if (!state.task) {
-    renderRelatedEmpty("Create a task to see related passages.");
+    renderRelatedEmpty(NO_TASK_RELATED);
     return;
   }
   const name = state.task;
-  const seq = ++state.relatedSeq;
   state.relatedStale = false;
   updateRefreshButton();
   $("#related-status").textContent = "Updating…";
@@ -927,7 +945,7 @@ async function fetchRelated() {
     params: state.params.related,
     skip_folders: [...state.skipped.related],
   });
-  if (seq !== state.relatedSeq || name !== state.task) return;
+  if (name !== state.task) return;
 
   state.relatedFor = name;
   state.relatedTerms = result.terms;
@@ -941,7 +959,7 @@ async function fetchRelated() {
       h("p", { class: "lane-desc" }, lane.description),
       lane.note && h("p", { class: "lane-note" }, lane.note),
       lane.items.map((hit) => {
-        const key = `${hit.path}:${hit.start_line}`;
+        const key = passageKey(hit);
         keys.add(key);
         return renderHit(hit, { lane: lane.name, isNew: previous !== null && !previous.has(key) });
       }),
@@ -961,24 +979,20 @@ async function fetchRelated() {
 // The keywords taken from the task. Boosting writes the word into the steer line; ignoring takes
 // a keyword out of the query without hiding the passages that contain it.
 function renderChips(terms) {
-  $("#related-terms").replaceChildren(
-    ...terms.map((t) =>
-      h("span", { class: `chip${t.boosted ? " boosted" : ""}${t.ignored ? " ignored" : ""}`, style: `--w: ${t.weight.toFixed(2)}` },
-        h("button", {
-          class: "chip-label",
-          title: t.ignored
-            ? "Ignored: click to search for it again"
-            : t.boosted
-              ? "Boosted by the steer line: click to stop boosting"
-              : "Click to boost: always search for it, at full weight (adds it to the steer line)",
-          onclick: () => (t.ignored ? termAction(t, t.term, "unignore") : t.boosted ? termAction(t, t.term, "unboost") : termAction(t, t.label, "boost")).catch(fail),
-        }, t.label),
-        t.ignored
-          ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}” (adds -${t.label} to the steer line)`, onclick: () => termAction(t, t.label, "exclude").catch(fail) }, "⊘")
-          : h("button", { class: "chip-x", title: "Ignore: stop searching for this word (passages containing it can still be suggested)", onclick: () => termAction(t, t.term, "ignore").catch(fail) }, "×"),
-      ),
-    ),
-  );
+  const chip = (t) => {
+    const [title, term, action] = t.ignored
+      ? ["Ignored: click to search for it again", t.term, "unignore"]
+      : t.boosted
+        ? ["Boosted by the steer line: click to stop boosting", t.term, "unboost"]
+        : ["Click to boost: always search for it, at full weight (adds it to the steer line)", t.label, "boost"];
+    return h("span", { class: `chip${t.boosted ? " boosted" : ""}${t.ignored ? " ignored" : ""}`, style: `--w: ${t.weight.toFixed(2)}` },
+      h("button", { class: "chip-label", title, onclick: () => termAction(t, term, action).catch(fail) }, t.label),
+      t.ignored
+        ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}” (adds -${t.label} to the steer line)`, onclick: () => termAction(t, t.label, "exclude").catch(fail) }, "⊘")
+        : h("button", { class: "chip-x", title: "Ignore: stop searching for this word (passages containing it can still be suggested)", onclick: () => termAction(t, t.term, "ignore").catch(fail) }, "×"),
+    );
+  };
+  $("#related-terms").replaceChildren(...terms.map(chip));
 }
 
 async function termAction(chip, term, action) {
@@ -1010,12 +1024,12 @@ function showPrefs(prefs) {
     const on = state.likedIds.has(card.dataset.key);
     const button = card.querySelector("button.like");
     button.setAttribute("aria-pressed", String(on));
-    button.title = on ? "More like this is on: click to stop" : "More like this: pull the suggestions toward this passage, without adding it";
+    button.title = on ? "More like this is on: click to stop" : LIKE_TITLE;
   }
 }
 
 function rememberLikes(prefs) {
-  state.likedIds = new Map(prefs.liked.map((d) => [`${d.path}:${d.start_line}`, d.id]));
+  state.likedIds = new Map(prefs.liked.map((d) => [passageKey(d), d.id]));
 }
 
 // The steer line: clauses as in a search, kept with the task. Enter saves; Escape undoes the edit.
@@ -1042,23 +1056,22 @@ async function saveSteer(event) {
   }
 }
 
+const passageFields = (hit, lane) => ({ lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
+
 async function dismiss(hit, lane, element, avoid = false) {
   element?.remove();
-  await changePrefs("POST", "/feedback", {
-    action: avoid ? "avoid" : "dismiss", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line,
-  });
+  await changePrefs("POST", "/feedback", { action: avoid ? "avoid" : "dismiss", ...passageFields(hit, lane) });
 }
 
 async function likeHit(hit, lane) {
-  const id = state.likedIds.get(`${hit.path}:${hit.start_line}`);
-  await changePrefs("POST", "/feedback", id
-    ? { action: "unlike", id }
-    : { action: "like", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
+  const id = state.likedIds.get(passageKey(hit));
+  await changePrefs("POST", "/feedback", id ? { action: "unlike", id } : { action: "like", ...passageFields(hit, lane) });
 }
 
-async function unlikePassage(liked, element) {
+// From the drawer: "restore" a dismissed passage, or "unlike" a liked one.
+async function undoFeedback(action, id, element) {
   element?.remove();
-  await changePrefs("POST", "/feedback", { action: "unlike", id: liked.id });
+  await changePrefs("POST", "/feedback", { action, id });
 }
 
 // ---------- feedback drawer ----------
@@ -1102,10 +1115,10 @@ function renderFeedback(prefs, terms, lanes) {
     );
   };
   const dismissed = [...prefs.dismissed].reverse().map((d) => passageItem(d,
-    h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => restoreDismissed(d, e.target.closest("li")).catch(fail) }, "Restore"),
+    h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => undoFeedback("restore", d.id, e.target.closest("li")).catch(fail) }, "Restore"),
     d.avoid && h("span", { class: "feedback-tag", title: "Avoided: passages like this one are hidden too" }, "⊘ avoided")));
   const liked = [...prefs.liked].reverse().map((d) => passageItem(d,
-    h("button", { title: "Stop pulling the suggestions toward this passage", onclick: (e) => unlikePassage(d, e.target.closest("li")).catch(fail) }, "Stop")));
+    h("button", { title: "Stop pulling the suggestions toward this passage", onclick: (e) => undoFeedback("unlike", d.id, e.target.closest("li")).catch(fail) }, "Stop")));
   const ignoredChip = (term) =>
     h("span", { class: "chip ignored" },
       h("span", { class: "chip-label" }, labels.get(term) ?? term),
@@ -1151,11 +1164,6 @@ function renderFeedback(prefs, terms, lanes) {
   );
 }
 
-async function restoreDismissed(dismissal, element) {
-  element?.remove();
-  await changePrefs("POST", "/feedback", { action: "restore", id: dismissal.id });
-}
-
 async function forgetFeedback() {
   const name = state.task;
   if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
@@ -1173,16 +1181,18 @@ async function forgetFeedback() {
 // travel with every request, so the server's defaults never change.
 
 function loadParams() {
-  try {
-    const saved = JSON.parse(store.get("params") || "{}");
-    return { search: saved.search || {}, related: saved.related || {} };
-  } catch {
-    return { search: {}, related: {} };
-  }
+  const saved = store.json("params", {});
+  return { search: saved.search || {}, related: saved.related || {} };
 }
 
 function saveParams() {
   store.set("params", JSON.stringify(state.params));
+}
+
+// A setting changed: a search runs again at once, and Related offers its Refresh.
+function settingChanged(kind) {
+  if (kind === "search") runSearch();
+  else requestRelated();
 }
 
 function formatValue(spec, value) {
@@ -1228,8 +1238,7 @@ function paramRow(kind, spec) {
     else state.params[kind][spec.name] = v;
     saveParams();
     updateTuner(kind);
-    if (kind === "search") runSearch();
-    else requestRelated();
+    settingChanged(kind);
   });
   const toDefault = h("button", {
     class: "tune-default",
@@ -1250,23 +1259,26 @@ function setTuned(kind, name, value) {
 }
 
 // The Meaning button is Meaning weight at 0 or not; turning it back on restores the last value.
+const meaningSpec = () => state.paramSpecs.search.find((s) => s.name === "meaning_weight");
+
 function meaningWeight() {
-  const spec = state.paramSpecs.search.find((s) => s.name === "meaning_weight");
-  return state.params.search.meaning_weight ?? spec?.default ?? 1;
+  return state.params.search.meaning_weight ?? meaningSpec()?.default ?? 1;
 }
 
 function toggleMeaning() {
   const now = meaningWeight();
   if (now > 0) state.meaningWeightBefore = now;
-  const spec = state.paramSpecs.search.find((s) => s.name === "meaning_weight");
-  setTuned("search", "meaning_weight", now > 0 ? 0 : state.meaningWeightBefore ?? spec.default);
+  setTuned("search", "meaning_weight", now > 0 ? 0 : state.meaningWeightBefore ?? meaningSpec().default);
 }
 
 function buildTuner(kind) {
   const rows = [];
   let group = null;
   for (const spec of state.paramSpecs[kind]) {
-    if (spec.group !== group) rows.push(h("div", { class: "tune-group" }, (group = spec.group)));
+    if (spec.group !== group) {
+      group = spec.group;
+      rows.push(h("div", { class: "tune-group" }, group));
+    }
     rows.push(paramRow(kind, spec));
   }
   $(`#${kind}-tune`).replaceChildren(
@@ -1295,8 +1307,7 @@ function resetParams(kind) {
   state.params[kind] = {};
   saveParams();
   buildTuner(kind);
-  if (kind === "search") runSearch();
-  else requestRelated();
+  settingChanged(kind);
 }
 
 async function loadParamSpecs() {
@@ -1322,16 +1333,13 @@ function showPanel(name) {
   if (name === "search") $("#search-input").focus();
 }
 
-// ---------- index status ----------
+// ---------- corpus folders ----------
 
 // When several folders are served, each panel has its own boxes to leave some of them out. They
 // are remembered in this browser, like the parameters.
 function loadSkipped(panel) {
-  try {
-    return new Set(JSON.parse(store.get(`skip-${panel}`) || "[]"));
-  } catch {
-    return new Set();
-  }
+  const saved = store.json(`skip-${panel}`, []);
+  return new Set(Array.isArray(saved) ? saved : []);
 }
 
 function renderFolderPicks(folders) {
@@ -1349,8 +1357,7 @@ function renderFolderPicks(folders) {
             if (e.target.checked) skipped.delete(name);
             else skipped.add(name);
             store.set(`skip-${panel}`, JSON.stringify([...skipped]));
-            if (panel === "search") runSearch();
-            else requestRelated();
+            settingChanged(panel);
           },
         }),
         name,
@@ -1358,26 +1365,30 @@ function renderFolderPicks(folders) {
   }
 }
 
+// ---------- index status ----------
+
 function formatBytes(bytes) {
   if (bytes < 1e6) return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
   return bytes < 1e9 ? `${(bytes / 1e6).toFixed(1)} MB` : `${(bytes / 1e9).toFixed(2)} GB`;
 }
 
+function statusText(s) {
+  if (s.state === "embedding") return `Embedding ${s.embedded.toLocaleString()} / ${s.to_embed.toLocaleString()} passages… (search works meanwhile)`;
+  if (s.state === "error") return `Indexing failed: ${s.error} (see the server log; it retries when files change)`;
+  if (s.state !== "ready") return "Indexing…";
+  const model = s.model ? s.model.split("/").pop() : "keywords only";
+  const keywordsOnly = s.model && s.unembedded ? ` (${s.unembedded.toLocaleString()} keywords only)` : "";
+  return `${s.passages.toLocaleString()} passages${keywordsOnly} · ${model}`;
+}
+
 async function pollStatus() {
-  let ready = true;
+  let settled = false; // nothing to wait for: poll slowly
   try {
     const s = await api("GET", "/api/status");
-    ready = s.state === "ready";
-    const model = s.model ? s.model.split("/").pop() : "keywords only";
-    const keywordsOnly = s.model && s.unembedded ? ` (${s.unembedded.toLocaleString()} keywords only)` : "";
-    let text = `${s.passages.toLocaleString()} passages${keywordsOnly} · ${model}`;
+    settled = s.state === "ready" || s.state === "error";
     const documents = `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`;
     $("#index-size").textContent = s.index_bytes ? `${documents} · index ${formatBytes(s.index_bytes)}` : documents;
-    if (s.state === "embedding") text = `Embedding ${s.embedded.toLocaleString()} / ${s.to_embed.toLocaleString()} passages… (search works meanwhile)`;
-    else if (s.state === "error") text = `Indexing failed: ${s.error} (see the server log; it retries when files change)`;
-    else if (s.state !== "ready") text = "Indexing…";
-    if (s.state === "error") ready = true; // nothing to wait for: poll slowly
-    $("#index-status").textContent = text;
+    $("#index-status").textContent = statusText(s);
     if (state.indexUpdated !== null && s.updated !== state.indexUpdated) {
       loadFiles().catch(fail);
       if (state.relatedFor) requestRelated();
@@ -1385,12 +1396,9 @@ async function pollStatus() {
     state.indexUpdated = s.updated;
   } catch {
     $("#index-status").textContent = "Server not reachable";
-    ready = false;
   }
-  setTimeout(pollStatus, ready ? 10000 : 2000);
+  setTimeout(pollStatus, settled ? 10000 : 2000);
 }
-
-// ---------- wiring ----------
 
 // ---------- resizable panes ----------
 
@@ -1414,10 +1422,7 @@ function applyLayout(layout) {
 }
 
 function bindResizers() {
-  let layout = {};
-  try {
-    layout = JSON.parse(store.get("layout") || "{}");
-  } catch {}
+  const layout = store.json("layout", {});
   applyLayout(layout);
   const save = () => store.set("layout", JSON.stringify(layout));
   for (const handle of document.querySelectorAll(".resizer")) {
@@ -1461,6 +1466,8 @@ function bindResizers() {
     });
   }
 }
+
+// ---------- wiring ----------
 
 // Drawers stay open or closed across reloads.
 function rememberOpen(drawer, key) {

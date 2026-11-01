@@ -35,17 +35,17 @@ import hashlib
 import math
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
-from typing import Callable
+from functools import lru_cache, partial
 
 import numpy as np
 
 from .chunker import MAX_WORDS, chunk_markdown, heading_texts
 from .index import Snapshot
 from .params import tunable
-from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit, split_query,
-                     steering, top_rows)
+from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit,
+                     remembering_lines, split_query, steering, top_rows)
 from .text import tokenize, tokenize_with_surface
 
 MAX_EXCERPT_MATCHES = 50_000  # paragraphs whose excerpt check is remembered
@@ -59,15 +59,12 @@ LANE_INFO = {
     "bridges": ("Bridges", "Strongly related to two of your themes that rarely meet"),
     "gaps": ("Gaps", "For the thinly covered themes of your task"),
 }
-
-
 EMPTY_NOTE = {
     "core": "Nothing in the corpus is clearly related yet.",
     "hidden": "Nothing close in meaning without also sharing the task's keywords.",
     "bridges": "No passage relates clearly to two of your themes at once.",
     "gaps": "Nothing clearly related to your thinly covered themes.",
 }
-
 
 QUERY, KEYWORDS, FILTER, LANES_GROUP, SELECTION = "Query", "Keywords (BM25)", "Relevance filter", "Lanes", "Selection"
 
@@ -176,7 +173,7 @@ class RelatedConfig:
     )
     mmr_lambda: dict = tunable(
         label="Relevance vs variety", group=SELECTION, min=0.0, max=1.0, step=0.05,
-        keys=["core", "hidden", "bridges", "gaps"],
+        keys=list(LANES),
         default_factory=lambda: {"core": 0.7, "hidden": 0.6, "bridges": 0.6, "gaps": 0.6},
         help="MMR: 1 ranks by relevance only; lower values prefer results unlike the ones already shown "
         "and the passages you collected.",
@@ -185,6 +182,33 @@ class RelatedConfig:
     lane_prior: dict = field(
         default_factory=lambda: {"core": (3.0, 1.0), "hidden": (1.0, 1.0), "bridges": (1.0, 1.0), "gaps": (1.0, 1.0)}
     )
+
+
+def _norm(s: str) -> str:
+    return " ".join(s.lower().split())
+
+
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _strings(v) -> list[str]:
+    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+
+def _remembered_passages(v) -> list[dict]:
+    """Saved passages that have their text, with a path and line numbers of the right type."""
+    return [
+        {**d, "path": d.get("path") if isinstance(d.get("path"), str) else "",
+         "start_line": d.get("start_line") if _is_int(d.get("start_line")) else None,
+         "end_line": d.get("end_line") if _is_int(d.get("end_line")) else None}
+        for d in (v if isinstance(v, list) else [])
+        if isinstance(d, dict) and isinstance(d.get("text"), str)
+    ]
+
+
+def _complete_clauses(text: str) -> list[Clause]:
+    return [c for c in split_query(text) if c.kind != "partial"]
 
 
 @dataclass
@@ -198,37 +222,29 @@ class TaskPrefs:
     liked: list[dict] = field(default_factory=list)  # "more like this": {"path", "text", "lane", "start_line", "end_line"}
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "TaskPrefs":
+    def from_dict(cls, data: dict | None) -> TaskPrefs:
         """Preferences as saved. Values of the wrong type (a hand-edited file) are dropped one by
         one rather than failing later; anything but an object raises ValueError."""
         data = {} if data is None else data
         if not isinstance(data, dict):
             raise ValueError("task preferences must be a JSON object")
-        strings = lambda v: [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
-        line = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
-        passages = lambda v: [
-            {**d, "path": d.get("path") if isinstance(d.get("path"), str) else "",
-             "start_line": line(d.get("start_line")), "end_line": line(d.get("end_line"))}
-            for d in (v if isinstance(v, list) else [])
-            if isinstance(d, dict) and isinstance(d.get("text"), str)
-        ]
         prefs = cls(
             steer=data["steer"] if isinstance(data.get("steer"), str) else "",
-            ignored=strings(data.get("ignored")),
-            dismissed=passages(data.get("dismissed")),
-            liked=passages(data.get("liked")),
+            ignored=_strings(data.get("ignored")),
+            dismissed=_remembered_passages(data.get("dismissed")),
+            liked=_remembered_passages(data.get("liked")),
             feedback={
                 lane: [max(0, v[0]), max(0, v[1])]  # the lane draw refuses negative counts
                 for lane, v in (data.get("feedback") if isinstance(data.get("feedback"), dict) else {}).items()
-                if isinstance(v, list) and len(v) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in v)
+                if isinstance(v, list) and len(v) == 2 and all(map(_is_int, v))
             },
         )
         # Saved before the steer line: pinned terms become words to prefer, exclusions become
         # -clauses, and banned terms are what is now called ignored.
         if "steer" not in data and (data.get("pins") or data.get("excluded")):
-            prefs.steer = " ".join([*strings(data.get("pins")), *(f"-{e}" for e in strings(data.get("excluded")))])
+            prefs.steer = " ".join([*_strings(data.get("pins")), *(f"-{e}" for e in _strings(data.get("excluded")))])
         if "ignored" not in data and data.get("bans"):
-            prefs.ignored = strings(data["bans"])
+            prefs.ignored = _strings(data["bans"])
         return prefs
 
     def to_dict(self) -> dict:
@@ -245,47 +261,45 @@ class TaskPrefs:
     # ---- the steer line ----
 
     def clauses(self) -> list[Clause]:
-        return [c for c in split_query(self.steer) if c.kind != "partial"]
+        return _complete_clauses(self.steer)
 
     def set_steer(self, text: str) -> None:
         """Replace the steer line (raises QueryError for an invalid regex). A word named on it is
         no longer ignored, as when a chip is boosted or excluded."""
-        clauses = [c for c in split_query(text) if c.kind != "partial"]
+        clauses = _complete_clauses(text)
         steering(clauses)
-        self.steer = " ".join(map(str, clauses))
+        self._set_clauses(clauses)
         named = {stem for c in clauses for stem in c.stems()}
         self.ignored = [t for t in self.ignored if t not in named]
 
-    def _keep(self, clauses: list[Clause]) -> None:
+    def _set_clauses(self, clauses: list[Clause]) -> None:
         self.steer = " ".join(map(str, clauses))
 
     def _without(self, stem: str, ops) -> list[Clause]:
         return [c for c in self.clauses() if not (c.kind == "word" and c.op in ops and c.stems() == [stem])]
 
-    def boost(self, word: str) -> None:
-        """Prefer passages with this word: it joins the keyword query at full weight."""
+    def _put_word(self, word: str, op: str, instead_of: tuple[str, ...]) -> None:
+        """Put a word on the steer line with this operator, in place of the operators `instead_of`.
+        A word it can't search for (a stopword, or several words) is left out."""
         stems = tokenize(word)
         if len(stems) != 1:
             return
-        clauses = self._without(stems[0], (NEVER,))
-        if not any(c.kind == "word" and c.op != NEVER and c.stems() == stems for c in clauses):
-            clauses.append(Clause(PREFER, "word", word))
-        self._keep(clauses)
-        self.ignored = [t for t in self.ignored if t != stems[0]]
+        clauses = self._without(stems[0], instead_of)
+        if not any(c.kind == "word" and c.stems() == stems for c in clauses):
+            clauses.append(Clause(op, "word", word))
+        self._set_clauses(clauses)
+        self.unignore(stems[0])
+
+    def boost(self, word: str) -> None:
+        """Prefer passages with this word: it joins the keyword query at full weight."""
+        self._put_word(word, PREFER, (NEVER,))
 
     def unboost(self, stem: str) -> None:
-        self._keep(self._without(stem, (PREFER, REQUIRE)))
+        self._set_clauses(self._without(stem, (PREFER, REQUIRE)))
 
     def exclude(self, word: str) -> None:
         """Never show passages containing this word (in any form sharing its stem)."""
-        stems = tokenize(word)
-        if len(stems) != 1:
-            return
-        clauses = self._without(stems[0], (PREFER, REQUIRE))
-        if not any(c.kind == "word" and c.op == NEVER and c.stems() == stems for c in clauses):
-            clauses.append(Clause(NEVER, "word", word))
-        self._keep(clauses)
-        self.ignored = [t for t in self.ignored if t != stems[0]]
+        self._put_word(word, NEVER, (PREFER, REQUIRE))
 
     def ignore(self, stem: str) -> None:
         """Stop searching for one of the task's own keywords. Passages containing it can still be
@@ -307,7 +321,7 @@ class TaskPrefs:
                 avoid: bool = False) -> None:
         """Hide a passage. `avoid` also hides every passage close to it in meaning (an anti-query)."""
         self.record(lane, added=False)
-        self._drop_like(passage_id({"path": path, "text": text}))
+        self.unlike(passage_id({"path": path, "text": text}))
         if text:
             entry = {"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line}
             self.dismissed.append({**entry, "avoid": True} if avoid else entry)
@@ -320,9 +334,6 @@ class TaskPrefs:
         self.liked.append({"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line})
 
     def unlike(self, ident: str) -> None:
-        self._drop_like(ident)
-
-    def _drop_like(self, ident: str) -> None:
         """Take a like back, along with the add it counted for its lane."""
         kept = []
         for d in self.liked:
@@ -336,7 +347,8 @@ class TaskPrefs:
         """restore() for the dismissal with this id (see summary())."""
         for d in self.dismissed:
             if passage_id(d) == ident:
-                return self.restore(d.get("path", ""), d["text"])
+                self.restore(d.get("path", ""), d["text"])
+                return
 
     def restore(self, path: str, text: str) -> None:
         """Undo the dismissals of a passage: it may come back, and its lanes lose those dismissals."""
@@ -366,6 +378,10 @@ class Unit:
     excerpt: bool = False
     source_rows: list[int] = field(default_factory=list)  # corpus passages it was taken from
     theme: int = 0
+
+    @property
+    def embed_text(self) -> str:
+        return f"{self.heading}\n{self.text}" if self.heading else self.text
 
 
 @dataclass
@@ -427,8 +443,25 @@ def weight_units(units: list[Unit], cursor_line: int | None, config: RelatedConf
         u.weight = float(w)
 
 
-def _norm(s: str) -> str:
-    return " ".join(s.lower().split())
+def _closest_in_words(snapshot: Snapshot, text: str) -> np.ndarray:
+    ids = [i for t in set(tokenize(text)) if (i := snapshot.term_id(t)) is not None]
+    return top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True)
+
+
+def _closest_in_meaning(snapshot: Snapshot, vec: np.ndarray) -> np.ndarray:
+    scores = snapshot.vectors @ vec
+    scores[~snapshot.has_vector] = -np.inf
+    return top_rows(scores, 5)
+
+
+def _sharing_text(snapshot: Snapshot, closest: Callable[[], np.ndarray], needle: str) -> list[int]:
+    """The closest passages that hold this normalised text, or are held by it."""
+    found = []
+    for row in dict.fromkeys(int(r) for r in closest()):
+        hay = _norm(snapshot.passages[row].text)
+        if needle in hay or (len(hay) >= 20 and hay in needle):
+            found.append(row)
+    return found
 
 
 def find_excerpts(snapshot: Snapshot, units: list[Unit], unit_vecs: np.ndarray | None = None) -> None:
@@ -443,24 +476,12 @@ def find_excerpts(snapshot: Snapshot, units: list[Unit], unit_vecs: np.ndarray |
         needle = _norm(unit.text)
         if len(needle) < 20 or (unit_vecs is not None and unit.excerpt):
             continue
-
-        def matches():
-            if unit_vecs is None:
-                ids = [i for t in set(tokenize(unit.text)) if (i := snapshot.term_id(t)) is not None]
-                rows = top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True)
-            else:
-                scores = snapshot.vectors @ unit_vecs[j]
-                scores[~snapshot.has_vector] = -np.inf
-                rows = top_rows(scores, 5)
-            found = []
-            for row in dict.fromkeys(int(r) for r in rows):
-                hay = _norm(snapshot.passages[row].text)
-                if needle in hay or (len(hay) >= 20 and hay in needle):
-                    found.append(row)
-            return found
-
-        key = (needle,) if unit_vecs is None else (needle, unit.heading, unit.text)
-        for row in snapshot._cached(snapshot.excerpt_matches, key, MAX_EXCERPT_MATCHES, matches):
+        if unit_vecs is None:
+            key, closest = (needle,), partial(_closest_in_words, snapshot, unit.text)
+        else:
+            key, closest = (needle, unit.heading, unit.text), partial(_closest_in_meaning, snapshot, unit_vecs[j])
+        matches = partial(_sharing_text, snapshot, closest, needle)
+        for row in snapshot.cached(snapshot.excerpt_matches, key, MAX_EXCERPT_MATCHES, matches):
             if row not in unit.source_rows:
                 unit.excerpt = True
                 unit.source_rows.append(row)
@@ -520,11 +541,17 @@ def embed_reusing(snapshot: Snapshot, embedder, texts: list[str], rows: list[int
     return out
 
 
-def passage_row(snapshot: Snapshot, path: str, start_line: int | None, text: str) -> int | None:
+def remembered_row(snapshot: Snapshot, d: dict) -> int | None:
     """The corpus row of a passage remembered by path, line and text (as dismissals are)."""
-    lo, hi = snapshot.file_rows.get(path, (0, 0))
+    lo, hi = snapshot.file_rows.get(d.get("path", ""), (0, 0))
+    start_line = d.get("start_line")
     rows = [r for r in range(lo, hi) if start_line is None or snapshot.passages[r].start_line == start_line]
-    return same_passage(snapshot, rows, text)
+    return same_passage(snapshot, rows, d["text"])
+
+
+def remembered_vectors(snapshot: Snapshot, embedder, remembered: list[dict]) -> np.ndarray:
+    """Embeddings of remembered passages, taken from the index for those still in the corpus."""
+    return embed_reusing(snapshot, embedder, [d["text"] for d in remembered], [remembered_row(snapshot, d) for d in remembered])
 
 
 def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: RelatedConfig,
@@ -580,6 +607,74 @@ def _cluster_label(units: list[Unit], snapshot: Snapshot | None = None) -> str:
 
 
 # ---- 2. signals ----
+
+
+@dataclass
+class SemanticSignals:
+    """How every corpus passage relates to the task in meaning, as robust z-scores."""
+
+    strongest: np.ndarray  # against the query, unweighted: what the thresholds compare
+    weighted: np.ndarray  # the same with paragraph weights: what the meaning ranking sorts by
+    best_unit: np.ndarray | None = None  # query="paragraphs": the paragraph each passage matches best
+    closest: np.ndarray | None = None  # best cosine to any paragraph of the task
+    theme_z: np.ndarray | None = None  # [passages, themes], with two themes or more
+    second: np.ndarray | None = None  # each passage's z-score on its second-best theme
+    avoided: np.ndarray | None = None  # clearly like a passage the user avoids
+
+    def only_in(self, keep: np.ndarray) -> None:
+        """Rule out the other passages. Left-out folders still count for the corpus statistics, so
+        thresholds mean the same with or without them."""
+        self.strongest = np.where(keep, self.strongest, -np.inf)
+        self.weighted = np.where(keep, self.weighted, -np.inf)
+        if self.second is not None:
+            self.second = np.where(keep, self.second, -np.inf)
+
+
+def _normalized(v: np.ndarray) -> np.ndarray:
+    return v / max(np.linalg.norm(v), 1e-9)
+
+
+def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs: np.ndarray, themes: list[Theme],
+                     liked: list[dict], prefs: TaskPrefs, config: RelatedConfig) -> SemanticSignals:
+    weights = np.array([u.weight for u in units], np.float32)
+    like_vecs = remembered_vectors(snapshot, embedder, liked) if liked else None
+    if config.query == "document":
+        sizes = np.array([len(u.text.split()) for u in units], np.float32) * weights
+        document = _normalized((sizes[:, None] * unit_vecs).sum(0))
+        if liked:  # a fixed pull per passage, however long the document has grown
+            document = _normalized(document + config.like_weight * like_vecs.sum(0))
+        _, z_doc = zscores(snapshot, document[None, :])
+        out = SemanticSignals(z_doc[:, 0], z_doc[:, 0])  # the closest paragraph is worked out for the passages shown
+    else:
+        _, z = zscores(snapshot, unit_vecs)
+        out = SemanticSignals(z.max(1), (z * weights).max(1), best_unit=(z * weights).argmax(1))
+        if liked:  # each liked passage is one more paragraph to match
+            _, z_like = zscores(snapshot, like_vecs)
+            out.strongest = np.maximum(out.strongest, z_like.max(1))
+            out.weighted = np.maximum(out.weighted, min(config.like_weight, 1.0) * z_like.max(1))
+
+    dismissed = [d for d in prefs.dismissed if d.get("text")]
+    if config.negative_weight <= 0:  # no penalty: only the anti-queries need scoring
+        dismissed = [d for d in dismissed if d.get("avoid")]
+    if dismissed:
+        _, z_neg = zscores(snapshot, remembered_vectors(snapshot, embedder, dismissed))
+        if config.negative_weight > 0:
+            penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
+            out.strongest, out.weighted = out.strongest - penalty, out.weighted - penalty
+        avoid = [i for i, d in enumerate(dismissed) if d.get("avoid")]
+        if avoid:  # anti-queries: everything clearly like them is out
+            out.avoided = z_neg[:, avoid].max(1) >= config.avoid_z
+
+    theme_of = np.array([u.theme for u in units])
+    per_theme = [
+        theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t])
+        for t in range(len(themes))
+    ]
+    out.closest = np.max([best_cos for _, best_cos in per_theme], axis=0)
+    if len(themes) >= 2:
+        out.theme_z = np.stack([best_z for best_z, _ in per_theme], axis=1)
+        out.second = np.partition(out.theme_z, -2, axis=1)[:, -2]
+    return out
 
 
 def zscores(snapshot: Snapshot, vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -669,7 +764,7 @@ def theme_scores(snapshot: Snapshot, theme_units: list[Unit], vecs: np.ndarray) 
         return best_z, best_cos
 
     key = tuple(sorted(f"{u.heading}\0{u.text}" for u in theme_units))
-    return snapshot._cached(snapshot.theme_scores, key, MAX_THEME_SCORES, score)
+    return snapshot.cached(snapshot.theme_scores, key, MAX_THEME_SCORES, score)
 
 
 def ranks(scores: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -678,6 +773,111 @@ def ranks(scores: np.ndarray, valid: np.ndarray) -> np.ndarray:
     rows = np.flatnonzero(valid)
     out[rows[np.argsort(-scores[rows], kind="stable")]] = np.arange(len(rows))
     return out
+
+
+# ---- 3. gate ----
+
+
+def gate(snapshot: Snapshot, units: list[Unit], signals: SemanticSignals, lex: np.ndarray, lex_rank: np.ndarray,
+         steer: Steering, prefs: TaskPrefs, config: RelatedConfig, semantic: bool) -> tuple[list[int], int]:
+    """The passages that may be suggested, and how many candidates the rankings put forward. A
+    passage gets in on strong meaning, on a top keyword match with some meaning behind it, or
+    (bridges) on being clearly related to two themes at once: two independent themes at
+    z >= bridge_z is about as unlikely by chance as one at z >= z_strong."""
+    has = snapshot.has_vector & semantic
+    relevant = np.where(
+        has,
+        (signals.strongest >= config.z_strong) | ((lex_rank < config.lexical_top) & (signals.strongest >= config.z_weak)),
+        lex_rank < config.lexical_top,  # no embedding for this passage (yet): keywords alone
+    )
+    if signals.second is not None:
+        relevant |= has & (signals.second >= config.bridge_z)
+    if semantic:
+        relevant &= ~(has & (signals.closest >= config.duplicate_cos))
+
+    candidates = set(top_rows(lex, config.candidates, positive=True)) | set(top_rows(signals.weighted, config.candidates))
+    if signals.second is not None:
+        candidates |= set(top_rows(signals.second, config.candidates))
+
+    rows = np.array(sorted(map(int, candidates)), np.int64)
+    rows = rows[relevant[rows]]
+    if signals.avoided is not None:
+        rows = rows[~signals.avoided[rows]]
+    if steer.filters:
+        rows = rows[steer.filters.allowed(snapshot, rows)]
+
+    collected = {r for u in units for r in u.source_rows}
+    dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
+    excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
+    near_excerpt = ExcerptMatcher(excerpts)
+
+    gated = []
+    for row in map(int, rows):
+        if row in collected:
+            continue
+        p = snapshot.passages[row]
+        if dismissed_keys or excerpts:
+            hay = _norm(p.text)
+            if (p.path, hay) in dismissed_keys or near_excerpt(hay):
+                continue
+        gated.append(row)
+    return gated, len(candidates)
+
+
+# ---- 4. lanes ----
+
+
+@dataclass
+class LaneScores:
+    """What the passages that got through the gate score in each lane they qualify for."""
+
+    scores: dict[str, dict[int, float]] = field(default_factory=lambda: {lane: {} for lane in LANES})
+    why: dict[str, dict[int, dict]] = field(default_factory=lambda: {lane: {} for lane in LANES})
+    notes: dict[str, str] = field(default_factory=dict)
+
+
+def score_core(snapshot: Snapshot, gated: list[int], lanes: LaneScores, lex_rank: np.ndarray, sem_rank: np.ndarray,
+               config: RelatedConfig, semantic: bool) -> None:
+    for row in gated:
+        keyword = 1 / (config.rrf_k + lex_rank[row] + 1)
+        no_vector = semantic and not snapshot.has_vector[row]  # the keyword rank stands in for the meaning rank
+        meaning = config.unembedded_weight * keyword if no_vector else 1 / (config.rrf_k + sem_rank[row] + 1)
+        lanes.scores["core"][row] = keyword + meaning
+
+
+def score_hidden(gated: list[int], lanes: LaneScores, signals: SemanticSignals, lex: np.ndarray, config: RelatedConfig) -> None:
+    lex_best = float(lex.max())
+    for row in gated:
+        obviousness = float(lex[row] / lex_best) if lex_best > 0 else 0.0
+        if signals.strongest[row] >= config.hidden_z and obviousness <= config.hidden_max_obviousness:
+            lanes.scores["hidden"][row] = float(signals.weighted[row]) * (1 - obviousness)
+            lanes.why["hidden"][row] = {"obviousness": round(obviousness, 3)}
+
+
+def score_bridges_and_gaps(gated: list[int], lanes: LaneScores, theme_z: np.ndarray, themes: list[Theme], config: RelatedConfig) -> None:
+    strong = theme_z >= config.bridge_z
+    size = strong.sum(0)
+    as_float = strong.astype(np.float32)  # exact counts below 16 million passages, and much faster
+    both = as_float.T @ as_float
+    overlap = both / np.maximum(np.minimum.outer(size, size), 1)  # how often two themes meet
+    need = np.array([1 / (1 + t.excerpts) for t in themes])
+
+    for row in gated:
+        order = np.argsort(-theme_z[row])
+        f1, f2 = int(order[0]), int(order[1])
+        if theme_z[row, f2] >= config.bridge_z:
+            rarity = 1 - overlap[f1, f2]
+            lanes.scores["bridges"][row] = float(theme_z[row, f2]) * (0.5 + 0.5 * rarity)
+            lanes.why["bridges"][row] = {
+                "themes": [themes[f1].label, themes[f2].label],
+                "theme_z": [round(float(theme_z[row, f1]), 2), round(float(theme_z[row, f2]), 2)],
+                "rarity": round(float(rarity), 3),
+            }
+        gap = np.where(theme_z[row] >= config.gap_z, need * theme_z[row], -np.inf)
+        if np.isfinite(gap.max()):
+            f = int(gap.argmax())
+            lanes.scores["gaps"][row] = float(gap[f])
+            lanes.why["gaps"][row] = {"themes": [themes[f].label], "collected_in_theme": themes[f].excerpts}
 
 
 # ---- 5. select ----
@@ -748,6 +948,29 @@ def mmr_select(
     return picked
 
 
+def select(snapshot: Snapshot, scores: dict[str, dict[int, float]], collected_vecs: list[np.ndarray], liked: list[dict],
+           prefs: TaskPrefs, config: RelatedConfig, seed: int) -> tuple[dict[str, list[tuple[int, float]]], dict[str, int]]:
+    """Each lane's picks as (row, MMR value), and the slots each lane was given."""
+    active = [lane for lane in LANES if scores[lane]]
+    feedback_events = sum(sum(v) for v in prefs.feedback.values())
+    slots = allocate_slots(active, prefs, config, seed + feedback_events)
+    taken: set[int] = set()
+    chosen_vecs = list(collected_vecs)
+    wanted = {r for d in liked if (r := remembered_row(snapshot, d)) is not None}
+    per_file = {lane: Counter() for lane in active}
+
+    def fill(lane: str, k: int) -> list[tuple[int, float]]:
+        lam = config.mmr_lambda.get(lane, 0.7)
+        return mmr_select(scores[lane], k, lam, snapshot, chosen_vecs, taken, config, per_file[lane], wanted)
+
+    picked = {lane: fill(lane, slots[lane]) for lane in active}
+    if "core" in picked:  # slots other lanes could not fill go to core
+        spare = sum(slots.values()) - sum(len(v) for v in picked.values())
+        if spare > 0:
+            picked["core"] += fill("core", spare)
+    return picked, slots
+
+
 # ---- the pipeline ----
 
 
@@ -779,78 +1002,29 @@ def related(
     n = len(snapshot)
     if not units or not n:
         note = "Write or collect something in the task to get suggestions." if n else "The corpus is empty."
-        return RelatedResult([Lane(l, *LANE_INFO[l], [], note) for l in LANES], [], [], {"passages": n})
+        return RelatedResult([Lane(lane, *LANE_INFO[lane], [], note) for lane in LANES], [], [], {"passages": n})
 
-    # 1-2: units and the semantic signal
+    # 1: units and themes
     semantic = embedder is not None and snapshot.has_vector.any()
     unit_vecs = None
     find_excerpts(snapshot, units)
     if semantic:
-        texts = [u.heading + "\n" + u.text if u.heading else u.text for u in units]
-        unit_vecs = embed_reusing(snapshot, embedder, texts, [same_passage(snapshot, u.source_rows, u.text) for u in units])
+        reuse = [same_passage(snapshot, u.source_rows, u.text) for u in units]
+        unit_vecs = embed_reusing(snapshot, embedder, [u.embed_text for u in units], reuse)
         find_excerpts(snapshot, units, unit_vecs)
     weight_units(units, cursor_line, config)
     themes = assign_themes(units, unit_vecs, config, snapshot)
     lap("units")
 
-    weights = np.array([u.weight for u in units], np.float32)
-    theme_z = second = avoided = closest = None
+    # 2: signals. Left-out folders are gone before anything is ranked, so they take no places.
     liked = [d for d in prefs.liked if d.get("text")] if config.like_weight > 0 else []
     if semantic:
-        like_vecs = embed_reusing(
-            snapshot, embedder, [d["text"] for d in liked],
-            [passage_row(snapshot, d.get("path", ""), d.get("start_line"), d["text"]) for d in liked],
-        ) if liked else None
-        if config.query == "document":
-            sizes = np.array([len(u.text.split()) for u in units], np.float32) * weights
-            document = (sizes[:, None] * unit_vecs).sum(0)
-            document = document / max(np.linalg.norm(document), 1e-9)
-            if liked:  # a fixed pull per passage, however long the document has grown
-                document = document + config.like_weight * like_vecs.sum(0)
-                document = document / max(np.linalg.norm(document), 1e-9)
-            _, z_doc = zscores(snapshot, document[None, :])
-            sem_any = sem_w = z_doc[:, 0]
-            best_unit = None  # worked out for the passages shown
-        else:
-            _, z = zscores(snapshot, unit_vecs)
-            sem_any = z.max(1)
-            sem_w = (z * weights).max(1)
-            best_unit = (z * weights).argmax(1)
-            if liked:  # each liked passage is one more paragraph to match
-                _, z_like = zscores(snapshot, like_vecs)
-                sem_any = np.maximum(sem_any, z_like.max(1))
-                sem_w = np.maximum(sem_w, min(config.like_weight, 1.0) * z_like.max(1))
-        dismissed = [d for d in prefs.dismissed if d.get("text")]
-        if config.negative_weight <= 0:  # no penalty: only the anti-queries need scoring
-            dismissed = [d for d in dismissed if d.get("avoid")]
-        if dismissed:
-            rows = [passage_row(snapshot, d.get("path", ""), d.get("start_line"), d["text"]) for d in dismissed]
-            _, z_neg = zscores(snapshot, embed_reusing(snapshot, embedder, [d["text"] for d in dismissed], rows))
-            if config.negative_weight > 0:
-                penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
-                sem_any, sem_w = sem_any - penalty, sem_w - penalty
-            avoid = [i for i, d in enumerate(dismissed) if d.get("avoid")]
-            if avoid:  # anti-queries: everything clearly like them is out
-                avoided = z_neg[:, avoid].max(1) >= config.avoid_z
-        theme_of = np.array([u.theme for u in units])
-        per_theme = [
-            theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t])
-            for t in range(len(themes))
-        ]
-        closest = np.max([best_cos for _, best_cos in per_theme], axis=0)  # any paragraph's best cosine
-        if len(themes) >= 2:  # each passage's z-score per theme, and its second-best theme's
-            theme_z = np.stack([best_z for best_z, _ in per_theme], axis=1)
-            second = np.partition(theme_z, -2, axis=1)[:, -2]
+        signals = semantic_signals(snapshot, embedder, units, unit_vecs, themes, liked, prefs, config)
     else:
-        sem_any = sem_w = np.full(n, -np.inf)
-        best_unit = np.zeros(n, np.int64)
-    # Left-out folders are gone before anything is ranked, so they take no places in the rankings.
-    # They still count for the corpus statistics, so thresholds mean the same with or without them.
+        signals = SemanticSignals(np.full(n, -np.inf), np.full(n, -np.inf))
     keep = snapshot.outside_folders(skip_folders) if skip_folders else None
     if keep is not None:
-        sem_any, sem_w = np.where(keep, sem_any, -np.inf), np.where(keep, sem_w, -np.inf)
-        if second is not None:
-            second = np.where(keep, second, -np.inf)
+        signals.only_in(keep)
     lap("semantic")
 
     try:
@@ -864,157 +1038,62 @@ def related(
     if keep is not None:
         lex = np.where(keep, lex, 0.0)
     lex_rank = ranks(lex, lex > 0)
-    sem_rank = ranks(sem_w, np.isfinite(sem_w))
+    sem_rank = ranks(signals.weighted, np.isfinite(signals.weighted))
     lap("lexical")
 
-    # 3: gate. A passage gets in on strong meaning, on a top keyword match with some meaning
-    # behind it, or (bridges) on being clearly related to two themes at once: two independent
-    # themes at z >= bridge_z is about as unlikely by chance as one at z >= z_strong.
-    has = snapshot.has_vector & semantic
-    relevant = np.where(
-        has,
-        (sem_any >= config.z_strong) | ((lex_rank < config.lexical_top) & (sem_any >= config.z_weak)),
-        lex_rank < config.lexical_top,  # no embedding for this passage (yet): keywords alone
-    )
-    if second is not None:
-        relevant |= has & (second >= config.bridge_z)
-    if semantic:
-        relevant &= ~(has & (closest >= config.duplicate_cos))
-
-    candidates = set(top_rows(lex, config.candidates, positive=True)) | set(top_rows(sem_w, config.candidates))
-    if second is not None:
-        candidates |= set(top_rows(second, config.candidates))
-    collected = {r for u in units for r in u.source_rows}
-    dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
-    excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
-    near_excerpt = ExcerptMatcher(excerpts)
-
-    rows = np.array(sorted(map(int, candidates)), np.int64)
-    rows = rows[relevant[rows]]
-    if avoided is not None:
-        rows = rows[~avoided[rows]]
-    if steer.filters:
-        rows = rows[steer.filters.allowed(snapshot, rows)]
-
-    gated = []
-    for row in map(int, rows):
-        if row in collected:
-            continue
-        p = snapshot.passages[row]
-        if dismissed_keys or excerpts:
-            hay = _norm(p.text)
-            if (p.path, hay) in dismissed_keys or near_excerpt(hay):
-                continue
-        gated.append(row)
+    # 3: gate
+    gated, n_candidates = gate(snapshot, units, signals, lex, lex_rank, steer, prefs, config, semantic)
     lap("gate")
 
     # 4: lanes
-    lane_scores: dict[str, dict[int, float]] = {lane: {} for lane in LANES}
-    lane_why: dict[str, dict[int, dict]] = {lane: {} for lane in LANES}
-    notes: dict[str, str] = {}
-    lex_best = float(lex.max()) if n else 0.0
-
-    for row in gated:
-        keyword = 1 / (config.rrf_k + lex_rank[row] + 1)
-        no_vector = semantic and not snapshot.has_vector[row]  # the keyword rank stands in for the meaning rank
-        meaning = config.unembedded_weight * keyword if no_vector else 1 / (config.rrf_k + sem_rank[row] + 1)
-        lane_scores["core"][row] = keyword + meaning
-
+    scored = LaneScores()
+    score_core(snapshot, gated, scored, lex_rank, sem_rank, config, semantic)
     if not semantic:
         for lane in ("hidden", "bridges", "gaps"):
-            notes[lane] = "Needs embeddings (still indexing, or running without a model)."
+            scored.notes[lane] = "Needs embeddings (still indexing, or running without a model)."
     else:
-        for row in gated:
-            obviousness = float(lex[row] / lex_best) if lex_best > 0 else 0.0
-            if sem_any[row] >= config.hidden_z and obviousness <= config.hidden_max_obviousness:
-                lane_scores["hidden"][row] = float(sem_w[row]) * (1 - obviousness)
-                lane_why["hidden"][row] = {"obviousness": round(obviousness, 3)}
-
-        if theme_z is None:
-            notes["bridges"] = notes["gaps"] = "Needs at least two themes: write about more than one thing."
+        score_hidden(gated, scored, signals, lex, config)
+        if signals.theme_z is None:
+            scored.notes["bridges"] = scored.notes["gaps"] = "Needs at least two themes: write about more than one thing."
         else:
-            strong = theme_z >= config.bridge_z
-            size = strong.sum(0)
-            as_float = strong.astype(np.float32)  # exact counts below 16 million passages, and much faster
-            both = as_float.T @ as_float
-            overlap = both / np.maximum(np.minimum.outer(size, size), 1)  # how often two themes meet
-            need = np.array([1 / (1 + t.excerpts) for t in themes])
-
-            for row in gated:
-                order = np.argsort(-theme_z[row])
-                f1, f2 = int(order[0]), int(order[1])
-                if theme_z[row, f2] >= config.bridge_z:
-                    rarity = 1 - overlap[f1, f2]
-                    lane_scores["bridges"][row] = float(theme_z[row, f2]) * (0.5 + 0.5 * rarity)
-                    lane_why["bridges"][row] = {
-                        "themes": [themes[f1].label, themes[f2].label],
-                        "theme_z": [round(float(theme_z[row, f1]), 2), round(float(theme_z[row, f2]), 2)],
-                        "rarity": round(float(rarity), 3),
-                    }
-                gap = np.where(theme_z[row] >= config.gap_z, need * theme_z[row], -np.inf)
-                if np.isfinite(gap.max()):
-                    f = int(gap.argmax())
-                    lane_scores["gaps"][row] = float(gap[f])
-                    lane_why["gaps"][row] = {"themes": [themes[f].label], "collected_in_theme": themes[f].excerpts}
+            score_bridges_and_gaps(gated, scored, signals.theme_z, themes, config)
     lap("lanes")
 
     # 5: select
-    active = [lane for lane in LANES if lane_scores[lane]]
-    feedback_events = sum(sum(v) for v in prefs.feedback.values())
-    slots = allocate_slots(active, prefs, config, seed + feedback_events)
-    taken: set[int] = set()
-    chosen_vecs = [unit_vecs[j] for j, u in enumerate(units) if u.excerpt] if semantic else []
-    picked: dict[str, list[tuple[int, float]]] = {}
-    wanted = {r for d in liked if (r := passage_row(snapshot, d.get("path", ""), d.get("start_line"), d["text"])) is not None}
-    per_file = {lane: Counter() for lane in active}
-    for lane in active:
-        lam = config.mmr_lambda.get(lane, 0.7)
-        picked[lane] = mmr_select(lane_scores[lane], slots[lane], lam, snapshot, chosen_vecs, taken, config, per_file[lane], wanted)
-    if "core" in picked:  # slots other lanes could not fill go to core
-        spare = sum(slots.values()) - sum(len(v) for v in picked.values())
-        if spare > 0:
-            lam = config.mmr_lambda.get("core", 0.7)
-            picked["core"] += mmr_select(
-                lane_scores["core"], spare, lam, snapshot, chosen_vecs, taken, config, per_file["core"], wanted
-            )
+    collected_vecs = [unit_vecs[j] for j, u in enumerate(units) if u.excerpt] if semantic else []
+    picked, slots = select(snapshot, scored.scores, collected_vecs, liked, prefs, config, seed)
     lap("select")
 
     terms = {c.term for c in chips if not c.ignored}
-    highlight = steer.patterns + [p for p in steer.filters.required if p not in steer.patterns]
-    lines_cache: dict[str, list[str] | None] = {}
+    lines_of = remembering_lines(read_lines)
     liked_ids = {passage_id(d) for d in prefs.liked}
 
     def hit(lane: str, row: int, value: float) -> Hit | None:
-        path = snapshot.passages[row].path
-        if path not in lines_cache:
-            try:
-                lines_cache[path] = read_lines(path)
-            except (OSError, ValueError):
-                lines_cache[path] = None
-        if not lines_cache[path]:
+        p = snapshot.passages[row]
+        lines = lines_of(p.path)
+        if not lines:
             return None
-        if best_unit is None:  # the closest paragraph, for display
-            u = units[int(np.argmax(snapshot.vectors[row] @ unit_vecs.T))]
-        else:
-            u = units[int(best_unit[row])]
+        matches_task_line = None
+        if semantic:  # the closest paragraph, for display
+            best = signals.best_unit[row] if signals.best_unit is not None else np.argmax(snapshot.vectors[row] @ unit_vecs.T)
+            matches_task_line = units[int(best)].start_line
+        ident = passage_id({"path": p.path, "text": p.text}) if liked_ids else None
         why = {
-            "lane_score": round(lane_scores[lane][row], 4),
+            "lane_score": round(scored.scores[lane][row], 4),
             "mmr": round(value, 4),
-            "semantic_z": round(float(sem_any[row]), 2) if np.isfinite(sem_any[row]) else None,
+            "semantic_z": round(float(signals.strongest[row]), 2) if np.isfinite(signals.strongest[row]) else None,
             "bm25": round(float(lex[row]), 3),
             "lexical_rank": int(lex_rank[row]) + 1 if lex[row] > 0 else None,
-            "matches_task_line": u.start_line if semantic else None,
-            "liked": passage_id({"path": snapshot.passages[row].path, "text": snapshot.passages[row].text}) if liked_ids else None,
-            **lane_why[lane].get(row, {}),
+            "matches_task_line": matches_task_line,
+            "liked": ident if ident in liked_ids else None,
+            **scored.why[lane].get(row, {}),
         }
-        if why["liked"] not in liked_ids:
-            why["liked"] = None
-        return make_hit(snapshot, row, lane_scores[lane][row], terms, lines_cache[path], context_lines, why, highlight)
+        return make_hit(snapshot, row, scored.scores[lane][row], terms, lines, context_lines, why, steer.highlight)
 
     lanes = []
     for lane in LANES:
         items = [h for row, value in picked.get(lane, []) if (h := hit(lane, row, value)) is not None]
-        note = notes.get(lane, "" if items or lane in active else EMPTY_NOTE[lane])
+        note = scored.notes.get(lane, "" if items or lane in picked else EMPTY_NOTE[lane])
         lanes.append(Lane(lane, *LANE_INFO[lane], items, note))
     lap("snippets")
 
@@ -1026,7 +1105,7 @@ def related(
             "passages": n,
             "units": len(units),
             "excerpts": sum(u.excerpt for u in units),
-            "candidates": len(candidates),
+            "candidates": n_candidates,
             "gated": len(gated),
             "slots": slots,
             "ms": timings,

@@ -13,9 +13,10 @@ import re
 import stat as statmode
 import threading
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
@@ -24,6 +25,17 @@ from .lexical import BM25, Vocabulary, term_counts
 from .text import tokenize
 
 log = logging.getLogger(__name__)
+
+INDEX_VERSION = 2
+CHUNKER_VERSION = 2  # raise it when files split differently: they are read again, and keep their embeddings
+MARKDOWN = (".md", ".markdown")
+NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
+EMBED_GROUP = 256  # passages per embedding call while indexing
+PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
+SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
+REPORT_EVERY = 10.0  # seconds between progress messages during a long embedding run
+SAMPLE_ABOVE = 50_000  # embedded passages; above this, "typical" similarity comes from a sample
+TYPICAL_SAMPLE = 20_000
 
 
 def configure_logging() -> None:
@@ -59,17 +71,6 @@ def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
             names = f" ({', '.join(sorted(paths))})" if len(new) + len(modified) + len(removed) <= 5 else ""
             parts.append(label + names)
     return ", ".join(parts)
-
-INDEX_VERSION = 2
-CHUNKER_VERSION = 2  # raise it when files split differently: they are read again, and keep their embeddings
-MARKDOWN = (".md", ".markdown")
-NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
-EMBED_GROUP = 256  # passages per embedding call while indexing
-PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
-SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
-REPORT_EVERY = 10.0  # seconds between progress messages during a long embedding run
-SAMPLE_ABOVE = 50_000  # embedded passages; above this, "typical" similarity comes from a sample
-TYPICAL_SAMPLE = 20_000
 
 
 @dataclass
@@ -111,17 +112,17 @@ class Snapshot:
         key = (round(float(k1), 4), round(float(b), 4))
         if key == (self.bm25.k1, self.bm25.b):
             return self.bm25
-        return self._cached(self._bm25_variants, key, 4, lambda: self.bm25.with_params(*key))
+        return self.cached(self._bm25_variants, key, 4, lambda: self.bm25.with_params(*key))
 
     def pattern_counts(self, pattern: re.Pattern) -> np.ndarray:
         """How often `pattern` matches in each passage. The last few patterns are kept, so a
         regex in a steer line is not rescanned on every refresh."""
-        return self._cached(self._pattern_counts, (pattern.pattern, pattern.flags), 32, lambda: np.fromiter(
+        return self.cached(self._pattern_counts, (pattern.pattern, pattern.flags), 32, lambda: np.fromiter(
             (sum(1 for m in pattern.finditer(p.embed_text) if m.end() > m.start()) for p in self.passages),
             np.float32, len(self.passages),
         ))
 
-    def _cached(self, cache: dict, key, size: int, make: Callable):
+    def cached(self, cache: dict, key, size: int, make: Callable):
         """cache[key], made on first use; the oldest entries go when there are `size`."""
         with self._cache_lock:
             value = cache.get(key)
@@ -143,7 +144,7 @@ class Snapshot:
                 return rows
             return np.sort(np.random.default_rng(0).choice(rows, TYPICAL_SAMPLE, replace=False))
 
-        return self._cached(self._typical, "rows", 1, choose)
+        return self.cached(self._typical, "rows", 1, choose)
 
     def outside_folders(self, skip) -> np.ndarray:
         """Which passages are not in these corpus folders (the first part of a path)."""
@@ -291,7 +292,7 @@ class Engine:
                 keep = []
                 for d in sorted(dirnames):
                     path = here / d
-                    if d.startswith(".") or (path.resolve() in self.exclude):
+                    if d.startswith(".") or path.resolve() in self.exclude:
                         continue
                     try:
                         if path.is_symlink():
@@ -436,15 +437,16 @@ class Engine:
                 if record.vectors is not None:  # the folder got its .no-embed file after it was embedded
                     record.vectors = None
                     dropped += 1
-        if removed or changed or dropped:
+        touched = bool(removed or changed or dropped)
+        if touched:
             self._publish()
 
         embedded = self._embed_missing(on_progress)
-        if removed or changed or embedded or dropped:
+        if touched or embedded:
             self._publish()
             self._save()
         self._set_state("ready", on_progress)
-        if first or removed or changed or embedded or dropped:
+        if first or touched or embedded:
             meaning = ", keywords only" if self.embedder is None else (
                 f", {self.status.unembedded:,} of them keywords only" if self.status.unembedded else "")
             log.info("index ready: %s, %s%s (%s)", _count(len(self.files), "file"), _count(len(self.snapshot), "passage"),
@@ -461,7 +463,11 @@ class Engine:
     def _embed_missing(self, on_progress) -> int:
         if self.embedder is None:
             return 0
-        pending = [r for path, r in self.files.items() if self._embeds(path) and not self._is_unread(path) and (r.vectors is None or r.vectors.shape[1:] != (self.dim,))]
+        pending = [
+            r
+            for path, r in self.files.items()
+            if self._embeds(path) and not self._is_unread(path) and (r.vectors is None or r.vectors.shape[1:] != (self.dim,))
+        ]
         todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {})] for r in pending}
         self.status.embedded, self.status.to_embed = 0, sum(map(len, todo.values()))
         if self.status.to_embed:
@@ -568,10 +574,8 @@ class Engine:
         total = 0
         for prefix in self.roots:
             for name in ("index.json", "index.npz"):
-                try:
+                with suppress(OSError):  # not saved yet, or being replaced
                     total += (self._cache_dir(prefix) / name).stat().st_size
-                except OSError:
-                    pass  # not saved yet, or being replaced
         return total
 
     def _save(self) -> None:
