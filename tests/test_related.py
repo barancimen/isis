@@ -375,3 +375,10 @@ def test_large_corpora_estimate_typical_similarity_from_a_fixed_sample(engine, m
     assert sampled.shape == full.shape and not np.array_equal(sampled, full)
     assert np.corrcoef(sampled[:, 0], full[:, 0])[0, 1] > 0.99
     snap._typical.clear()
+
+
+@pytest.mark.parametrize("line", ["whales", "+whales", "-whales"])
+def test_naming_a_word_on_the_steer_line_stops_ignoring_it(line):
+    prefs = TaskPrefs(ignored=["whale", "harpoon"])
+    prefs.set_steer(line)
+    assert prefs.ignored == ["harpoon"]

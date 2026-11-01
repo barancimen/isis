@@ -46,6 +46,15 @@ def opens_as_shown(page, card) -> str:
     return shown[:40]
 
 
+def refresh_related(page):
+    """Press Refresh, and wait for the new suggestions."""
+    expect(page.locator("#related-refresh")).to_be_enabled(timeout=30000)
+    with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
+        page.click("#related-refresh")
+    expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
+    page.wait_for_timeout(300)  # the response is rendered
+
+
 def step(message):
     STEPS[0] += 1
     print(f"{STEPS[0]:>2}. {message}", flush=True)
@@ -181,11 +190,13 @@ def main() -> None:
         page.locator("#related-tune > summary").click()
         set_slider(page, "#related-tune [data-name=total_slots] input", 6)
         expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
+        refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length <= 6", timeout=30000)
         shot(page, "related-tuned.png")
         page.locator("#related-tune [data-name=total_slots] .tune-default").click()  # one slider back
         expect(page.locator("#related-tune [data-name=total_slots] input")).to_have_value("24")
         expect(page.locator("#related-tune .tune-count")).to_have_text("")
+        refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
         set_slider(page, "#related-tune [data-name=query] select", "paragraphs")  # the dropdown too
         expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
@@ -195,6 +206,7 @@ def main() -> None:
         set_slider(page, "#related-tune [data-name=total_slots] input", 6)  # and all of them
         page.locator("#related-tune button", has_text="Reset to defaults").click()
         expect(page.locator("#related-tune .tune-count")).to_have_text("")
+        refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
         page.locator("#related-tune > summary").click()
         step("related parameters: 'Results' at 6 shows at most 6; default buttons restore one setting or all")
@@ -208,7 +220,21 @@ def main() -> None:
         }""")
         page.wait_for_timeout(2500)
         assert not refreshes, "selecting text or moving the cursor refreshed the related panel"
+        expect(page.locator("#related-refresh")).to_be_disabled()
         step("selecting text and moving the cursor leave the related panel alone")
+
+        shown = lambda: page.locator("#related-lanes .hit .hit-loc").all_inner_texts()
+        cards = shown()
+        page.click("#task-editor .cm-content")
+        page.keyboard.press("Control+End")
+        page.keyboard.type(" An edit.")
+        expect(page.locator("#related-refresh")).to_be_enabled()
+        page.wait_for_timeout(3000)  # longer than any pause in typing
+        assert not refreshes and shown() == cards, "an edit changed the suggestions by itself"
+        refresh_related(page)
+        assert len(refreshes) == 1
+        expect(page.locator("#related-refresh")).to_be_disabled()
+        step("an edit only arms Refresh: the suggestions stay until it is pressed, and then it is off again")
 
         before = len(task_text())
         page.locator("#related-lanes .hit .add").first.click()
@@ -219,8 +245,9 @@ def main() -> None:
 
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
-        page.locator("#related-lanes .hit button[title^='Not useful']").first.click()
-        expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
+        with page.expect_response(lambda r: r.url.endswith("/feedback"), timeout=30000):
+            page.locator("#related-lanes .hit button[title^='Not useful']").first.click()
+        page.wait_for_timeout(200)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["ignored"] and meta["dismissed"]
         step(f"ignored a keyword {meta['ignored']} and dismissed a passage")
@@ -241,18 +268,18 @@ def main() -> None:
         step("feedback drawer: restored the dismissed passage, then forgot all of the task's feedback")
 
         related_lines = """() => [...document.querySelectorAll('#related-lanes .hit-body .line:not(.ctx)')].map(l => l.innerText)"""
+        refresh_related(page)
         assert any("squid" in l.lower() for l in page.evaluate(related_lines))
         page.fill("#steer-input", "  -squid ")
         page.press("#steer-input", "Enter")
         expect(page.locator("#steer-input")).to_have_value("-squid", timeout=30000)
-        expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
+        assert any("squid" in l.lower() for l in page.evaluate(related_lines))  # not until Refresh
+        refresh_related(page)
         lines = page.evaluate(related_lines)
         assert lines and not any("squid" in l.lower() for l in lines), lines
         page.fill("#steer-input", "-squid +/[Ww]hal/")
-        with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
-            page.press("#steer-input", "Enter")
-        expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
-        page.wait_for_timeout(300)  # the response is rendered
+        page.press("#steer-input", "Enter")
+        refresh_related(page)
         hits = page.evaluate("""() => [...document.querySelectorAll('#related-lanes .hit')].map(h =>
             [...h.querySelectorAll('.hit-body .line:not(.ctx)')].map(l => l.innerText).join(' '))""")
         assert hits and all(re.search("[Ww]hal", t) for t in hits), hits
@@ -270,8 +297,7 @@ def main() -> None:
 
         card = page.locator("#related-lanes .hit").first
         title = card.locator(".hit-loc").inner_text()
-        with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
-            card.locator("button.like").click()
+        card.locator("button.like").click()
         marked = page.locator("#related-lanes .hit", has=page.locator("button.like[aria-pressed=true]"))
         expect(marked).to_have_count(1, timeout=30000)
         assert marked.locator(".hit-loc").inner_text() == title  # it stays on show
@@ -281,8 +307,7 @@ def main() -> None:
         assert task_text().count(meta["liked"][0]["text"][:40]) == 0  # not added to the document
         if not page.locator("#related-feedback").evaluate("e => e.open"):
             page.locator("#related-feedback > summary").click()
-        with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
-            page.locator("#related-feedback .feedback-item button", has_text="Stop").click()
+        page.locator("#related-feedback .feedback-item button", has_text="Stop").click()
         expect(marked).to_have_count(0, timeout=30000)
         step("↑ more like this: marks a suggestion, stays on show, stays out of the document; the drawer undoes it")
 

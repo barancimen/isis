@@ -327,7 +327,11 @@ const state = {
   openFolders: new Set(), // folders open in the Files panel; all are closed at first
   skipped: { search: loadSkipped("search"), related: loadSkipped("related") }, // corpus folders left out, per panel
   panel: "search",
-  relatedStale: true,
+  relatedStale: false, // something changed since the suggestions on show were made
+  relatedFor: null, // the task they are for
+  relatedTerms: [],
+  relatedLanes: [],
+  likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
   relatedSeq: 0,
   searchSeq: 0,
   lastRelatedKeys: null,
@@ -385,11 +389,16 @@ async function switchTask(name) {
   $("#conflict").hidden = true;
   setSaveState(doc.dirty ? "Unsaved" : "Saved");
   renderTaskTabs();
-  requestRelated(0);
+  state.relatedStale = false;
+  updateRefreshButton();
+  if (state.panel === "related") refreshRelated().catch(fail); // what is on show is another task's
 }
 
 function showNoTask() {
   state.task = null;
+  state.relatedFor = null;
+  state.relatedStale = false;
+  updateRefreshButton();
   $("#task-name").textContent = "No task";
   setSaveState("");
   taskView.setState(
@@ -416,6 +425,7 @@ async function renameTask(name) {
   const doc = state.docs.get(name);
   state.docs.delete(name);
   if (doc) state.docs.set(task.name, { ...doc, mtime: task.mtime });
+  if (state.relatedFor === name) state.relatedFor = task.name;
   if (state.task === name) {
     state.task = task.name;
     store.set("task", task.name);
@@ -507,7 +517,7 @@ async function resolveConflict(keepMine) {
     setSaveState("Saved");
   }
   $("#conflict").hidden = true;
-  requestRelated(0);
+  requestRelated();
 }
 
 // ---------- task editor events ----------
@@ -520,7 +530,7 @@ function onTaskUpdate(update) {
   if (doc) doc.dirty = true;
   setSaveState("Unsaved");
   scheduleSave();
-  requestRelated(1500);
+  requestRelated();
 }
 
 // ---------- adding to the task ----------
@@ -730,7 +740,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     lane && h("button", {
       class: "like",
       "aria-pressed": String(Boolean(hit.why.liked)),
-      title: hit.why.liked ? "More like this is on: click to stop" : "More like this: pull the suggestions toward this passage, without adding it",
+      title: "More like this: pull the suggestions toward this passage, without adding it",
       onclick: () => likeHit(hit, lane).catch(fail),
     }, "↑"),
     lane && h("button", { title: "Not useful: hide it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
@@ -775,13 +785,16 @@ const runSearch = debounce(async () => {
 
 // ---------- related panel ----------
 
-let relatedTimer;
-
-// Refresh the related panel after `delay` ms, or when it is next shown.
-function requestRelated(delay) {
+// The suggestions change only when asked to: something may be read, and is not rewritten under the
+// reader. A change only marks them out of date and arms the Refresh button. They load by themselves
+// only when what would be on show is nothing, or another task's.
+function requestRelated() {
   state.relatedStale = true;
-  clearTimeout(relatedTimer);
-  if (state.panel === "related") relatedTimer = setTimeout(() => refreshRelated().catch(fail), delay);
+  updateRefreshButton();
+}
+
+function updateRefreshButton() {
+  $("#related-refresh").disabled = !state.relatedStale || Boolean(relatedRunning);
 }
 
 function renderRelatedEmpty(message) {
@@ -809,10 +822,15 @@ function refreshRelated() {
         relatedAgain = false;
         await fetchRelated();
       } while (relatedAgain);
+    } catch (error) {
+      state.relatedStale = true;
+      throw error;
     } finally {
       relatedRunning = null;
+      updateRefreshButton();
     }
   })();
+  updateRefreshButton();
   return relatedRunning;
 }
 
@@ -824,6 +842,7 @@ async function fetchRelated() {
   const name = state.task;
   const seq = ++state.relatedSeq;
   state.relatedStale = false;
+  updateRefreshButton();
   $("#related-status").textContent = "Updating…";
   const result = await api("POST", `/api/tasks/${enc(name)}/related`, {
     text: taskView.state.doc.toString(),
@@ -832,6 +851,10 @@ async function fetchRelated() {
   });
   if (seq !== state.relatedSeq || name !== state.task) return;
 
+  state.relatedFor = name;
+  state.relatedTerms = result.terms;
+  state.relatedLanes = result.lanes;
+  rememberLikes(result.prefs);
   const previous = state.lastRelatedKeys;
   const keys = new Set();
   const lanes = result.lanes.map((lane) =>
@@ -847,9 +870,8 @@ async function fetchRelated() {
     ),
   );
   state.lastRelatedKeys = keys;
-  renderChips(result.terms);
-  renderSteer(result.prefs.steer);
-  renderFeedback(result.prefs, result.terms, result.lanes);
+  renderChips(state.relatedTerms);
+  showPrefs(result.prefs);
   $("#related-lanes").replaceChildren(...lanes);
   const s = result.stats;
   const themes = result.themes.map((t) => t.label).join(" · ");
@@ -871,19 +893,41 @@ function renderChips(terms) {
             : t.boosted
               ? "Boosted by the steer line: click to stop boosting"
               : "Click to boost: always search for it, at full weight (adds it to the steer line)",
-          onclick: () => (t.ignored ? termAction(t.term, "unignore") : t.boosted ? termAction(t.term, "unboost") : termAction(t.label, "boost")).catch(fail),
+          onclick: () => (t.ignored ? termAction(t, t.term, "unignore") : t.boosted ? termAction(t, t.term, "unboost") : termAction(t, t.label, "boost")).catch(fail),
         }, t.label),
         t.ignored
-          ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}” (adds -${t.label} to the steer line)`, onclick: () => termAction(t.label, "exclude").catch(fail) }, "⊘")
-          : h("button", { class: "chip-x", title: "Ignore: stop searching for this word (passages containing it can still be suggested)", onclick: () => termAction(t.term, "ignore").catch(fail) }, "×"),
+          ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}” (adds -${t.label} to the steer line)`, onclick: () => termAction(t, t.label, "exclude").catch(fail) }, "⊘")
+          : h("button", { class: "chip-x", title: "Ignore: stop searching for this word (passages containing it can still be suggested)", onclick: () => termAction(t, t.term, "ignore").catch(fail) }, "×"),
       ),
     ),
   );
 }
 
-async function termAction(term, action) {
-  await api("POST", `/api/tasks/${enc(state.task)}/terms`, { term, action });
-  await refreshRelated();
+async function termAction(chip, term, action) {
+  const prefs = await api("POST", `/api/tasks/${enc(state.task)}/terms`, { term, action });
+  chip.boosted = action === "boost";
+  chip.ignored = action === "ignore";
+  if (action === "exclude") state.relatedTerms = state.relatedTerms.filter((t) => t !== chip);
+  renderChips(state.relatedTerms);
+  showPrefs(prefs);
+  requestRelated();
+}
+
+// What the panel remembers changed: show it now, whether or not the suggestions are refreshed.
+function showPrefs(prefs) {
+  renderSteer(prefs.steer);
+  renderFeedback(prefs, state.relatedTerms, state.relatedLanes);
+  rememberLikes(prefs);
+  for (const card of document.querySelectorAll("#related-lanes .hit")) {
+    const on = state.likedIds.has(card.dataset.key);
+    const button = card.querySelector("button.like");
+    button.setAttribute("aria-pressed", String(on));
+    button.title = on ? "More like this is on: click to stop" : "More like this: pull the suggestions toward this passage, without adding it";
+  }
+}
+
+function rememberLikes(prefs) {
+  state.likedIds = new Map(prefs.liked.map((d) => [`${d.path}:${d.start_line}`, d.id]));
 }
 
 // The steer line: clauses as in a search, kept with the task. Enter saves; Escape undoes the edit.
@@ -902,7 +946,8 @@ async function saveSteer(event) {
     const prefs = await api("PUT", `/api/tasks/${enc(state.task)}/steer`, { text: input.value });
     input.value = input.dataset.saved = prefs.steer;
     $("#steer-error").hidden = true;
-    await refreshRelated();
+    showPrefs(prefs);
+    requestRelated();
   } catch (error) {
     if (error.status !== 400) throw error;
     $("#steer-error").textContent = `⚠ ${error.message}`;
@@ -912,23 +957,24 @@ async function saveSteer(event) {
 
 async function dismiss(hit, lane, element, avoid = false) {
   element?.remove();
-  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, {
+  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, {
     action: avoid ? "avoid" : "dismiss", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line,
-  });
-  requestRelated(400);
+  }));
+  requestRelated();
 }
 
 async function likeHit(hit, lane) {
-  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, hit.why.liked
-    ? { action: "unlike", id: hit.why.liked }
-    : { action: "like", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
-  await refreshRelated();
+  const id = state.likedIds.get(`${hit.path}:${hit.start_line}`);
+  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, id
+    ? { action: "unlike", id }
+    : { action: "like", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line }));
+  requestRelated();
 }
 
 async function unlikePassage(liked, element) {
   element?.remove();
-  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "unlike", id: liked.id });
-  await refreshRelated();
+  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "unlike", id: liked.id }));
+  requestRelated();
 }
 
 // ---------- feedback drawer ----------
@@ -1023,16 +1069,20 @@ function renderFeedback(prefs, terms, lanes) {
 
 async function restoreDismissed(dismissal, element) {
   element?.remove();
-  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "restore", id: dismissal.id });
-  await refreshRelated();
+  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "restore", id: dismissal.id }));
+  requestRelated();
 }
 
 async function forgetFeedback() {
   const name = state.task;
   if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
-  await api("DELETE", `/api/tasks/${enc(name)}/prefs`);
+  const prefs = await api("DELETE", `/api/tasks/${enc(name)}/prefs`);
   flash(`Forgot the feedback for “${name}”`);
-  await refreshRelated();
+  state.relatedTerms = state.relatedTerms.filter((t) => !t.ignored);
+  for (const t of state.relatedTerms) t.boosted = false;
+  renderChips(state.relatedTerms);
+  showPrefs(prefs);
+  requestRelated();
 }
 
 // ---------- tunable parameters ----------
@@ -1097,7 +1147,7 @@ function paramRow(kind, spec) {
     saveParams();
     updateTuner(kind);
     if (kind === "search") runSearch();
-    else requestRelated(250);
+    else requestRelated();
   });
   const toDefault = h("button", {
     class: "tune-default",
@@ -1164,7 +1214,7 @@ function resetParams(kind) {
   saveParams();
   buildTuner(kind);
   if (kind === "search") runSearch();
-  else requestRelated(0);
+  else requestRelated();
 }
 
 async function loadParamSpecs() {
@@ -1186,7 +1236,7 @@ function showPanel(name) {
     button.setAttribute("aria-selected", String(button.dataset.panel === name));
   }
   for (const panel of ["files", "search", "related"]) $(`#panel-${panel}`).hidden = panel !== name;
-  if (name === "related" && state.relatedStale) refreshRelated().catch(fail);
+  if (name === "related" && state.task && state.relatedFor !== state.task) refreshRelated().catch(fail);
   if (name === "search") $("#search-input").focus();
 }
 
@@ -1218,7 +1268,7 @@ function renderFolderPicks(folders) {
             else skipped.add(name);
             store.set(`skip-${panel}`, JSON.stringify([...skipped]));
             if (panel === "search") runSearch();
-            else requestRelated(0);
+            else requestRelated();
           },
         }),
         name,
@@ -1248,7 +1298,7 @@ async function pollStatus() {
     $("#index-status").textContent = text;
     if (state.indexUpdated !== null && s.updated !== state.indexUpdated) {
       loadFiles().catch(fail);
-      requestRelated(500);
+      if (state.relatedFor) requestRelated();
     }
     state.indexUpdated = s.updated;
   } catch {
@@ -1347,6 +1397,7 @@ function bind() {
   $("#file-filter").addEventListener("input", debounce(renderFiles, 120));
   $("#search-input").addEventListener("input", runSearch);
   $("#search-meaning").addEventListener("click", toggleMeaning);
+  $("#related-refresh").addEventListener("click", () => refreshRelated().catch(fail));
   $("#related-steer").addEventListener("submit", (e) => saveSteer(e).catch(fail));
   $("#steer-input").addEventListener("input", () => ($("#steer-error").hidden = true));
   $("#steer-input").addEventListener("keydown", (e) => {

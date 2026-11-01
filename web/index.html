@@ -42,7 +42,10 @@
       <details id="related-tune" class="tune"></details>
       <details id="related-feedback" class="tune" hidden></details>
       <div id="related-folders" class="folder-picks" hidden></div>
-      <div id="related-status" class="status-line"></div>
+      <div class="related-bar">
+        <button id="related-refresh" type="button" disabled title="Update the suggestions. Lights up when something has changed; until then they stay as they are while you read them.">Refresh</button>
+        <div id="related-status" class="status-line"></div>
+      </div>
       <div id="related-terms" class="chips" aria-label="Terms taken from the task"></div>
       <form id="related-steer" class="steer-row" hidden>
         <input id="steer-input" type="search" spellcheck="false" placeholder='Steer: word  +required  -never  "a phrase"  /regex/' aria-label="Steer the suggestions">

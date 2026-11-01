@@ -248,10 +248,13 @@ class TaskPrefs:
         return [c for c in split_query(self.steer) if c.kind != "partial"]
 
     def set_steer(self, text: str) -> None:
-        """Replace the steer line (raises QueryError for an invalid regex)."""
+        """Replace the steer line (raises QueryError for an invalid regex). A word named on it is
+        no longer ignored, as when a chip is boosted or excluded."""
         clauses = [c for c in split_query(text) if c.kind != "partial"]
         steering(clauses)
         self.steer = " ".join(map(str, clauses))
+        named = {stem for c in clauses for stem in c.stems()}
+        self.ignored = [t for t in self.ignored if t not in named]
 
     def _keep(self, clauses: list[Clause]) -> None:
         self.steer = " ".join(map(str, clauses))
