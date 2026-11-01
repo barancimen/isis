@@ -327,6 +327,30 @@ def main() -> None:
         expect(page.locator("#reader-path")).to_have_text(first)
         step(f"files panel filtered and opened {first}")
         shot(page, "files.png")
+
+        sample = CORPUS / "e2e-envelopes.md"
+        sample.write_text("---\ntitle: A survey\ntags: [whales, oil]\n---\n\nA hard wrapped\nparagraph.\n\n---\nnote: in the middle\nstatus: draft\n---\n\n"
+                          "---\nA **prose** section that\nis hard wrapped.\n---\n\nA real heading\n---\n\nBefore a rule.\n\n---\n\nAfter it.\n")
+        try:
+            page.evaluate("(p) => window.isis.openFile(p)", sample.name)
+            editor = page.locator("#reader-editor")
+            line = lambda text: editor.locator(".cm-line", has_text=text)
+            weight = lambda locator: int(locator.evaluate("e => getComputedStyle(e).fontWeight"))
+            expect(line("title: A survey")).to_have_class(re.compile("cm-env-meta"))
+            expect(line("note: in the middle")).to_have_class(re.compile("cm-env-meta"))
+            assert editor.locator(".cm-env-key").all_inner_texts() == ["title:", "tags:", "note:", "status:"]
+            assert line("status: draft").inner_text().strip() == "status: draft"  # one line per key
+            assert weight(line("[whales, oil]").locator("span", has_text="whales").last) < 600  # data: no heading, no link
+            prose = line("section that is hard wrapped.")  # flows, in a card, not a heading
+            expect(prose).to_have_class(re.compile("cm-env"))
+            assert "cm-env-meta" not in prose.get_attribute("class")
+            assert weight(prose.locator("span", has_text="prose").first) >= 600  # **prose** is bold
+            assert prose.evaluate("e => getComputedStyle(e).fontSize") == line("Before a rule.").evaluate("e => getComputedStyle(e).fontSize")
+            assert weight(line("A real heading").locator("span").first) >= 600  # still a heading
+            assert editor.locator(".cm-rule").count() == 1
+            step("--- sections: metadata and prose cards, a real heading and a rule each render as themselves")
+        finally:
+            sample.unlink()
         browser.close()
 
     for name in (WHALES, ISLANDS):

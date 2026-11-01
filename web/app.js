@@ -6,7 +6,7 @@ import {
 } from "./vendor/codemirror.js";
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { planInsertion } from "./insert.js";
-import { paragraphAt, softBreaks } from "./reflow.js";
+import { envelopeAt, paragraphAt, softBreaks, structure } from "./reflow.js";
 
 // ---------- helpers ----------
 
@@ -95,6 +95,17 @@ const theme = EditorView.theme({
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   ".cm-placeholder": { color: "var(--faint)", fontStyle: "italic" },
   ".cm-hit-range": { backgroundColor: "var(--hit-line)" },
+  ".cm-env": { backgroundColor: "var(--panel)", boxShadow: "inset 3px 0 0 var(--border)" },
+  ".cm-env-meta": { fontFamily: "var(--sans)", fontSize: "0.8em", lineHeight: "1.55", color: "var(--muted)" },
+  ".cm-env-key": { fontWeight: "600" },
+  ".cm-env-edge": { fontSize: "6px", lineHeight: "16px", userSelect: "none" },
+  ".cm-env-edge, .cm-env-edge span, .cm-rule, .cm-rule span": { color: "transparent !important" },
+  ".cm-rule": {
+    backgroundImage: "linear-gradient(var(--border), var(--border))",
+    backgroundSize: "100% 1px",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+  },
   ".cm-soft-break": { whiteSpace: "normal" }, // a joined line break: no stray space at the start of a wrapped line
   ".cm-hit-match": { backgroundColor: "var(--mark)", borderRadius: "2px" },
   ".cm-just-added": { backgroundColor: "var(--added)", transition: "background-color 1s" },
@@ -115,6 +126,39 @@ function decorationSlot() {
   });
   return { set, field };
 }
+
+// So the parser agrees with reflow.js: an enveloped block isn't a heading under its closing ---.
+const envelopedBlocks = {
+  defineNodes: [{ name: "EnvelopeData", block: true, style: tags.meta }],
+  parseBlock: [{
+    name: "Envelope",
+    before: "HorizontalRule",
+    parse(cx, line) {
+      if (!line.text.startsWith("---") || cx.parentType().name !== "Document") return false;
+      const start = cx.lineStart;
+      const before = start === 0 ? "" : cx.input.read(Math.max(0, start - 2), start);
+      const lines = cx.input.read(start, Math.min(cx.input.length, start + 40000)).split("\n");
+      // envelopeAt looks at the line above, and treats line 0 as the top of the file.
+      const envelope = start === 0 ? envelopeAt(lines, 0) : before.endsWith("\n\n") ? envelopeAt(["", ...lines], 1) : null;
+      if (!envelope) return false;
+      const offset = start === 0 ? 0 : 1; // the "" above
+      const at = (i) => start + lines.slice(0, i).join("\n").length + (i ? 1 : 0);
+      const close = envelope.close - offset;
+      const end = at(close) + lines[close].length;
+      if (envelope.meta) {
+        cx.addElement(cx.elt("EnvelopeData", start, end));
+      } else {
+        cx.addElement(cx.elt("HorizontalRule", start, start + lines[0].length));
+        const from = at(1);
+        const to = at(close) - 1;
+        cx.addElement(cx.elt("Paragraph", from, to, cx.parser.parseInline(cx.input.read(from, to), from)));
+        cx.addElement(cx.elt("HorizontalRule", at(close), end));
+      }
+      for (let i = 0; i <= close; i++) cx.nextLine();
+      return true;
+    },
+  }],
+};
 
 const hitSlot = decorationSlot();
 const addedSlot = decorationSlot();
@@ -138,13 +182,27 @@ function reflow({ editable }) {
   const build = (state, focused) => {
     const lines = state.doc.toJSON();
     const [lo, hi] = editable && focused ? paragraphAt(lines, state.doc.lineAt(state.selection.main.head).number - 1) : [-1, -1];
+    const editing = (i) => i >= lo && i <= hi;
     const decos = [];
     for (const i of softBreaks(lines)) {
       if (i >= lo && i < hi) continue;
       const end = state.doc.line(i + 1).to;
       decos.push(softBreak.range(end, end + 1));
     }
-    return Decoration.set(decos);
+    const { envelopes, rules } = structure(lines);
+    for (const { open, close, meta } of envelopes) {
+      for (let i = open; i <= close; i++) {
+        const line = state.doc.line(i + 1);
+        const edge = (i === open || i === close) && !editing(i);
+        decos.push(Decoration.line({ class: `cm-env${meta ? " cm-env-meta" : ""}${edge ? " cm-env-edge" : ""}` }).range(line.from));
+        const key = meta && i !== open && i !== close && /^\s*[\w.-]+:/.exec(line.text);
+        if (key) decos.push(Decoration.mark({ class: "cm-env-key" }).range(line.from, line.from + key[0].length));
+      }
+    }
+    for (const i of rules) {
+      if (!editing(i)) decos.push(Decoration.line({ class: "cm-rule" }).range(state.doc.line(i + 1).from));
+    }
+    return Decoration.set(decos, true);
   };
   // Line-break replacements must come from a state field, not a view plugin.
   const field = StateField.define({
@@ -168,7 +226,7 @@ function readerState(doc) {
       lineNumbers(),
       drawSelection(),
       EditorView.lineWrapping,
-      markdown(),
+      markdown({ extensions: envelopedBlocks }),
       syntaxHighlighting(markdownStyle),
       theme,
       reflow({ editable: false }),
@@ -188,7 +246,7 @@ function taskExtensions() {
     drawSelection(),
     highlightActiveLine(),
     EditorView.lineWrapping,
-    markdown(),
+    markdown({ extensions: envelopedBlocks }),
     syntaxHighlighting(markdownStyle),
     theme,
     reflow({ editable: true }),
