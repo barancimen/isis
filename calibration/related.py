@@ -6,6 +6,7 @@ simulate dismissing and avoiding.
     python calibration/related.py eval  [--set ...] [--grid ...] [--top 20]
     python calibration/related.py signals                    # relevance by signal value, for the filter
     python calibration/related.py feedback [--pool]          # dismiss / avoid simulation
+    python calibration/related.py like [--pool]              # "more like this" simulation
 
 pool      runs every task document in data/task_docs.json with each setting (and the defaults),
           prints the suggestions nobody has judged, numbered, and saves their order in
@@ -140,6 +141,7 @@ def evaluate(engine, args, docs, qrels):
 
 
 def signals(engine, args, docs, qrels):
+    from isis.engine.chunker import heading_texts
     from isis.engine.related import (TaskPrefs, assign_themes, embed_reusing, find_excerpts, ranks, same_passage,
                                      task_terms, task_units, weight_units, zscores)
 
@@ -159,7 +161,7 @@ def signals(engine, args, docs, qrels):
         sizes = np.array([len(u.text.split()) * u.weight for u in units], np.float32)
         document = (sizes[:, None] * vecs).sum(0)
         _, z_doc = zscores(snap, (document / np.linalg.norm(document))[None, :])
-        chips = task_terms(snap, units, TaskPrefs(), cfg)
+        chips = task_terms(snap, units, TaskPrefs(), cfg, None, heading_texts(doc))
         query = [(snap.term_id(c.term), c.weight) for c in chips if not c.ignored]
         lex = snap.bm25_for(cfg.bm25_k1, cfg.bm25_b).scores([i for i, _ in query], [w for _, w in query])
         lex_rank = ranks(lex, lex > 0)
@@ -228,18 +230,68 @@ def feedback(engine, args, docs, qrels):
         print_pool(found, qrels, "pool_feedback.json")
 
 
+def like(engine, args, docs, qrels):
+    """Mark the first two fully relevant suggestions of every task \"more like this\", re-run, and
+    see how far the suggestions move toward them, and what that does to their quality."""
+    from isis.engine.related import TaskPrefs
+
+    found = {}
+    values = [0.0, 0.25, 0.5, 1.0, 2.0]
+    if not args.pool:
+        print("mark the first 2 relevant suggestions of each task, then re-run (like_weight)")
+    for value in values:
+        over = {"like_weight": value}
+        util = junk = relevant = unjudged = shown = 0
+        kept = before_n = 0
+        closer = []
+        for tid, doc in docs.items():
+            q = qrels.get(tid, {})
+            first = suggestions(engine, doc, {})
+            picks = [h for _, h in first if q.get(key(h.path, h.start_line)) == 2][:2]
+            if not picks:
+                continue
+            prefs = TaskPrefs()
+            for h in picks:
+                prefs.like("core", h.path, h.text, h.start_line, h.end_line)
+            after = suggestions(engine, doc, over, prefs)
+            ids = {key(h.path, h.start_line) for h in picks}
+            others = lambda hits: [h for _, h in hits if key(h.path, h.start_line) not in ids]
+            vec = lambda hits: engine.embedder.embed([h.text for h in hits], cache=True) if hits else np.zeros((0, engine.dim))
+            pick_vecs = vec(picks)
+            sim = lambda hits: float((vec(hits) @ pick_vecs.T).max(1).mean()) if hits else float("nan")
+            closer.append(sim(others(after)) - sim(others(first)))
+            before = {key(h.path, h.start_line) for _, h in first}
+            kept += sum(key(h.path, h.start_line) in before for _, h in after)
+            before_n += len(before)
+            for _, h in after:
+                g = q.get(key(h.path, h.start_line))
+                shown += 1
+                if g is None:
+                    unjudged += 1
+                    found.setdefault(tid, {}).setdefault(key(h.path, h.start_line), h)
+                else:
+                    util += UTILITY[g]
+                    relevant += g >= 1
+                    junk += g == 0
+        if not args.pool:
+            print(f"  like_weight={value}: util={util / len(docs):5.2f} relevant={relevant} irrelevant={junk} unjudged={unjudged}/{shown}"
+                  f" | suggestions kept {kept}/{before_n} | closer to the marked passages by {np.nanmean(closer):+.3f} cosine")
+    if args.pool:
+        print_pool(found, qrels, "pool_like.json")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("action", choices=["build", "pool", "eval", "signals", "feedback"])
+    parser.add_argument("action", choices=["build", "pool", "eval", "signals", "feedback", "like"])
     parser.add_argument("--top", type=int, default=20, help="eval: settings to print")
-    parser.add_argument("--pool", action="store_true", help="feedback: print the unjudged suggestions instead")
+    parser.add_argument("--pool", action="store_true", help="feedback, like: print the unjudged suggestions instead")
     override_args(parser)
     args = parser.parse_args()
     engine = load_engine()
     if args.action == "build":
         return build(engine, args)
     docs, qrels = jload("task_docs.json", {}), jload("qrels_related.json", {})
-    {"pool": pool, "eval": evaluate, "signals": signals, "feedback": feedback}[args.action](engine, args, docs, qrels)
+    {"pool": pool, "eval": evaluate, "signals": signals, "feedback": feedback, "like": like}[args.action](engine, args, docs, qrels)
 
 
 if __name__ == "__main__":

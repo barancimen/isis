@@ -77,11 +77,11 @@ class SteerRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    action: Literal["add", "dismiss", "avoid", "restore"]
+    action: Literal["add", "dismiss", "avoid", "restore", "like", "unlike"]
     lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
     path: str = ""
     text: str = ""
-    id: str = ""  # restore: the dismissal's id from the preferences the page was given
+    id: str = ""  # restore, unlike: the passage's id from the preferences the page was given
     start_line: int | None = None
     end_line: int | None = None
 
@@ -264,10 +264,14 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
     @app.post("/api/tasks/{name}/feedback")
     def feedback(name: str, body: FeedbackRequest):
-        if body.action != "restore" and not body.lane:
+        if body.action not in ("restore", "unlike") and not body.lane:
             raise HTTPException(400, "feedback needs the lane the passage was shown in")
         with tasks.edit_prefs(name) as prefs:
-            if body.action == "restore" and body.id:
+            if body.action == "like":
+                prefs.like(body.lane, body.path, body.text, body.start_line, body.end_line)
+            elif body.action == "unlike":
+                prefs.unlike(body.id)
+            elif body.action == "restore" and body.id:
                 prefs.restore_id(body.id)
             elif body.action == "restore":
                 prefs.restore(body.path, body.text)

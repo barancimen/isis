@@ -160,9 +160,10 @@ def test_theme_labels_prefer_distinctive_words(engine):
 def test_bridges_link_two_themes(engine):
     task = f"# Sea\n{' '.join(SEA_TASK)}.\n\n# Birds\n{' '.join(BIRD_TASK)}.\n"
     result = engine.related(task)
-    assert [t.label for t in result.themes] == ["Sea", "Birds"]
+    labels = [t.label for t in result.themes]
+    assert len(labels) == 2
     bridges = items(result, "bridges")
-    assert bridges and all(set(h.why["themes"]) == {"Sea", "Birds"} for h in bridges)
+    assert bridges and all(set(h.why["themes"]) == set(labels) for h in bridges)
     assert any(h.path.startswith("voyage") for h in bridges)
 
 
@@ -242,3 +243,74 @@ def test_folders_can_be_left_out_of_the_suggestions(tmp_path):
     assert folders() == {"notes", "books"}
     assert folders(skip_folders=["books"]) == {"notes"}
     assert not folders(skip_folders=["books", "notes"])
+
+
+def test_more_like_this_pulls_the_suggestions(engine):
+    task = f"{' '.join(SEA_TASK)}.\n\n{' '.join(BIRD_TASK)}.\n"
+    birds = lambda result: sum(h.path.startswith("birds") for h in items(result))
+    base = engine.related(task)
+    pick = engine.snapshot.passages[engine.snapshot.file_rows["birds-0.md"][0]]
+
+    prefs = TaskPrefs()
+    prefs.like("core", pick.path, pick.text, pick.start_line, pick.end_line)
+    prefs.like("core", pick.path, pick.text, pick.start_line, pick.end_line)  # once is enough
+    assert len(prefs.liked) == 1 and prefs.feedback == {"core": [1, 0]}
+    result = engine.related(task, prefs=prefs)
+    assert birds(result) > birds(base)
+    shown = [h for h in items(result) if h.why["liked"]]
+    assert [(h.path, h.start_line) for h in shown] == [(pick.path, pick.start_line)]  # on show, and marked
+    assert not engine.related(task, prefs=prefs).stats.get("excerpts")  # and is not part of the task
+
+    off = engine.related(task, prefs=prefs, config=RelatedConfig(like_weight=0))
+    assert [c.term for c in off.terms] == [c.term for c in engine.related(task).terms]  # 0: no pull
+
+    core_birds = lambda weight: sum(h.path.startswith("birds") for h in items(
+        engine.related(task, prefs=prefs, config=RelatedConfig(query="paragraphs", like_weight=weight)), "core"))
+    assert core_birds(1.0) > core_birds(0.0)  # with paragraph queries too (same feedback, so the same slots)
+
+    prefs.unlike(prefs.summary()["liked"][0]["id"])
+    assert prefs.liked == [] and prefs.feedback == {"core": [0, 0]}
+
+
+def test_dismissing_a_passage_takes_back_more_like_this():
+    prefs = TaskPrefs()
+    prefs.like("core", "a.md", "Some text", 1, 2)
+    prefs.dismiss("core", "a.md", " some  TEXT ")
+    assert prefs.liked == []
+
+
+def test_a_marked_passage_does_not_count_as_redundant(engine):
+    from isis.engine.related import mmr_select
+
+    rows = {i: 1.0 - i / 100 for i in range(*engine.snapshot.file_rows["sea-0.md"])}
+    first = min(rows)
+    config = RelatedConfig(max_per_file=99)
+    without = mmr_select(dict(rows), 3, 0.5, engine.snapshot, [], set(), config)
+    wanted = mmr_select(dict(rows), 3, 0.5, engine.snapshot, [], set(), config, None, {first})
+    assert without[0][0] == wanted[0][0] == first
+    assert wanted[1][1] >= without[1][1]  # the next ones are not pushed away from it
+
+
+def test_headings_do_not_decide_the_themes(engine):
+    from isis.engine.related import assign_themes, task_units
+
+    config = RelatedConfig()
+    plain = "Whale harpoon ship captain sail.\n\nWhale ship harpoon sail deck.\n\nFinch beak species nest song.\n"
+    headed = "# One\nWhale harpoon ship captain sail.\n\n# Two\nWhale ship harpoon sail deck.\n\n# Three\nFinch beak species nest song.\n"
+
+    def themes(text):
+        units = task_units(text)
+        vecs = engine.embedder.embed([u.text for u in units])
+        found = assign_themes(units, vecs, config, engine.snapshot)
+        return [u.theme for u in units], [t.label for t in found]
+
+    assert themes(headed) == themes(plain)  # three headings, the same two groups of paragraphs
+    assert "One" not in themes(headed)[1]
+    assert engine.related("# Only a title\nJust one short note about a whale.\n").themes[0].label == "Everything"
+
+
+def test_heading_words_count_as_plain_text(engine):
+    weights = lambda text: {c.term: c.weight for c in engine.related(text).terms}
+    as_heading = weights("# Harpoon\nThe whale and the ship.\n\n# Harpoon\nThe captain and the sail.\n\n# Harpoon\n")
+    as_text = weights("Harpoon\n\nThe whale and the ship.\n\nHarpoon\n\nThe captain and the sail.\n\nHarpoon\n")
+    assert as_heading == as_text  # every one counts, even with nothing under it

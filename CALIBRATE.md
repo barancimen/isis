@@ -15,7 +15,7 @@ small set of judged queries and tasks once, then every change is a number you ca
 | `lib.py` | Loads the engine, names passages (`path:start_line`), parses `--set` / `--grid` overrides. |
 | `judge.py` | Records your grades for a printed pool, by position. |
 | `search.py` | Search: `pool` results for judging, `eval` settings by nDCG@10. |
-| `related.py` | Related: `build` task documents, `pool` suggestions, `eval` settings, `signals` tables, `feedback` (dismiss/avoid simulation). |
+| `related.py` | Related: `build` task documents, `pool` suggestions, `eval` settings, `signals` tables, `feedback` (dismiss/avoid simulation), `like` ("more like this" simulation). |
 | `data/queries.json` | 38 search queries in three kinds: `keyword`, `question`, `paraphrase`. |
 | `data/augment.json` | Helper queries per search query, to find relevant passages that no setting ranks well. |
 | `data/qrels_search.json` | 1,026 graded search results. |
@@ -123,7 +123,7 @@ The judgments name passages of `sample_corpus/`, so a new corpus needs its own:
    Paraphrases are where meaning search earns its keep, and where pools miss the most, so add
    helper queries for them in `data/augment.json`.
 2. Write 10–15 tasks in `data/tasks.json`, the way you really use the app: your own notes plus a
-   few excerpts (passage keys from a pool printout), some with two `#` headings (to exercise
+   few excerpts (passage keys from a pool printout), some about two subjects (to exercise
    bridges and gaps), some notes-only, and one very short. Write each task's intent. Add a few
    long ones (`"kind": "long"`, 30+ paragraphs): a task document after an hour of collecting
    behaves differently from a first note, and the first calibration missed that.
@@ -198,6 +198,14 @@ that keeps growing. Five long tasks were added and about 230 more suggestions ju
 - **`n_query_terms` 50 looked best (8.42) but was a spike** (40: 8.13, 55: 7.89), so it stays 30.
 - **Overall**, on the same 968 judgments: utility 7.68 → 8.21 (short 6.86 → 7.18, long 10.0 →
   11.1), precision 76% → 77%, gaps lane 89% → 93% precise. Search is unchanged.
+
+### Themes come from the content alone (2026-11)
+
+Themes used to be the task's headings when it had two or more, and clusters of paragraphs otherwise. One heading pasted in with an excerpt could then decide them, so now they are always clusters. On the same 991 judgments, utility went from 8.21 to 7.87: long tasks gained (11.1 to 11.4), short ones lost (7.18 to 6.61), and the 5 tasks with headings lost most (9.9 to 8.4). Those 5 are the best case for headings, since their on-topic headings were written along with the tasks. Clustering from two paragraphs up, rather than three, scored about the same (7.87, 7.82) and lets a short task about two subjects have bridges.
+
+### More like this (2026-11)
+
+`like_weight` 1: marking a passage on a task with two subjects moved suggestions toward its subject (the glowing sea from 3 to 8 of 24, Pip from 5 to 12, Darwin's side from 10 to 13), and most of the effect is there at 1 (0.5: 7, 10, 11; 3: 8, 15, 15). Among judged suggestions the share of relevant ones held (79.5% at 0, 79.4% at 1), but about a quarter of them were never judged, since a pull surfaces new passages. Average cosine to the marked passage barely moves (+0.007), so count suggestions on the subject instead. The per-file limit also holds it back: with `max_per_file` 8, slave-making ants went from 15 to 19.
 
 ### Folders without embeddings (`.no-embed`, 2026-11)
 

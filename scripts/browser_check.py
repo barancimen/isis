@@ -65,7 +65,7 @@ def main() -> None:
     errors: list[str] = []
     answers: list[str] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(ignore_default_args=["--hide-scrollbars"])
         page = browser.new_page(viewport={"width": 1600, "height": 1000})
         page.on("console", lambda m: m.type == "error" and not re.search(r"\b(409|400)\b", m.text) and errors.append(m.text))
         page.on("pageerror", lambda e: errors.append(str(e)))
@@ -264,6 +264,24 @@ def main() -> None:
         shot(page, "steer.png")
         step("related steer line: -squid excludes, +/regex/ requires, a bad pattern is reported; ⊘ avoided a passage")
 
+        card = page.locator("#related-lanes .hit").first
+        title = card.locator(".hit-loc").inner_text()
+        with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
+            card.locator("button.like").click()
+        marked = page.locator("#related-lanes .hit", has=page.locator("button.like[aria-pressed=true]"))
+        expect(marked).to_have_count(1, timeout=30000)
+        assert marked.locator(".hit-loc").inner_text() == title  # it stays on show
+        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 more like this")
+        meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
+        assert len(meta["liked"]) == 1 and meta["liked"][0]["path"] == title.rsplit(":", 1)[0]
+        assert task_text().count(meta["liked"][0]["text"][:40]) == 0  # not added to the document
+        if not page.locator("#related-feedback").evaluate("e => e.open"):
+            page.locator("#related-feedback > summary").click()
+        with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
+            page.locator("#related-feedback .feedback-item button", has_text="Stop").click()
+        expect(marked).to_have_count(0, timeout=30000)
+        step("↑ more like this: marks a suggestion, stays on show, stays out of the document; the drawer undoes it")
+
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")
         page.keyboard.press("Control+End")
@@ -327,6 +345,29 @@ def main() -> None:
         expect(page.locator("#reader-path")).to_have_text(first)
         step(f"files panel filtered and opened {first}")
         shot(page, "files.png")
+
+        # The scrollbar follows the mouse, even over text not yet on screen (long chapters).
+        page.evaluate("window.isis.openFile('voyage-of-the-beagle/017-chapter-xvii-galapagos-archipelago.md')")
+        expect(page.locator("#reader-path")).to_contain_text("017-chapter")
+        measure = """() => { const e = document.querySelector('#reader-editor .cm-scroller'); const r = e.getBoundingClientRect();
+            return [e.scrollTop, e.scrollHeight, e.clientHeight, r.right, r.top]; }"""
+        def thumb(top, height, client):  # 15 px arrow buttons at each end of the track
+            track = client - 30
+            size = max(track * client / height, 18)
+            return 15 + top / max(height - client, 1) * (track - size), size
+        top, height, client, right, y0 = page.evaluate(measure)
+        start, size = thumb(top, height, client)
+        page.mouse.move(right - 8, y0 + start + size / 2)
+        page.mouse.down()
+        for i in range(1, 11):
+            page.mouse.move(right - 8, y0 + start + size / 2 + 30 * i, steps=2)
+            page.wait_for_timeout(80)
+        page.wait_for_timeout(200)
+        now = page.evaluate(measure)
+        moved = thumb(now[0], now[1], now[2])[0] - start
+        page.mouse.up()
+        assert 270 <= moved <= 330, f"the mouse moved 300 px, the scrollbar {moved:.0f} px"
+        step(f"reader scrollbar follows a first drag: mouse 300 px, thumb {moved:.0f} px")
 
         sample = CORPUS / "e2e-envelopes.md"
         sample.write_text("---\ntitle: A survey\ntags: [whales, oil]\n---\n\nA hard wrapped\nparagraph.\n\n---\nnote: in the middle\nstatus: draft\n---\n\n"

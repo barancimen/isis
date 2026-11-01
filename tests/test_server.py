@@ -94,7 +94,7 @@ def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     assert prefs["dismissed"] == [] and prefs["feedback"]["hidden"] == [0, 0]
 
     client.put("/api/tasks/t/steer", json={"text": "whale"})
-    assert client.delete("/api/tasks/t/prefs").json() == {"steer": "", "ignored": [], "dismissed": [], "feedback": {}}
+    assert client.delete("/api/tasks/t/prefs").json() == {"steer": "", "ignored": [], "dismissed": [], "feedback": {}, "liked": []}
     assert client.get("/api/tasks/t/prefs").json()["steer"] == ""
     assert len(list((corpus / "_tasks" / ".trash").glob("t.*.prefs.json"))) == 1
 
@@ -356,3 +356,16 @@ def test_each_panel_can_leave_out_a_folder(tmp_path):
         body = {"text": "The whale and the harpoon, the ship and its captain."}
         shown = lambda **k: {h["path"].split("/")[0] for l in c.post("/api/tasks/t/related", json={**body, **k}).json()["lanes"] for h in l["items"]}
         assert shown() == {"a", "b"} and shown(skip_folders=["b"]) == {"a"}
+
+
+def test_more_like_this_through_the_api(client):
+    client.post("/api/tasks", json={"name": "t"})
+    like = {"action": "like", "lane": "core", "path": "whales.md", "text": "x" * 300, "start_line": 2, "end_line": 2}
+    prefs = client.post("/api/tasks/t/feedback", json=like).json()
+    assert prefs["feedback"] == {"core": [1, 0]}
+    (entry,) = prefs["liked"]
+    assert len(entry["text"]) == 200 and entry["id"]  # a preview, as for dismissals
+    assert client.post("/api/tasks/t/feedback", json={**like, "lane": ""}).status_code == 400
+    assert client.post("/api/tasks/t/related", json={"text": "The sperm whale."}).json()["prefs"]["liked"]
+    prefs = client.post("/api/tasks/t/feedback", json={"action": "unlike", "id": entry["id"]}).json()
+    assert prefs["liked"] == [] and prefs["feedback"] == {"core": [0, 0]}

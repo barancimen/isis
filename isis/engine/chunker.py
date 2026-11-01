@@ -33,19 +33,34 @@ def split_lines(content: str) -> list[str]:
     return re.split(r"\r\n|\r|\n", content)
 
 
+def _body_start(lines: list[str]) -> int:
+    """The first line after YAML frontmatter, if there is any."""
+    if lines and lines[0].strip() == "---":
+        for n in range(1, len(lines)):
+            if lines[n].strip() in ("---", "..."):
+                return n + 1
+    return 0
+
+
+def heading_texts(content: str) -> list[str]:
+    """The text of every heading line, in order, with or without anything under it."""
+    lines = split_lines(content)
+    found, in_fence = [], False
+    for line in lines[_body_start(lines):]:
+        if FENCE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and (m := HEADING.match(line)):
+            found.append(m.group(1))
+    return found
+
+
 def _blocks(lines: list[str]):
     """Yield (section, heading, start, end) for each run of non-blank lines.
 
     Headings and blank lines end a run, except inside code fences. YAML frontmatter is skipped.
     `section` counts headings, so two sections with the same title stay apart.
     """
-    start = 0
-    if lines and lines[0].strip() == "---":
-        for n in range(1, len(lines)):
-            if lines[n].strip() in ("---", "..."):
-                start = n + 1
-                break
-
+    start = _body_start(lines)
     section, heading, run, in_fence = 0, "", None, False
     for n in range(start, len(lines)):
         line = lines[n]

@@ -1,7 +1,7 @@
 """Related passages for a task document: the task itself is the query.
 
 1. units    Split the task into paragraphs ("units") and recognise the ones that are excerpts
-            already collected from the corpus. Headings (or clusters of paragraphs) are themes.
+            already collected from the corpus. Clusters of similar paragraphs are themes.
 2. signals  Score every corpus passage against the whole document, two ways:
               semantic  robust z-score of its cosine similarity to the document vector (the
                         length-weighted mean of the paragraph embeddings): how far it stands out
@@ -40,7 +40,7 @@ from typing import Callable
 
 import numpy as np
 
-from .chunker import MAX_WORDS, chunk_markdown
+from .chunker import MAX_WORDS, chunk_markdown, heading_texts
 from .index import Snapshot
 from .params import tunable
 from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit, split_query,
@@ -81,6 +81,11 @@ class RelatedConfig:
     excerpt_weight: float = tunable(
         0.5, label="Excerpt weight", group=QUERY, min=0.0, max=3.0, step=0.1,
         help="Weight of passages you collected from the corpus, relative to your own writing.",
+    )
+    like_weight: float = tunable(
+        1.0, label="More like this", group=QUERY, min=0.0, max=3.0, step=0.1,
+        help="How strongly a passage you marked ↑ pulls the query toward it, in meaning and keywords. 1: each one "
+        "counts as much as your whole document. 0: they are ignored.",
     )
     cursor_boost: float = 1.0  # > 1 weights the paragraph at cursor_line up (1 = the whole document counts equally)
     cursor_decay: float = 1.0  # paragraphs over which that boost fades (1/e per this many)
@@ -150,7 +155,7 @@ class RelatedConfig:
     )
     theme_distance: float = tunable(
         0.15, label="Theme split", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
-        help="Without headings, paragraphs further apart than this (cosine distance) become separate themes.",
+        help="Paragraphs further apart than this (cosine distance) become separate themes.",
     )
     total_slots: int = tunable(
         24, label="Results", group=SELECTION, min=4, max=80, step=1,
@@ -185,6 +190,7 @@ class TaskPrefs:
     ignored: list[str] = field(default_factory=list)  # stems of task keywords not to search for
     dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line", "avoid"?}
     feedback: dict = field(default_factory=dict)  # lane -> [adds, dismisses]
+    liked: list[dict] = field(default_factory=list)  # "more like this": {"path", "text", "lane", "start_line", "end_line"}
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "TaskPrefs":
@@ -195,15 +201,17 @@ class TaskPrefs:
             raise ValueError("task preferences must be a JSON object")
         strings = lambda v: [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
         line = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
+        passages = lambda v: [
+            {**d, "path": d.get("path") if isinstance(d.get("path"), str) else "",
+             "start_line": line(d.get("start_line")), "end_line": line(d.get("end_line"))}
+            for d in (v if isinstance(v, list) else [])
+            if isinstance(d, dict) and isinstance(d.get("text"), str)
+        ]
         prefs = cls(
             steer=data["steer"] if isinstance(data.get("steer"), str) else "",
             ignored=strings(data.get("ignored")),
-            dismissed=[
-                {**d, "path": d.get("path") if isinstance(d.get("path"), str) else "",
-                 "start_line": line(d.get("start_line")), "end_line": line(d.get("end_line"))}
-                for d in (data.get("dismissed") if isinstance(data.get("dismissed"), list) else [])
-                if isinstance(d, dict) and isinstance(d.get("text"), str)
-            ],
+            dismissed=passages(data.get("dismissed")),
+            liked=passages(data.get("liked")),
             feedback={
                 lane: [int(v[0]), int(v[1])]
                 for lane, v in (data.get("feedback") if isinstance(data.get("feedback"), dict) else {}).items()
@@ -222,10 +230,11 @@ class TaskPrefs:
         return asdict(self)
 
     def summary(self, preview: int = 200) -> dict:
-        """What the page shows: as to_dict, but each dismissal carries an id and only the start
-        of its text. Hundreds of dismissed passages would otherwise travel with every refresh."""
+        """What the page shows: as to_dict, but each remembered passage carries an id and only the
+        start of its text. Hundreds of them would otherwise travel with every refresh."""
         out = self.to_dict()
-        out["dismissed"] = [{**d, "id": dismissal_id(d), "text": d["text"][:preview]} for d in self.dismissed]
+        for name in ("dismissed", "liked"):
+            out[name] = [{**d, "id": passage_id(d), "text": d["text"][:preview]} for d in getattr(self, name)]
         return out
 
     # ---- the steer line ----
@@ -290,14 +299,35 @@ class TaskPrefs:
                 avoid: bool = False) -> None:
         """Hide a passage. `avoid` also hides every passage close to it in meaning (an anti-query)."""
         self.record(lane, added=False)
+        self._drop_like(path, text)
         if text:
             entry = {"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line}
             self.dismissed.append({**entry, "avoid": True} if avoid else entry)
 
+    def like(self, lane: str, path: str, text: str, start_line: int | None = None, end_line: int | None = None) -> None:
+        """More like this: the passage pulls the query toward it, without joining the document."""
+        if not text or any(passage_id(d) == passage_id({"path": path, "text": text}) for d in self.liked):
+            return
+        self.record(lane, added=True)
+        self.liked.append({"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line})
+
+    def unlike(self, ident: str) -> None:
+        for d in self.liked:
+            if passage_id(d) == ident:
+                self.liked.remove(d)
+                if d.get("lane") in self.feedback:
+                    counts = self.feedback[d["lane"]]
+                    counts[0] = max(counts[0] - 1, 0)
+                return
+
+    def _drop_like(self, path: str, text: str) -> None:
+        ident = passage_id({"path": path, "text": text})
+        self.liked = [d for d in self.liked if passage_id(d) != ident]
+
     def restore_id(self, ident: str) -> None:
         """restore() for the dismissal with this id (see summary())."""
         for d in self.dismissed:
-            if dismissal_id(d) == ident:
+            if passage_id(d) == ident:
                 return self.restore(d.get("path", ""), d["text"])
 
     def restore(self, path: str, text: str) -> None:
@@ -313,8 +343,8 @@ class TaskPrefs:
         self.dismissed = kept
 
 
-def dismissal_id(d: dict) -> str:
-    """A short stable name for a dismissed passage: its path and text, hashed."""
+def passage_id(d: dict) -> str:
+    """A short stable name for a remembered passage: its path and text, hashed."""
     return hashlib.sha1(f"{d.get('path', '')}\0{_norm(d.get('text', ''))}".encode()).hexdigest()[:12]
 
 
@@ -447,14 +477,10 @@ def passage_row(snapshot: Snapshot, path: str, start_line: int | None, text: str
 
 def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: RelatedConfig,
                   snapshot: Snapshot | None = None) -> list[Theme]:
-    """Themes are the task's sections when it has at least two; otherwise clusters of similar
-    paragraphs (average linkage on cosine distance), at most 2 * sqrt(paragraphs) of them."""
-    headings = list(dict.fromkeys(u.heading for u in units))
-    if len(headings) >= 2:
-        for u in units:
-            u.theme = headings.index(u.heading)
-        labels = [h or "(top)" for h in headings]
-    elif unit_vecs is not None and len(units) >= 3:
+    """Themes are clusters of similar paragraphs (average linkage on cosine distance), at most
+    2 * sqrt(paragraphs) of them. They come from the content alone: a heading can be pasted in with
+    an excerpt, or say little about what follows it."""
+    if unit_vecs is not None and len(units) >= 2:
         clusters = _clusters(unit_vecs, config.theme_distance)
         order = list(dict.fromkeys(clusters))  # number themes in reading order
         for u, c in zip(units, clusters):
@@ -463,7 +489,7 @@ def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: Relat
     else:
         for u in units:
             u.theme = 0
-        labels = [units[0].heading or "Everything"] if units else []
+        labels = ["Everything"] if units else []
 
     return [
         Theme(label, sum(u.theme == t for u in units), sum(u.theme == t and u.excerpt for u in units))
@@ -520,9 +546,10 @@ def zscores(snapshot: Snapshot, vecs: np.ndarray) -> tuple[np.ndarray, np.ndarra
 
 
 def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: RelatedConfig,
-               steer: Steering | None = None) -> list[TermChip]:
+               steer: Steering | None = None, headings: list[str] = ()) -> list[TermChip]:
     """The task's most distinctive terms (weighted term frequency in the task x corpus IDF), minus
-    the ignored and excluded ones, plus the steer line's words at full weight."""
+    the ignored and excluded ones, plus the steer line's words at full weight. `headings` are the
+    task's heading lines: their words count like any other line of text."""
     steer = steer or Steering()
     tf: dict[str, float] = defaultdict(float)
     surfaces: dict[str, Counter] = defaultdict(Counter)
@@ -530,10 +557,17 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
         for term, surface in tokenize_with_surface(u.text):
             tf[term] += u.weight
             surfaces[term][surface] += 1
-    for heading in {u.heading for u in units if u.heading}:
+    for heading in headings:
         for term, surface in tokenize_with_surface(heading):
             tf[term] += 1.0
             surfaces[term][surface] += 1
+    if config.like_weight > 0:  # each liked passage adds a share of the task's own word count
+        total = max(sum(tf.values()), 1.0)
+        for d in prefs.liked:
+            pairs = tokenize_with_surface(d.get("text", ""))
+            for term, surface in pairs:
+                tf[term] += config.like_weight * total / len(pairs)
+                surfaces[term][surface] += 1
 
     scored = []
     for term, f in tf.items():
@@ -603,9 +637,11 @@ def mmr_select(
     taken: set[int],
     config: RelatedConfig,
     per_file: Counter | None = None,
+    wanted: set[int] = frozenset(),
 ) -> list[tuple[int, float]]:
     """Maximal marginal relevance: repeatedly take the passage with the best
-    lam * relevance - (1 - lam) * (similarity to anything already chosen or collected)."""
+    lam * relevance - (1 - lam) * (similarity to anything already chosen or collected). Passages
+    marked "more like this" (`wanted`) don't count as chosen: similar ones are what was asked for."""
     per_file = Counter() if per_file is None else per_file
     pool = [r for r in sorted(scores, key=lambda r: -scores[r]) if r not in taken][: config.mmr_pool]
     if not pool:
@@ -630,7 +666,7 @@ def mmr_select(
         per_file[path] += 1
         picked.append((row, float(value[i])))
         taken.add(row)
-        if usable[i]:
+        if usable[i] and row not in wanted:
             chosen_vecs.append(vecs[i])
             redundancy = np.maximum(redundancy, np.where(usable, vecs @ vecs[i], 0.0))
     return picked
@@ -684,17 +720,30 @@ def related(
 
     weights = np.array([u.weight for u in units], np.float32)
     theme_z = second = avoided = None
+    liked = [d for d in prefs.liked if d.get("text")] if config.like_weight > 0 else []
     if semantic:
+        like_vecs = embed_reusing(
+            snapshot, embedder, [d["text"] for d in liked],
+            [passage_row(snapshot, d.get("path", ""), d.get("start_line"), d["text"]) for d in liked],
+        ) if liked else None
         if config.query == "document":
             sizes = np.array([len(u.text.split()) for u in units], np.float32) * weights
             document = (sizes[:, None] * unit_vecs).sum(0)
-            _, z_doc = zscores(snapshot, (document / max(np.linalg.norm(document), 1e-9))[None, :])
+            document = document / max(np.linalg.norm(document), 1e-9)
+            if liked:  # a fixed pull per passage, however long the document has grown
+                document = document + config.like_weight * like_vecs.sum(0)
+                document = document / max(np.linalg.norm(document), 1e-9)
+            _, z_doc = zscores(snapshot, document[None, :])
             sem_any = sem_w = z_doc[:, 0]
             best_unit = np.where(np.isfinite(cos[:, 0]), cos.argmax(1), 0)  # closest paragraph, for display
         else:
             sem_any = z.max(1)
             sem_w = (z * weights).max(1)
             best_unit = (z * weights).argmax(1)
+            if liked:  # each liked passage is one more paragraph to match
+                _, z_like = zscores(snapshot, like_vecs)
+                sem_any = np.maximum(sem_any, z_like.max(1))
+                sem_w = np.maximum(sem_w, min(config.like_weight, 1.0) * z_like.max(1))
         dismissed = [d for d in prefs.dismissed if d.get("text")]
         if config.negative_weight <= 0:  # no penalty: only the anti-queries need scoring
             dismissed = [d for d in dismissed if d.get("avoid")]
@@ -727,7 +776,7 @@ def related(
         steer = steering(prefs.clauses())
     except QueryError:  # saved lines are checked when saved; an old one may not be
         steer = Steering()
-    chips = task_terms(snapshot, units, prefs, config, steer)
+    chips = task_terms(snapshot, units, prefs, config, steer, heading_texts(task_text))
     query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.ignored]
     bm25 = snapshot.bm25_for(config.bm25_k1, config.bm25_b)
     lex = lexical_scores(snapshot, bm25, [i for i, _ in query], [w for _, w in query], steer.patterns)
@@ -800,7 +849,7 @@ def related(
                 lane_why["hidden"][row] = {"obviousness": round(obviousness, 3)}
 
         if theme_z is None:
-            notes["bridges"] = notes["gaps"] = "Needs at least two themes: add headings, or write about more than one thing."
+            notes["bridges"] = notes["gaps"] = "Needs at least two themes: write about more than one thing."
         else:
             strong = theme_z >= config.bridge_z
             size = strong.sum(0)
@@ -833,22 +882,24 @@ def related(
     taken: set[int] = set()
     chosen_vecs = [unit_vecs[j] for j, u in enumerate(units) if u.excerpt] if semantic else []
     picked: dict[str, list[tuple[int, float]]] = {}
+    wanted = {r for d in liked if (r := passage_row(snapshot, d.get("path", ""), d.get("start_line"), d["text"])) is not None}
     per_file = {lane: Counter() for lane in active}
     for lane in active:
         lam = config.mmr_lambda.get(lane, 0.7)
-        picked[lane] = mmr_select(lane_scores[lane], slots[lane], lam, snapshot, chosen_vecs, taken, config, per_file[lane])
+        picked[lane] = mmr_select(lane_scores[lane], slots[lane], lam, snapshot, chosen_vecs, taken, config, per_file[lane], wanted)
     if "core" in picked:  # slots other lanes could not fill go to core
         spare = sum(slots.values()) - sum(len(v) for v in picked.values())
         if spare > 0:
             lam = config.mmr_lambda.get("core", 0.7)
             picked["core"] += mmr_select(
-                lane_scores["core"], spare, lam, snapshot, chosen_vecs, taken, config, per_file["core"]
+                lane_scores["core"], spare, lam, snapshot, chosen_vecs, taken, config, per_file["core"], wanted
             )
     lap("select")
 
     terms = {c.term for c in chips if not c.ignored}
     highlight = steer.patterns + [p for p in steer.filters.required if p not in steer.patterns]
     lines_cache: dict[str, list[str] | None] = {}
+    liked_ids = {passage_id(d) for d in prefs.liked}
 
     def hit(lane: str, row: int, value: float) -> Hit | None:
         path = snapshot.passages[row].path
@@ -867,8 +918,11 @@ def related(
             "bm25": round(float(lex[row]), 3),
             "lexical_rank": int(lex_rank[row]) + 1 if lex[row] > 0 else None,
             "matches_task_line": u.start_line if semantic else None,
+            "liked": passage_id({"path": snapshot.passages[row].path, "text": snapshot.passages[row].text}) if liked_ids else None,
             **lane_why[lane].get(row, {}),
         }
+        if why["liked"] not in liked_ids:
+            why["liked"] = None
         return make_hit(snapshot, row, lane_scores[lane][row], terms, lines_cache[path], context_lines, why, highlight)
 
     lanes = []

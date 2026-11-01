@@ -193,7 +193,8 @@
   "voyage-of-the-beagle/009-chapter-ix-santa-cruz-patagonia-and-the-falkland-islands.md:793": 0,
   "origin-of-species/014-chapter-xiv-recapitulation-and-conclusion.md:2352": 0,
   "origin-of-species/011-chapter-xi-geographical-distribution.md:184": 1,
-  "origin-of-species/010-chapter-x-on-the-geological-succession-of-organic-beings.md:807": 0
+  "origin-of-species/010-chapter-x-on-the-geological-succession-of-organic-beings.md:807": 0,
+  "voyage-of-the-beagle/017-chapter-xvii-galapagos-archipelago.md:277": 2
  },
  "t04": {
   "origin-of-species/003-chapter-iii-struggle-for-existence.md:2": 2,
@@ -434,7 +435,9 @@
   "moby-dick/068-chapter-68-the-blanket.md:45": 1,
   "origin-of-species/013-chapter-xiii-mutual-affinities-of-organic-beings-morphology-.md:849": 1,
   "origin-of-species/013-chapter-xiii-mutual-affinities-of-organic-beings-morphology-.md:92": 1,
-  "origin-of-species/013-chapter-xiii-mutual-affinities-of-organic-beings-morphology-.md:155": 1
+  "origin-of-species/013-chapter-xiii-mutual-affinities-of-organic-beings-morphology-.md:155": 1,
+  "origin-of-species/006-chapter-vi-difficulties-on-theory.md:749": 1,
+  "moby-dick/088-chapter-88-schools-and-schoolmasters.md:36": 0
  },
  "t08": {
   "origin-of-species/007-chapter-vii-instinct.md:383": 2,
@@ -486,7 +489,11 @@
   "voyage-of-the-beagle/021-chapter-xxi-mauritius-to-england.md:748": 0,
   "moby-dick/058-chapter-58-brit.md:25": 0,
   "voyage-of-the-beagle/021-chapter-xxi-mauritius-to-england.md:887": 0,
-  "voyage-of-the-beagle/021-chapter-xxi-mauritius-to-england.md:186": 1
+  "voyage-of-the-beagle/021-chapter-xxi-mauritius-to-england.md:186": 1,
+  "origin-of-species/007-chapter-vii-instinct.md:1028": 1,
+  "origin-of-species/007-chapter-vii-instinct.md:2": 1,
+  "origin-of-species/007-chapter-vii-instinct.md:113": 0,
+  "voyage-of-the-beagle/002-chapter-ii-rio-de-janeiro.md:559": 0
  },
  "t09": {
   "origin-of-species/007-chapter-vii-instinct.md:816": 2,
@@ -528,7 +535,12 @@
   "origin-of-species/006-chapter-vi-difficulties-on-theory.md:920": 0,
   "origin-of-species/004-chapter-iv-natural-selection.md:517": 0,
   "origin-of-species/014-chapter-xiv-recapitulation-and-conclusion.md:386": 1,
-  "origin-of-species/007-chapter-vii-instinct.md:665": 2
+  "origin-of-species/007-chapter-vii-instinct.md:665": 2,
+  "origin-of-species/008-chapter-viii-hybridism.md:308": 0,
+  "origin-of-species/007-chapter-vii-instinct.md:832": 2,
+  "origin-of-species/007-chapter-vii-instinct.md:787": 2,
+  "origin-of-species/007-chapter-vii-instinct.md:288": 2,
+  "origin-of-species/007-chapter-vii-instinct.md:881": 2
  },
  "t10": {
   "voyage-of-the-beagle/010-chapter-x-tierra-del-fuego.md:454": 2,
@@ -638,7 +650,12 @@
   "origin-of-species/010-chapter-x-on-the-geological-succession-of-organic-beings.md:696": 0,
   "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:135": 1,
   "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:665": 1,
-  "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:589": 2
+  "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:589": 2,
+  "moby-dick/111-chapter-111-the-pacific.md:2": 0,
+  "voyage-of-the-beagle/011-chapter-xi-strait-of-magellan-climate-of-the-southern-coasts.md:286": 0,
+  "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:546": 2,
+  "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:949": 2,
+  "voyage-of-the-beagle/020-chapter-xx-keeling-island-coral-formations.md:732": 2
  },
  "t12": {
   "voyage-of-the-beagle/005-chapter-v-bahia-blanca.md:30": 2,
@@ -842,7 +859,11 @@
   "moby-dick/081-chapter-81-the-pequod-meets-the-virgin.md:361": 1,
   "moby-dick/060-chapter-60-the-line.md:24": 1,
   "moby-dick/091-chapter-91-the-pequod-meets-the-rose-bud.md:141": 1,
-  "moby-dick/091-chapter-91-the-pequod-meets-the-rose-bud.md:16": 1
+  "moby-dick/091-chapter-91-the-pequod-meets-the-rose-bud.md:16": 1,
+  "moby-dick/091-chapter-91-the-pequod-meets-the-rose-bud.md:2": 1,
+  "moby-dick/094-chapter-94-a-squeeze-of-the-hand.md:60": 2,
+  "moby-dick/096-chapter-96-the-try-works.md:44": 2,
+  "moby-dick/068-chapter-68-the-blanket.md:35": 2
  },
  "L2": {
   "voyage-of-the-beagle/017-chapter-xvii-galapagos-archipelago.md:2": 1,
@@ -878,7 +899,9 @@
   "voyage-of-the-beagle/017-chapter-xvii-galapagos-archipelago.md:612": 1,
   "voyage-of-the-beagle/017-chapter-xvii-galapagos-archipelago.md:1078": 2,
   "voyage-of-the-beagle/009-chapter-ix-santa-cruz-patagonia-and-the-falkland-islands.md:865": 0,
-  "origin-of-species/014-chapter-xiv-recapitulation-and-conclusion.md:562": 1
+  "origin-of-species/014-chapter-xiv-recapitulation-and-conclusion.md:562": 1,
+  "origin-of-species/012-chapter-xii-geographical-distribution-continued.md:90": 2,
+  "origin-of-species/011-chapter-xi-geographical-distribution.md:518": 2
  },
  "L3": {
   "moby-dick/133-chapter-133-the-chase-first-day.md:221": 1,

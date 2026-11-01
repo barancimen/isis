@@ -160,6 +160,30 @@ const envelopedBlocks = {
   }],
 };
 
+// CodeMirror lays out only what is on screen and estimates the height of the rest (here 12% too
+// low). Dragging the scrollbar lands on estimated text, real heights arrive, the position is
+// corrected, and the thumb falls behind the mouse by a third. So lay out the whole document once,
+// when it opens and when its width changes: heights it has measured, it keeps. Nothing on screen
+// moves. This is the mode CodeMirror prints in, viewState.printing, not a public API: if it goes
+// away in an update, the scrollbar is merely back to lagging. Very long documents are left alone,
+// since this holds up the page (about 0.4 s per 80 KB on a slow CPU).
+const MAX_MEASURED_CHARS = 500_000;
+const measuredWidths = new WeakMap();
+
+function measureWholeDocument(view) {
+  measuredWidths.set(view, view.contentDOM.clientWidth);
+  if (view.state.doc.length > MAX_MEASURED_CHARS || !view.dom.offsetHeight) return;
+  view.viewState.printing = true;
+  view.measure();
+  view.viewState.printing = false;
+  view.requestMeasure();
+}
+
+const remeasureSoon = debounce((view) => measureWholeDocument(view), 200);
+const remeasureOnResize = EditorView.updateListener.of((update) => {
+  if (update.geometryChanged && measuredWidths.get(update.view) !== update.view.contentDOM.clientWidth) remeasureSoon(update.view);
+});
+
 const hitSlot = decorationSlot();
 const addedSlot = decorationSlot();
 
@@ -233,6 +257,7 @@ function readerState(doc) {
       hitSlot.field,
       placeholder("Open a file from Files, or click a search result."),
       keymap.of([{ key: "Mod-Enter", run: () => (addReaderSelection(), true) }]),
+      remeasureOnResize,
       EditorView.updateListener.of((u) => {
         if (u.selectionSet) $("#reader-add").hidden = u.state.selection.main.empty;
       }),
@@ -256,6 +281,7 @@ function taskExtensions() {
         "They go in at this cursor. Write your own notes around them: the Related panel reads this whole document."
     ),
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+    remeasureOnResize,
     EditorView.updateListener.of(onTaskUpdate),
   ];
 }
@@ -333,6 +359,7 @@ async function switchTask(name) {
   state.lastRelatedKeys = null;
   store.set("task", name);
   taskView.setState(doc.state);
+  measureWholeDocument(taskView);
   $("#task-name").textContent = name;
   $("#conflict").hidden = true;
   setSaveState(doc.dirty ? "Unsaved" : "Saved");
@@ -455,6 +482,7 @@ async function resolveConflict(keepMine) {
     doc.dirty = false;
     doc.conflictMtime = null;
     taskView.setState(doc.state);
+    measureWholeDocument(taskView);
     setSaveState("Saved");
   }
   $("#conflict").hidden = true;
@@ -513,6 +541,7 @@ async function openFile(path, location = null) {
   if (path !== state.readerPath) {
     const { content } = await api("GET", `/api/file?path=${enc(path)}`);
     reader.setState(readerState(content));
+    measureWholeDocument(reader);
     state.readerPath = path;
     $("#reader-path").textContent = path;
     $("#reader-path").title = path;
@@ -674,6 +703,12 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
   };
   const actions = h("span", { class: "hit-actions" },
     h("button", { class: "add", title: "Add this passage to the task, at its cursor", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
+    lane && h("button", {
+      class: "like",
+      "aria-pressed": String(Boolean(hit.why.liked)),
+      title: hit.why.liked ? "More like this is on: click to stop" : "More like this: pull the suggestions toward this passage, without adding it",
+      onclick: () => likeHit(hit, lane).catch(fail),
+    }, "↑"),
     lane && h("button", { title: "Not useful: hide it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
     lane && h("button", { class: "avoid", title: "Avoid: hide it and every passage like it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
   );
@@ -835,6 +870,19 @@ async function dismiss(hit, lane, element, avoid = false) {
   requestRelated(400);
 }
 
+async function likeHit(hit, lane) {
+  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, hit.why.liked
+    ? { action: "unlike", id: hit.why.liked }
+    : { action: "like", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
+  await refreshRelated();
+}
+
+async function unlikePassage(liked, element) {
+  element?.remove();
+  await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "unlike", id: liked.id });
+  await refreshRelated();
+}
+
 // ---------- feedback drawer ----------
 
 // Everything the panel remembers about the task, each with its undo. It stays with the task
@@ -851,17 +899,18 @@ function renderFeedback(prefs, terms, lanes) {
 
   const laneTitles = new Map(lanes.map((l) => [l.name, l.title]));
   const counted = Object.entries(prefs.feedback).filter(([, [adds, dismisses]]) => adds || dismisses);
-  const added = counted.reduce((sum, [, [adds]]) => sum + adds, 0);
+  const added = Math.max(counted.reduce((sum, [, [adds]]) => sum + adds, 0) - prefs.liked.length, 0); // a ↑ also counts for its lane
   const summary = [
+    prefs.liked.length && `${prefs.liked.length} more like this`,
     prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} dismissed`,
     avoided && `${avoided} avoided`,
     prefs.steer && "steered",
     added && `${added} added`,
     ignored.length && `${ignored.length} ignored`,
   ].filter(Boolean);
-  const empty = !prefs.dismissed.length && !prefs.steer && !ignored.length && !counted.length;
+  const empty = !prefs.liked.length && !prefs.dismissed.length && !prefs.steer && !ignored.length && !counted.length;
 
-  const dismissed = [...prefs.dismissed].reverse().map((d) => {
+  const passageItem = (d, undo, tag) => {
     const known = d.start_line !== undefined && d.start_line !== null;
     const location = known ? { line: d.start_line, start: d.start_line, end: d.end_line ?? d.start_line } : null;
     const text = d.text.replace(/\s+/g, " ").trim();
@@ -869,26 +918,34 @@ function renderFeedback(prefs, terms, lanes) {
     return h("li", { class: "feedback-item" },
       h("div", { class: "feedback-head" },
         h("button", { class: "feedback-open", title: `Open ${where} in the reader`, onclick: () => openFile(d.path, location).catch(fail) }, where),
-        h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => restoreDismissed(d, e.target.closest("li")).catch(fail) }, "Restore"),
+        undo,
       ),
-      h("div", { class: "feedback-text" },
-        d.avoid && h("span", { class: "feedback-tag", title: "Avoided: passages like this one are hidden too" }, "⊘ avoided"),
-        text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
+      h("div", { class: "feedback-text" }, tag, text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
     );
-  });
+  };
+  const dismissed = [...prefs.dismissed].reverse().map((d) => passageItem(d,
+    h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => restoreDismissed(d, e.target.closest("li")).catch(fail) }, "Restore"),
+    d.avoid && h("span", { class: "feedback-tag", title: "Avoided: passages like this one are hidden too" }, "⊘ avoided")));
+  const liked = [...prefs.liked].reverse().map((d) => passageItem(d,
+    h("button", { title: "Stop pulling the suggestions toward this passage", onclick: (e) => unlikePassage(d, e.target.closest("li")).catch(fail) }, "Stop")));
   const ignoredChip = (term) =>
     h("span", { class: "chip ignored" },
       h("span", { class: "chip-label" }, labels.get(term) ?? term),
       h("button", { class: "chip-x", title: "Search for it again", onclick: () => termAction(term, "unignore").catch(fail) }, "×"),
     );
   const laneCounts = counted.map(([lane, [adds, dismisses]]) =>
-    `${laneTitles.get(lane) ?? lane}: ${[adds && `${adds} added`, dismisses && `${dismisses} dismissed`].filter(Boolean).join(", ")}`);
+    `${laneTitles.get(lane) ?? lane}: ${[adds && `${adds} ${prefs.liked.length ? "added or ↑" : "added"}`, dismisses && `${dismisses} dismissed`].filter(Boolean).join(", ")}`);
 
   drawer.replaceChildren(
     h("summary", {}, "Feedback", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
-        "Nothing yet. The passages you add (+), dismiss (×) or avoid (⊘) here, the steer line, and the keywords you ignore are remembered for this task, whatever its text."),
+        "Nothing yet. The passages you add (+), want more like (↑), dismiss (×) or avoid (⊘) here, the steer line, and the keywords you ignore are remembered for this task, whatever its text."),
+      liked.length > 0 && [
+        h("div", { class: "tune-group" }, "More like this"),
+        h("p", { class: "feedback-note" }, "These pull the suggestions toward them, in meaning and keywords, without being part of the task. Parameters › More like this sets how strongly."),
+        h("ul", { class: "feedback-list" }, liked),
+      ],
       dismissed.length > 0 && [
         h("div", { class: "tune-group" }, "Dismissed and avoided passages"),
         h("p", { class: "feedback-note" }, "Never suggested again. Passages like an avoided one are hidden too (Parameters › Avoid: similarity), and Parameters › Dismissal push can also rank passages like dismissed ones lower."),
