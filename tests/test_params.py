@@ -61,8 +61,10 @@ def test_search_config_changes_the_fusion(engine):
     meaning_only = engine.search("finches beaks", mode="hybrid", config=SearchConfig(keyword_weight=0))
     keywords_only = engine.search("finches beaks", mode="hybrid", config=SearchConfig(meaning_weight=0))
     by_meaning = [h.why["meaning_rank"] for h in meaning_only]
-    by_keywords = [h.why["keyword_rank"] for h in keywords_only if h.why["keyword_rank"]]
-    assert by_meaning == sorted(by_meaning) and by_keywords == sorted(by_keywords)
+    assert by_meaning == sorted(by_meaning)
+    assert keywords_only and all("meaning_rank" not in h.why for h in keywords_only)  # plain keyword search
+    scores = [h.score for h in keywords_only]
+    assert scores == sorted(scores, reverse=True)
 
 
 @pytest.fixture

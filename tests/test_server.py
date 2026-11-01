@@ -330,3 +330,29 @@ def test_the_watcher_sees_no_embed_files_and_every_folder(tmp_path):
         assert c.get("/api/status").json()["unembedded"] == 2
         (b / ".no-embed").unlink()
         assert wait_until(lambda: engine.status.unembedded == 0)
+
+
+def test_each_panel_can_leave_out_a_folder(tmp_path):
+    from isis.engine.index import Engine
+    from isis.engine.semantic import HashEmbedder
+    from test_related import TOPICS, paragraph
+    import random
+
+    rng = random.Random(5)
+    a, b = tmp_path / "a", tmp_path / "b"
+    for root in (a, b):
+        root.mkdir()
+        for topic in TOPICS:
+            for f in range(6):
+                (root / f"{topic}-{f}.md").write_text("\n\n".join(paragraph(rng, topic) for _ in range(4)) + "\n")
+    engine = Engine([a, b], embedder=HashEmbedder(dim=1024), target_words=0)
+    engine.refresh()
+    with TestClient(create_app(engine, TaskStore(tmp_path / "tasks"), background=False, watch=False)) as c:
+        assert c.get("/api/status").json()["folders"] == ["a", "b"]
+        folders = lambda **p: {h["path"].split("/")[0] for h in c.get("/api/search", params={"q": "whale", **p}).json()["hits"]}
+        assert folders() == {"a", "b"} and folders(skip='["b"]') == {"a"}
+        assert c.get("/api/search", params={"q": "whale", "skip": "nope"}).status_code == 400
+        c.post("/api/tasks", json={"name": "t"})
+        body = {"text": "The whale and the harpoon, the ship and its captain."}
+        shown = lambda **k: {h["path"].split("/")[0] for l in c.post("/api/tasks/t/related", json={**body, **k}).json()["lanes"] for h in l["items"]}
+        assert shown() == {"a", "b"} and shown(skip_folders=["b"]) == {"a"}

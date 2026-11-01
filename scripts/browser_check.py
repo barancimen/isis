@@ -102,7 +102,6 @@ def main() -> None:
 
         searches: list[str] = []
         page.on("request", lambda r: "/api/search" in r.url and searches.append(urllib.parse.unquote(r.url)))
-        page.check("#search-hybrid")
         page.locator("#search-tune > summary").click()
         set_slider(page, "#search-tune [data-name=keyword_weight] input", 0)
         expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
@@ -112,6 +111,29 @@ def main() -> None:
         page.locator("#search-tune button", has_text="Reset to defaults").click()
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
+
+        slider = lambda name: page.locator(f"#search-tune [data-name={name}] input")
+        expect(page.locator("#search-meaning")).to_have_attribute("aria-pressed", "true")
+        page.click("#search-meaning")
+        expect(page.locator("#search-meaning")).to_have_attribute("aria-pressed", "false")
+        expect(slider("meaning_weight")).to_have_value("0")
+        expect(page.locator("#search-results .hit .hit-why")).to_have_count(0, timeout=15000)  # no meaning ranks
+        set_slider(page, "#search-tune [data-name=meaning_weight] input", 2)  # the slider moves the button too
+        expect(page.locator("#search-meaning")).to_have_attribute("aria-pressed", "true")
+        page.click("#search-meaning")
+        expect(slider("meaning_weight")).to_have_value("0")
+        page.click("#search-meaning")  # back to the value it had
+        expect(slider("meaning_weight")).to_have_value("2")
+        set_slider(page, "#search-tune [data-name=k1] input", 2)
+        expect(page.locator("#search-tune .tune-count")).to_have_text(" · 2 changed")
+        page.locator("#search-tune [data-name=meaning_weight] .tune-default").click()
+        expect(slider("meaning_weight")).to_have_value("1")
+        expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
+        expect(page.locator("#search-tune [data-name=meaning_weight] .tune-default")).to_be_hidden()
+        page.locator("#search-tune button", has_text="Reset to defaults").click()
+        expect(slider("k1")).to_have_value("1.2")
+        expect(page.locator("#search-tune .tune-count")).to_have_text("")
+        step("Meaning button and Meaning weight slider move together; default buttons restore one slider or all")
 
         passage_lines = """() => [...document.querySelectorAll('#search-results .hit-body .line:not(.ctx)')].map(l => l.innerText)"""
         page.fill("#search-input", "")
@@ -126,8 +148,7 @@ def main() -> None:
         expect(page.locator("#search-results .hit mark").first).to_have_text(re.compile("white whale", re.I), timeout=15000)
         page.fill("#search-input", "/(oops/")
         expect(page.locator("#search-status")).to_contain_text("invalid pattern", timeout=15000)
-        page.uncheck("#search-hybrid")
-        step("search: exclusions hold with meaning ticked, /regex/ matches are highlighted, a bad pattern is reported")
+        step("search: exclusions hold with Meaning on, /regex/ matches are highlighted, a bad pattern is reported")
 
         page.evaluate("""() => {
             const v = window.isis.taskView, doc = v.state.doc.toString();
@@ -158,10 +179,21 @@ def main() -> None:
         expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length <= 6", timeout=30000)
         shot(page, "related-tuned.png")
+        page.locator("#related-tune [data-name=total_slots] .tune-default").click()  # one slider back
+        expect(page.locator("#related-tune [data-name=total_slots] input")).to_have_value("24")
+        expect(page.locator("#related-tune .tune-count")).to_have_text("")
+        page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
+        set_slider(page, "#related-tune [data-name=query] select", "paragraphs")  # the dropdown too
+        expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
+        page.locator("#related-tune [data-name=query] .tune-default").click()
+        expect(page.locator("#related-tune [data-name=query] select")).to_have_value("document")
+        expect(page.locator("#related-tune [data-name=query] .tune-default")).to_be_hidden()
+        set_slider(page, "#related-tune [data-name=total_slots] input", 6)  # and all of them
         page.locator("#related-tune button", has_text="Reset to defaults").click()
+        expect(page.locator("#related-tune .tune-count")).to_have_text("")
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
         page.locator("#related-tune > summary").click()
-        step("related parameters: 'Results' at 6 shows at most 6; reset restores the defaults")
+        step("related parameters: 'Results' at 6 shows at most 6; default buttons restore one setting or all")
 
         refreshes: list[str] = []
         page.on("request", lambda r: "/related" in r.url and refreshes.append(r.url))

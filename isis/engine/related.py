@@ -650,6 +650,7 @@ def related(
     seed: int = 0,
     read_lines: Callable[[str], list[str]],
     context_lines: int = 1,
+    skip_folders=(),
 ) -> RelatedResult:
     prefs = prefs or TaskPrefs()
     config = config or RelatedConfig()
@@ -713,6 +714,13 @@ def related(
     else:
         sem_any = sem_w = np.full(n, -np.inf)
         best_unit = np.zeros(n, np.int64)
+    # Left-out folders are gone before anything is ranked, so they take no places in the rankings.
+    # They still count for the corpus statistics, so thresholds mean the same with or without them.
+    keep = snapshot.outside_folders(skip_folders) if skip_folders else None
+    if keep is not None:
+        sem_any, sem_w = np.where(keep, sem_any, -np.inf), np.where(keep, sem_w, -np.inf)
+        if second is not None:
+            second = np.where(keep, second, -np.inf)
     lap("semantic")
 
     try:
@@ -723,6 +731,8 @@ def related(
     query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.ignored]
     bm25 = snapshot.bm25_for(config.bm25_k1, config.bm25_b)
     lex = lexical_scores(snapshot, bm25, [i for i, _ in query], [w for _, w in query], steer.patterns)
+    if keep is not None:
+        lex = np.where(keep, lex, 0.0)
     lex_rank = ranks(lex, lex > 0)
     sem_rank = ranks(sem_w, np.isfinite(sem_w))
     lap("lexical")

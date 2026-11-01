@@ -127,6 +127,14 @@ class Snapshot:
                 cache[key] = value
         return value
 
+    def outside_folders(self, skip) -> np.ndarray:
+        """Which passages are not in these corpus folders (the first part of a path)."""
+        ok = np.ones(len(self.passages), bool)
+        for path, (start, end) in self.file_rows.items():
+            if path.partition("/")[0] in skip:
+                ok[start:end] = False
+        return ok
+
     def term_id(self, term: str) -> int | None:
         i = self.vocab.get(term)
         return i if i is not None and i < self.bm25.n_terms else None
@@ -646,7 +654,10 @@ class Engine:
 
     # ---- queries ----
 
-    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None):
+    def _named_folders(self, skip) -> set[str]:
+        return {name for name in skip if name and name in self.roots}
+
+    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None, skip_folders=()):
         from .search import search
 
         return search(
@@ -658,9 +669,10 @@ class Engine:
             context_lines=context_lines,
             read_lines=self.read_lines,
             config=config,
+            skip_folders=self._named_folders(skip_folders),
         )
 
-    def related(self, task_text: str, *, cursor_line: int | None = None, prefs=None, config=None, seed: int = 0):
+    def related(self, task_text: str, *, cursor_line: int | None = None, prefs=None, config=None, seed: int = 0, skip_folders=()):
         from .related import related
 
         return related(
@@ -672,4 +684,5 @@ class Engine:
             config=config,
             seed=seed,
             read_lines=self.read_lines,
+            skip_folders=self._named_folders(skip_folders),
         )

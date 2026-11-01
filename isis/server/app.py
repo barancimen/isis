@@ -64,6 +64,7 @@ class RelatedRequest(BaseModel):
     text: str
     cursor_line: int | None = None
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
+    skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
 
 
 class TermRequest(BaseModel):
@@ -155,6 +156,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         return {
             **plain(engine.status),
             "index_bytes": engine.index_bytes(),
+            "folders": [name for name in engine.roots if name],  # when serving several folders
             "corpus": ", ".join(map(str, engine.roots.values())),
             "model": getattr(engine.embedder, "model_id", None),
         }
@@ -179,16 +181,18 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
         return {"search": specs(SearchConfig), "related": specs(RelatedConfig)}
 
     @app.get("/api/search")
-    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = ""):
+    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = ""):
         try:
             overrides = json.loads(params) if params else {}
+            skip_folders = json.loads(skip) if skip else []
         except ValueError:
-            raise HTTPException(400, "params must be a JSON object")
-        if not isinstance(overrides, dict):
-            raise HTTPException(400, "params must be a JSON object")
+            raise HTTPException(400, "params and skip must be JSON")
+        if not isinstance(overrides, dict) or not isinstance(skip_folders, list):
+            raise HTTPException(400, "params must be a JSON object, and skip a list of folders")
         started = time.perf_counter()
         try:
-            hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides))
+            hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
+                                 skip_folders=[str(f) for f in skip_folders])
         except QueryError as e:
             raise HTTPException(400, str(e))
         return {"hits": plain(hits), "ms": round((time.perf_counter() - started) * 1000, 1)}
@@ -228,6 +232,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             cursor_line=body.cursor_line,
             prefs=prefs,
             config=configure(RelatedConfig, body.params),
+            skip_folders=body.skip_folders,
             seed=zlib.crc32(name.encode()),
         )
         return {**plain(result), "prefs": prefs.summary()}

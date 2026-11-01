@@ -86,3 +86,13 @@ def test_hits_list_every_highlight_in_the_passage(engine):
     (hit,) = engine.search("+ahab captain")
     words = [hit.text.split("\n")[n - hit.start_line][s:e] for n, s, e in hit.marks]
     assert sorted(words) == ["Ahab", "captain"]
+
+
+def test_meaning_weight_zero_is_keyword_search(engine):
+    from isis.engine.search import SearchConfig
+
+    for query in ("whale", "whale ship", '"white whale"', "/sq.id/", "whale +ship", "whale -ahab", "+captain"):
+        lexical = [(h.path, h.start_line, h.score) for h in engine.search(query, mode="lexical")]
+        off = [(h.path, h.start_line, h.score) for h in engine.search(query, mode="hybrid", config=SearchConfig(meaning_weight=0))]
+        assert off == lexical, query
+    assert engine.search("whale", mode="hybrid", config=SearchConfig(meaning_weight=0, keyword_weight=0)) == []

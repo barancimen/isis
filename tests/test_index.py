@@ -371,3 +371,55 @@ def test_folders_with_the_same_name_or_inside_each_other(tmp_path):
     nested = Engine([tmp_path / "one", a, tmp_path / "one"], index_dir=tmp_path / "j")  # a repeat, and a folder inside another
     nested.refresh()
     assert sorted(nested.snapshot.file_rows) == ["one/notes/a.md"]
+
+
+def plain_and_embedded(tmp_path, embedded=10):
+    root = tmp_path / "c"
+    (root / "plain").mkdir(parents=True)
+    (root / "plain" / ".no-embed").touch()
+    for i in range(5):
+        (root / "plain" / f"p{i}.md").write_text(f"The coral reef number {i} is plain.\n")
+    for i in range(embedded):
+        (root / f"e{i}.md").write_text(f"Coral and fish number {i} in the sea.\n")
+    e = Engine(root, embedder=HashEmbedder(), index_dir=tmp_path / "i")
+    e.refresh()
+    return e
+
+
+@pytest.mark.parametrize("query", ["coral reef", '"coral reef"', "/coral/", "+coral", "coral +/reef|fish/"])
+def test_with_nothing_to_count_for_them_passages_without_embeddings_are_left_out(tmp_path, query):
+    from isis.engine.search import SearchConfig
+
+    e = plain_and_embedded(tmp_path)
+    plain = lambda hits: [h for h in hits if h.path.startswith("plain/")]
+    hits = e.search(query, mode="hybrid", config=SearchConfig(keyword_weight=0, unembedded_weight=0))
+    assert hits and not plain(hits)
+    assert plain(e.search(query, mode="hybrid", config=SearchConfig(keyword_weight=0.5, unembedded_weight=0)))
+    assert plain(e.search(query, mode="hybrid"))  # the defaults keep them
+    assert plain(e.search(query, mode="lexical"))
+    lexical = e.search(query, mode="lexical", config=SearchConfig(keyword_weight=0, unembedded_weight=0))
+    assert not plain(lexical)  # with or without 'meaning' ticked
+
+
+def test_either_weight_keeps_passages_without_embeddings(tmp_path):
+    from isis.engine.search import SearchConfig
+
+    e = plain_and_embedded(tmp_path)
+    hits = e.search("coral reef", mode="hybrid", config=SearchConfig(keyword_weight=0, unembedded_weight=1))
+    assert any(h.path.startswith("plain/") for h in hits)
+    assert all(h.score > 0 for h in hits)
+
+
+def test_folders_can_be_left_out_of_a_search_or_suggestions(tmp_path):
+    a, b = two_folders(tmp_path)
+    for i in range(30):  # the left-out folder's many matches must not crowd out the other's
+        (b / f"more{i}.md").write_text(f"The sperm whale harpoon ship number {i} sails on.\n")
+    (a / "w.md").write_text("The sperm whale and the harpoon, on a ship.\n")
+    e = Engine([a, b], embedder=HashEmbedder())
+    e.refresh()
+    for mode in ("lexical", "hybrid"):
+        assert {h.path.split("/")[0] for h in e.search("whale harpoon", mode=mode)} == {"notes", "books"}
+        assert {h.path.split("/")[0] for h in e.search("whale harpoon", mode=mode, skip_folders=["books"])} == {"notes"}
+        assert e.search("whale harpoon", mode=mode, skip_folders=["books", "notes"]) == []
+        assert e.search("+harpoon", mode=mode, skip_folders=["books"])[0].path == "notes/w.md"
+    assert len(e.search("whale harpoon", skip_folders=["nonsense"])) == len(e.search("whale harpoon"))

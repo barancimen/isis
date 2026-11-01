@@ -36,7 +36,7 @@ MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 
 KEYWORDS = "Keywords (BM25)"
-FUSION = "Fusion (when 'meaning' is ticked)"
+FUSION = "Fusion"
 
 
 @dataclass
@@ -56,16 +56,19 @@ class SearchConfig:
     )
     keyword_weight: float = tunable(
         1.0, label="Keyword weight", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="Weight of the keyword ranking in the fusion. 0: rank by meaning only.",
+        help="Weight of the keyword ranking in the fusion. 0: rank by meaning only (passages without embeddings "
+        "then count only through Not embedded).",
     )
     meaning_weight: float = tunable(
         1.0, label="Meaning weight", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="Weight of the embedding ranking in the fusion. 0: rank by keywords only.",
+        help="Weight of the embedding ranking in the fusion. 0: rank by keywords only, the same as turning the "
+        "Meaning button off.",
     )
     unembedded_weight: float = tunable(
         1.0, label="Not embedded", group=FUSION, min=0.0, max=3.0, step=0.1,
         help="A passage without embeddings has no meaning rank, so its keyword rank counts in its place, times "
-        "this. 0: keywords only, which buries it below passages that score on both lists.",
+        "this. 0: it only counts through Keyword weight, which buries it below passages that score on both "
+        "lists; with Keyword weight 0 too, it is left out.",
     )
     candidates: int = tunable(
         300, label="Candidates per list", group=FUSION, min=20, max=2000, step=10,
@@ -308,6 +311,7 @@ def search(
     context_lines: int = 2,
     read_lines: Callable[[str], list[str]],
     config: SearchConfig | None = None,
+    skip_folders=(),
 ) -> list[Hit]:
     config = config or SearchConfig()
     if not len(snapshot) or not query.strip():
@@ -316,10 +320,18 @@ def search(
     if not q.term_ids and not q.patterns and not q.filters.requires:
         return []  # only exclusions, or a regex still being typed: nothing to look for
     allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)
+    if skip_folders:
+        allowed &= snapshot.outside_folders(skip_folders)
+    if mode == "hybrid" and config.keyword_weight + config.meaning_weight <= 0:
+        return []  # nothing counts
+    embeddings = mode == "hybrid" and config.meaning_weight > 0 and embedder is not None and snapshot.has_vector.any()
+    stand_in = config.meaning_weight * config.unembedded_weight  # for the meaning rank a passage without embeddings lacks
+    if config.keyword_weight + stand_in <= 0:  # nothing counts for a passage without embeddings: it is out
+        allowed &= snapshot.has_vector
     bm25 = snapshot.bm25_for(config.k1, config.b)
     lexical = np.where(allowed, lexical_scores(snapshot, bm25, q.term_ids, q.weights, q.patterns), 0.0)
 
-    if mode == "hybrid" and q.text.strip() and embedder is not None and snapshot.has_vector.any():
+    if embeddings and q.text.strip():
         semantic = snapshot.vectors @ embedder.embed([q.text], cache=True)[0]
         semantic[~(snapshot.has_vector & allowed)] = -np.inf
         lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, config.candidates, positive=True))}
@@ -328,12 +340,10 @@ def search(
         for ranks, weight in ((lex_rank, config.keyword_weight), (sem_rank, config.meaning_weight)):
             for row, rank in ranks.items():
                 fused[row] = fused.get(row, 0.0) + weight / (config.rrf_k + rank + 1)
-        if config.keyword_weight > 0:  # no embeddings: the keyword rank stands in for the meaning rank
-            stand_in = config.meaning_weight * config.unembedded_weight
-            for row, rank in lex_rank.items():
-                if not snapshot.has_vector[row]:
-                    fused[row] += stand_in / (config.rrf_k + rank + 1)
-        ranked = sorted(fused.items(), key=lambda kv: -kv[1])
+        for row, rank in lex_rank.items():
+            if not snapshot.has_vector[row]:
+                fused[row] += stand_in / (config.rrf_k + rank + 1)
+        ranked = sorted(((row, score) for row, score in fused.items() if score > 0), key=lambda kv: -kv[1])
         why = lambda row: {
             "bm25": float(lexical[row]),
             "cosine": float(semantic[row]),

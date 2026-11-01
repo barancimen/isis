@@ -30,9 +30,10 @@
     <section id="panel-search" class="panel" role="tabpanel">
       <div class="search-row">
         <input id="search-input" spellcheck="false" type="search" placeholder="Search the corpus…" aria-label="Search the corpus">
-        <label class="toggle" title="Also match by meaning (fuses BM25 with embeddings)"><input id="search-hybrid" type="checkbox"> meaning</label>
+        <button id="search-meaning" type="button" class="meaning-btn" aria-pressed="true" title="Also match by meaning (fuses BM25 with embeddings). Off is the same as Parameters › Meaning weight at 0.">Meaning</button>
       </div>
-      <div class="hint">Words rank by BM25. A <code>"phrase"</code> or <code>/regex/</code> ranks like a word; <code>+x</code> requires x and <code>-x</code> excludes it, even with <em>meaning</em> ticked. Ctrl/⌘+K jumps here.</div>
+      <div id="search-folders" class="folder-picks" hidden></div>
+      <div class="hint">Words rank by BM25. A <code>"phrase"</code> or <code>/regex/</code> ranks like a word; <code>+x</code> requires x and <code>-x</code> excludes it, even with <em>Meaning</em> on. Ctrl/⌘+K jumps here.</div>
       <details id="search-tune" class="tune"></details>
       <div id="search-status" class="status-line"></div>
       <div id="search-results" class="results"></div>
@@ -40,6 +41,7 @@
     <section id="panel-related" class="panel" role="tabpanel">
       <details id="related-tune" class="tune"></details>
       <details id="related-feedback" class="tune" hidden></details>
+      <div id="related-folders" class="folder-picks" hidden></div>
       <div id="related-status" class="status-line"></div>
       <div id="related-terms" class="chips" aria-label="Terms taken from the task"></div>
       <form id="related-steer" class="steer-row" hidden>

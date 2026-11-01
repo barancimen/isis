@@ -225,3 +225,20 @@ def test_holdout_recovers_hidden_excerpts(engine):
     assert result.hidden == 3 and 0 <= result.found <= 3 and result.recall == result.found / 3
     table = compare(engine, [task], {"default": RelatedConfig(), "narrow": RelatedConfig(total_slots=8)}, seeds=[0])
     assert [r["config"] for r in table] == ["default", "narrow"] and all(0 <= r["recall"] <= 1 for r in table)
+
+
+def test_folders_can_be_left_out_of_the_suggestions(tmp_path):
+    rng = random.Random(3)
+    a, b = tmp_path / "notes", tmp_path / "books"
+    for root, files in ((a, 4), (b, 12)):  # the left-out folder's many matches must not crowd out the other's
+        root.mkdir()
+        for topic in TOPICS:
+            for f in range(files):
+                (root / f"{topic}-{f}.md").write_text("\n\n".join(paragraph(rng, topic) for _ in range(4)) + "\n")
+    e = Engine([a, b], embedder=HashEmbedder(dim=1024), target_words=0)
+    e.refresh()
+    task = "The whale and the harpoon, the ship and its captain.\n"
+    folders = lambda **k: {h.path.split("/")[0] for h in items(e.related(task, **k))}
+    assert folders() == {"notes", "books"}
+    assert folders(skip_folders=["books"]) == {"notes"}
+    assert not folders(skip_folders=["books", "notes"])

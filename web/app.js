@@ -220,6 +220,7 @@ const state = {
   readerPath: null,
   files: [],
   openFolders: new Set(), // folders open in the Files panel; all are closed at first
+  skipped: { search: loadSkipped("search"), related: loadSkipped("related") }, // corpus folders left out, per panel
   panel: "search",
   relatedStale: true,
   relatedSeq: 0,
@@ -584,7 +585,7 @@ const WHY_LABELS = {
   cosine: (v) => `cosine ${v.toFixed(2)}`,
 };
 
-// For search hits found with "meaning" ticked: where each signal ranked the passage.
+// For search hits found with Meaning on: where each signal ranked the passage.
 function describeSignals(why) {
   if (!("meaning_rank" in why)) return "";
   return [
@@ -631,7 +632,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
 
 const runSearch = debounce(async () => {
   const q = $("#search-input").value;
-  const mode = $("#search-hybrid").checked ? "hybrid" : "lexical";
+  const mode = "hybrid"; // Meaning off is meaning_weight 0, which the server ranks by keywords alone
   const seq = ++state.searchSeq;
   if (!q.trim()) {
     $("#search-status").textContent = "";
@@ -640,10 +641,11 @@ const runSearch = debounce(async () => {
   }
   try {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
-    const result = await api("GET", `/api/search?q=${enc(q)}&mode=${mode}&limit=50${tuned}`);
+    const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
+    const result = await api("GET", `/api/search?q=${enc(q)}&mode=${mode}&limit=50${tuned}${skip}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
-    const how = mode === "hybrid" ? " by keywords and meaning" : "";
+    const how = result.hits.some((hit) => "meaning_rank" in hit.why) ? " by keywords and meaning" : "";
     $("#search-status").textContent = n ? `${n}${n === 50 ? "+" : ""} passages${how} · ${result.ms} ms` : "No matches.";
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
   } catch (error) {
@@ -685,6 +687,7 @@ async function refreshRelated() {
   const result = await api("POST", `/api/tasks/${enc(name)}/related`, {
     text: taskView.state.doc.toString(),
     params: state.params.related,
+    skip_folders: [...state.skipped.related],
   });
   if (seq !== state.relatedSeq || name !== state.task) return;
 
@@ -933,8 +936,35 @@ function paramRow(kind, spec) {
     if (kind === "search") runSearch();
     else requestRelated(250);
   });
-  return h("label", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nDefault: ${formatValue(spec, spec.default)}` },
-    h("span", { class: "tune-label" }, spec.label), input, spec.type === "choice" ? null : output);
+  const toDefault = h("button", {
+    class: "tune-default",
+    type: "button",
+    title: `Back to the default, ${formatValue(spec, spec.default)}`,
+    onclick: () => setTuned(kind, spec.name, spec.default),
+  }, "default");
+  input.id = `tune-${kind}-${spec.name}`;
+  return h("div", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nDefault: ${formatValue(spec, spec.default)}` },
+    h("label", { class: "tune-label", for: input.id }, spec.label), input, spec.type === "choice" ? null : output, toDefault);
+}
+
+// Move a slider as if by hand.
+function setTuned(kind, name, value) {
+  const input = $(`#${kind}-tune [data-name="${name}"] input, #${kind}-tune [data-name="${name}"] select`);
+  input.value = value;
+  input.dispatchEvent(new Event("input"));
+}
+
+// The Meaning button is Meaning weight at 0 or not; turning it back on restores the last value.
+function meaningWeight() {
+  const spec = state.paramSpecs.search.find((s) => s.name === "meaning_weight");
+  return state.params.search.meaning_weight ?? spec?.default ?? 1;
+}
+
+function toggleMeaning() {
+  const now = meaningWeight();
+  if (now > 0) state.meaningWeightBefore = now;
+  const spec = state.paramSpecs.search.find((s) => s.name === "meaning_weight");
+  setTuned("search", "meaning_weight", now > 0 ? 0 : state.meaningWeightBefore ?? spec.default);
 }
 
 function buildTuner(kind) {
@@ -963,6 +993,7 @@ function updateTuner(kind) {
   el.querySelector(".tune-count").textContent = changed ? ` · ${changed} changed` : "";
   for (const row of el.querySelectorAll(".tune-row")) row.classList.toggle("changed", row.dataset.name in state.params[kind]);
   el.querySelector(".tune-python").textContent = pythonSnippet(kind);
+  if (kind === "search") $("#search-meaning").setAttribute("aria-pressed", String(meaningWeight() > 0));
 }
 
 function resetParams(kind) {
@@ -997,6 +1028,40 @@ function showPanel(name) {
 }
 
 // ---------- index status ----------
+
+// When several folders are served, each panel has its own boxes to leave some of them out. They
+// are remembered in this browser, like the parameters.
+function loadSkipped(panel) {
+  try {
+    return new Set(JSON.parse(store.get(`skip-${panel}`) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function renderFolderPicks(folders) {
+  for (const panel of ["search", "related"]) {
+    const skipped = state.skipped[panel];
+    for (const name of [...skipped]) if (!folders.includes(name)) skipped.delete(name);
+    const box = $(`#${panel}-folders`);
+    box.hidden = folders.length < 2;
+    box.replaceChildren(...folders.map((name) =>
+      h("label", { class: "toggle", title: `Include ${name} in ${panel === "search" ? "Search" : "Related"}` },
+        h("input", {
+          type: "checkbox",
+          checked: !skipped.has(name),
+          onchange: (e) => {
+            if (e.target.checked) skipped.delete(name);
+            else skipped.add(name);
+            store.set(`skip-${panel}`, JSON.stringify([...skipped]));
+            if (panel === "search") runSearch();
+            else requestRelated(0);
+          },
+        }),
+        name,
+      )));
+  }
+}
 
 function formatBytes(bytes) {
   if (bytes < 1e6) return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
@@ -1118,7 +1183,7 @@ function bind() {
   $("#conflict-keep").addEventListener("click", () => resolveConflict(true).catch(fail));
   $("#file-filter").addEventListener("input", debounce(renderFiles, 120));
   $("#search-input").addEventListener("input", runSearch);
-  $("#search-hybrid").addEventListener("change", runSearch);
+  $("#search-meaning").addEventListener("click", toggleMeaning);
   $("#related-steer").addEventListener("submit", (e) => saveSteer(e).catch(fail));
   $("#steer-input").addEventListener("input", () => ($("#steer-error").hidden = true));
   $("#steer-input").addEventListener("keydown", (e) => {
@@ -1148,6 +1213,14 @@ function bind() {
 async function init() {
   bind();
   await loadParamSpecs();
+  const status = await api("GET", "/api/status");
+  renderFolderPicks(status.folders);
+  if (!status.model) {
+    const button = $("#search-meaning");
+    button.disabled = true;
+    button.setAttribute("aria-pressed", "false");
+    button.title = "Running without a model: keywords only.";
+  }
   showPanel(store.get("panel") || "search");
   await Promise.all([loadTasks(), loadFiles()]);
   const last = store.get("task");
