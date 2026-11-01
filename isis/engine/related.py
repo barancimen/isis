@@ -36,6 +36,7 @@ import math
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from typing import Callable
 
 import numpy as np
@@ -46,6 +47,10 @@ from .params import tunable
 from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit, split_query,
                      steering, top_rows)
 from .text import tokenize, tokenize_with_surface
+
+MAX_EXCERPT_MATCHES = 50_000  # paragraphs whose excerpt check is remembered
+MAX_THEME_SCORES = 48  # themes whose scores are remembered: two arrays of the corpus's size each
+THEME_BATCH = 32  # paragraphs scored at a time, which bounds the memory a large theme needs
 
 LANES = ("core", "hidden", "bridges", "gaps")
 LANE_INFO = {
@@ -423,26 +428,70 @@ def _norm(s: str) -> str:
     return " ".join(s.lower().split())
 
 
-def find_excerpts(snapshot: Snapshot, units: list[Unit], cos: np.ndarray | None = None) -> None:
+def find_excerpts(snapshot: Snapshot, units: list[Unit], unit_vecs: np.ndarray | None = None) -> None:
     """Mark units copied from the corpus, and remember which passages they came from.
 
     A unit is an excerpt when its text appears inside a corpus passage (or contains one). The
-    places to look are the unit's best lexical matches; with `cos`, the closest passages in
-    meaning of the units not matched yet (the second pass, once the units are embedded)."""
+    places to look are the unit's best lexical matches; with `unit_vecs`, the closest passages in
+    meaning of the units not matched yet (the second pass, once the units are embedded). Answers
+    are kept per text for as long as the index stays the same, so a long task only pays for the
+    paragraphs that changed."""
     for j, unit in enumerate(units):
         needle = _norm(unit.text)
-        if len(needle) < 20 or (cos is not None and unit.excerpt):
+        if len(needle) < 20 or (unit_vecs is not None and unit.excerpt):
             continue
-        if cos is None:
-            ids = [i for t in set(tokenize(unit.text)) if (i := snapshot.term_id(t)) is not None]
-            rows = top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True)
-        else:
-            rows = top_rows(cos[:, j], 5)
-        for row in dict.fromkeys(int(r) for r in rows):
-            hay = _norm(snapshot.passages[row].text)
-            if row not in unit.source_rows and (needle in hay or (len(hay) >= 20 and hay in needle)):
+
+        def matches():
+            if unit_vecs is None:
+                ids = [i for t in set(tokenize(unit.text)) if (i := snapshot.term_id(t)) is not None]
+                rows = top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True)
+            else:
+                scores = snapshot.vectors @ unit_vecs[j]
+                scores[~snapshot.has_vector] = -np.inf
+                rows = top_rows(scores, 5)
+            found = []
+            for row in dict.fromkeys(int(r) for r in rows):
+                hay = _norm(snapshot.passages[row].text)
+                if needle in hay or (len(hay) >= 20 and hay in needle):
+                    found.append(row)
+            return found
+
+        key = (needle,) if unit_vecs is None else (needle, unit.heading, unit.text)
+        for row in snapshot._cached(snapshot.excerpt_matches, key, MAX_EXCERPT_MATCHES, matches):
+            if row not in unit.source_rows:
                 unit.excerpt = True
                 unit.source_rows.append(row)
+
+
+class ExcerptMatcher:
+    """Whether a passage is inside a collected excerpt or holds one, without comparing it to each
+    of them: the same answer as any(e in hay or hay in e for e in excerpts), for normalised text.
+    An excerpt can start and end mid-word, but the words inside it are whole: it can only be in a
+    passage that has its longest inner word, so only those passages compare it."""
+
+    def __init__(self, excerpts: list[str]):
+        self.joined = "\0".join(excerpts)
+        self.by_word: dict[str, list[str]] = defaultdict(list)
+        self.no_inner_word: list[str] = []
+        for e in excerpts:
+            inner = e.split(" ")[1:-1]
+            if inner:
+                self.by_word[max(inner, key=len)].append(e)
+            else:
+                self.no_inner_word.append(e)
+
+    def __call__(self, hay: str) -> bool:
+        if not self.joined:
+            return False
+        if hay in self.joined:
+            return True
+        if any(e in hay for e in self.no_inner_word):
+            return True
+        for word in set(hay.split(" ")):
+            for e in self.by_word.get(word, ()):
+                if e in hay:
+                    return True
+        return False
 
 
 def same_passage(snapshot: Snapshot, rows, text: str) -> int | None:
@@ -537,12 +586,18 @@ def zscores(snapshot: Snapshot, vecs: np.ndarray) -> tuple[np.ndarray, np.ndarra
     without embeddings get -inf."""
     cos = snapshot.vectors @ vecs.T
     has = snapshot.has_vector
-    median = np.median(cos[has], axis=0)
-    spread = 1.4826 * np.median(np.abs(cos[has] - median), axis=0) + 1e-6
+    typical = cos[snapshot.typical_rows()]
+    median = np.median(typical, axis=0)
+    spread = 1.4826 * np.median(np.abs(typical - median), axis=0) + 1e-6
     z = (cos - median) / spread
     z[~has] = -np.inf
     cos[~has] = -np.inf
     return cos, z
+
+
+@lru_cache(maxsize=50_000)
+def _terms_of(text: str) -> tuple:
+    return tuple(tokenize_with_surface(text))
 
 
 def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: RelatedConfig,
@@ -554,7 +609,7 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
     tf: dict[str, float] = defaultdict(float)
     surfaces: dict[str, Counter] = defaultdict(Counter)
     for u in units:
-        for term, surface in tokenize_with_surface(u.text):
+        for term, surface in _terms_of(u.text):
             tf[term] += u.weight
             surfaces[term][surface] += 1
     for heading in headings:
@@ -594,6 +649,24 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
     chips = [TermChip(t, label(t), s / best, boosted=t in boosted) for s, t in top]
     chips += [TermChip(t, label(t), 0.0, ignored=True) for t in prefs.ignored]
     return chips
+
+
+def theme_scores(snapshot: Snapshot, theme_units: list[Unit], vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """For one theme, every passage's best z-score and best cosine against its paragraphs. Kept
+    for as long as the theme's text and the index stay the same: typing changes one theme, and
+    the table of all passages against all paragraphs would not fit in memory for a large corpus."""
+
+    def score():
+        best_z, best_cos = None, None
+        for start in range(0, len(vecs), THEME_BATCH):
+            cos, z = zscores(snapshot, vecs[start : start + THEME_BATCH])
+            z, cos = z.max(1), cos.max(1)
+            best_z = z if best_z is None else np.maximum(best_z, z)
+            best_cos = cos if best_cos is None else np.maximum(best_cos, cos)
+        return best_z, best_cos
+
+    key = tuple(sorted(f"{u.heading}\0{u.text}" for u in theme_units))
+    return snapshot._cached(snapshot.theme_scores, key, MAX_THEME_SCORES, score)
 
 
 def ranks(scores: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -707,19 +780,18 @@ def related(
 
     # 1-2: units and the semantic signal
     semantic = embedder is not None and snapshot.has_vector.any()
-    unit_vecs = cos = z = None
+    unit_vecs = None
     find_excerpts(snapshot, units)
     if semantic:
         texts = [u.heading + "\n" + u.text if u.heading else u.text for u in units]
         unit_vecs = embed_reusing(snapshot, embedder, texts, [same_passage(snapshot, u.source_rows, u.text) for u in units])
-        cos, z = zscores(snapshot, unit_vecs)
-        find_excerpts(snapshot, units, cos)
+        find_excerpts(snapshot, units, unit_vecs)
     weight_units(units, cursor_line, config)
     themes = assign_themes(units, unit_vecs, config, snapshot)
     lap("units")
 
     weights = np.array([u.weight for u in units], np.float32)
-    theme_z = second = avoided = None
+    theme_z = second = avoided = closest = None
     liked = [d for d in prefs.liked if d.get("text")] if config.like_weight > 0 else []
     if semantic:
         like_vecs = embed_reusing(
@@ -735,8 +807,9 @@ def related(
                 document = document / max(np.linalg.norm(document), 1e-9)
             _, z_doc = zscores(snapshot, document[None, :])
             sem_any = sem_w = z_doc[:, 0]
-            best_unit = np.where(np.isfinite(cos[:, 0]), cos.argmax(1), 0)  # closest paragraph, for display
+            best_unit = None  # worked out for the passages shown
         else:
+            _, z = zscores(snapshot, unit_vecs)
             sem_any = z.max(1)
             sem_w = (z * weights).max(1)
             best_unit = (z * weights).argmax(1)
@@ -756,10 +829,15 @@ def related(
             avoid = [i for i, d in enumerate(dismissed) if d.get("avoid")]
             if avoid:  # anti-queries: everything clearly like them is out
                 avoided = z_neg[:, avoid].max(1) >= config.avoid_z
+        theme_of = np.array([u.theme for u in units])
+        per_theme = [
+            theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t])
+            for t in range(len(themes))
+        ]
+        closest = np.max([best_cos for _, best_cos in per_theme], axis=0)  # any paragraph's best cosine
         if len(themes) >= 2:  # each passage's z-score per theme, and its second-best theme's
-            theme_of = np.array([u.theme for u in units])
-            theme_z = np.stack([z[:, theme_of == t].max(1) for t in range(len(themes))], axis=1)
-            second = np.sort(theme_z, axis=1)[:, -2]
+            theme_z = np.stack([best_z for best_z, _ in per_theme], axis=1)
+            second = np.partition(theme_z, -2, axis=1)[:, -2]
     else:
         sem_any = sem_w = np.full(n, -np.inf)
         best_unit = np.zeros(n, np.int64)
@@ -798,7 +876,7 @@ def related(
     if second is not None:
         relevant |= has & (second >= config.bridge_z)
     if semantic:
-        relevant &= ~(has & (np.max(np.where(has[:, None], cos, -1.0), axis=1) >= config.duplicate_cos))
+        relevant &= ~(has & (closest >= config.duplicate_cos))
 
     candidates = set(top_rows(lex, config.candidates, positive=True)) | set(top_rows(sem_w, config.candidates))
     if second is not None:
@@ -806,6 +884,7 @@ def related(
     collected = {r for u in units for r in u.source_rows}
     dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
     excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
+    near_excerpt = ExcerptMatcher(excerpts)
 
     rows = np.array(sorted(map(int, candidates)), np.int64)
     rows = rows[relevant[rows]]
@@ -821,7 +900,7 @@ def related(
         p = snapshot.passages[row]
         if dismissed_keys or excerpts:
             hay = _norm(p.text)
-            if (p.path, hay) in dismissed_keys or any(e in hay or hay in e for e in excerpts):
+            if (p.path, hay) in dismissed_keys or near_excerpt(hay):
                 continue
         gated.append(row)
     lap("gate")
@@ -853,7 +932,8 @@ def related(
         else:
             strong = theme_z >= config.bridge_z
             size = strong.sum(0)
-            both = strong.T.astype(np.int32) @ strong.astype(np.int32)
+            as_float = strong.astype(np.float32)  # exact counts below 16 million passages, and much faster
+            both = as_float.T @ as_float
             overlap = both / np.maximum(np.minimum.outer(size, size), 1)  # how often two themes meet
             need = np.array([1 / (1 + t.excerpts) for t in themes])
 
@@ -910,7 +990,10 @@ def related(
                 lines_cache[path] = None
         if not lines_cache[path]:
             return None
-        u = units[int(best_unit[row])]
+        if best_unit is None:  # the closest paragraph, for display
+            u = units[int(np.argmax(snapshot.vectors[row] @ unit_vecs.T))]
+        else:
+            u = units[int(best_unit[row])]
         why = {
             "lane_score": round(lane_scores[lane][row], 4),
             "mmr": round(value, 4),

@@ -314,3 +314,64 @@ def test_heading_words_count_as_plain_text(engine):
     as_heading = weights("# Harpoon\nThe whale and the ship.\n\n# Harpoon\nThe captain and the sail.\n\n# Harpoon\n")
     as_text = weights("Harpoon\n\nThe whale and the ship.\n\nHarpoon\n\nThe captain and the sail.\n\nHarpoon\n")
     assert as_heading == as_text  # every one counts, even with nothing under it
+
+
+def test_excerpt_matcher_agrees_with_comparing_every_excerpt():
+    from isis.engine.related import ExcerptMatcher
+
+    rng = random.Random(9)
+    words = "the whale sea ship sail white captain ocean deep harpoon".split()
+    text = lambda n: " ".join(rng.choice(words) for _ in range(n))
+    excerpts = [e for e in (text(rng.randint(4, 12)) for _ in range(40)) if len(e) >= 20]
+    excerpts += [e[2:-2] for e in excerpts[:10]]  # selections that start and end mid-word
+    excerpts += ["harpoonharpoon whalewhalewhale", "onewordwithoutanyspacesatall"]  # no word inside them
+    match = ExcerptMatcher(excerpts)
+    hays = [text(rng.randint(1, 30)) for _ in range(800)] + excerpts + [e[3:15] for e in excerpts] + ["x " + e[1:] + " y" for e in excerpts] + ["ab" + e + "cd" for e in excerpts]
+    answers = [any(e in hay or hay in e for e in excerpts) for hay in hays]
+    assert [match(hay) for hay in hays] == answers
+    assert any(answers) and not all(answers)
+    assert not ExcerptMatcher([])("anything")
+
+
+def test_a_refresh_only_rescores_the_theme_that_changed(engine, monkeypatch):
+    import isis.engine.related as R
+
+    sea = " ".join(SEA_TASK) + "."
+    birds = " ".join(BIRD_TASK) + "."
+    task = f"{sea}\n\n{birds}\n\n{birds} Nest.\n"
+    engine.related(task)  # the themes are now remembered
+    scored, searched = [], []
+    real_scores, real_bm25 = R.zscores, engine.snapshot.bm25.scores
+    monkeypatch.setattr(R, "zscores", lambda snap, vecs: scored.append(len(vecs)) or real_scores(snap, vecs))
+    monkeypatch.setattr(engine.snapshot.bm25, "scores", lambda *a: searched.append(1) or real_bm25(*a))
+    engine.related(task)
+    assert scored == [1]  # the document vector, and no paragraph
+    assert not searched  # no paragraph's excerpt check either
+    scored.clear()
+    engine.related(task + "\nGranite fossil volcano basalt lava.\n")
+    assert sum(scored) <= 3  # the document, and the new paragraph's own theme
+    theme_counts = [len(k) for k in engine.snapshot.theme_scores]
+    assert len(theme_counts) >= 2
+
+
+def test_large_corpora_estimate_typical_similarity_from_a_fixed_sample(engine, monkeypatch):
+    import isis.engine.index as I
+    from isis.engine.related import zscores
+
+    snap = engine.snapshot
+    rows = snap.typical_rows()
+    assert len(rows) == int(snap.has_vector.sum())  # small corpus: all of it
+    vec = snap.vectors[:1]
+    full = zscores(snap, vec)[1]
+
+    monkeypatch.setattr(I, "SAMPLE_ABOVE", 20)
+    monkeypatch.setattr(I, "TYPICAL_SAMPLE", 50)
+    snap._typical.clear()
+    rows = snap.typical_rows()
+    assert len(rows) == 50 and list(rows) == sorted(set(rows))
+    snap._typical.clear()
+    assert list(snap.typical_rows()) == list(rows)  # the same sample each time
+    sampled = zscores(snap, vec)[1]
+    assert sampled.shape == full.shape and not np.array_equal(sampled, full)
+    assert np.corrcoef(sampled[:, 0], full[:, 0])[0, 1] > 0.99
+    snap._typical.clear()

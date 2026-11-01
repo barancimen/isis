@@ -155,7 +155,7 @@ def signals(engine, args, docs, qrels):
         texts = [u.heading + "\n" + u.text if u.heading else u.text for u in units]
         vecs = embed_reusing(snap, engine.embedder, texts, [same_passage(snap, u.source_rows, u.text) for u in units])
         cos, z = zscores(snap, vecs)
-        find_excerpts(snap, units, cos)
+        find_excerpts(snap, units, vecs)
         weight_units(units, None, cfg)
         assign_themes(units, vecs, cfg, snap)
         sizes = np.array([len(u.text.split()) * u.weight for u in units], np.float32)

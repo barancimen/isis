@@ -67,6 +67,8 @@ EMBED_GROUP = 256  # passages per embedding call while indexing
 PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
 SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
 REPORT_EVERY = 10.0  # seconds between progress messages during a long embedding run
+SAMPLE_ABOVE = 50_000  # embedded passages; above this, "typical" similarity comes from a sample
+TYPICAL_SAMPLE = 20_000
 
 
 @dataclass
@@ -95,6 +97,9 @@ class Snapshot:
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
     _bm25_variants: dict = field(default_factory=dict, repr=False)
     _pattern_counts: dict = field(default_factory=dict, repr=False)
+    excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
+    theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
+    _typical: dict = field(default_factory=dict, repr=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # requests share snapshots
 
     def __len__(self) -> int:
@@ -126,6 +131,18 @@ class Snapshot:
                     cache.pop(next(iter(cache)))
                 cache[key] = value
         return value
+
+    def typical_rows(self) -> np.ndarray:
+        """The passages that "typical" similarity is worked out from: all the embedded ones, or
+        in a large corpus a fixed sample, which estimates a median about as well for far less."""
+
+        def choose():
+            rows = np.flatnonzero(self.has_vector)
+            if len(rows) <= SAMPLE_ABOVE:
+                return rows
+            return np.sort(np.random.default_rng(0).choice(rows, TYPICAL_SAMPLE, replace=False))
+
+        return self._cached(self._typical, "rows", 1, choose)
 
     def outside_folders(self, skip) -> np.ndarray:
         """Which passages are not in these corpus folders (the first part of a path)."""

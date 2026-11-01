@@ -199,6 +199,12 @@ that keeps growing. Five long tasks were added and about 230 more suggestions ju
 - **Overall**, on the same 968 judgments: utility 7.68 → 8.21 (short 6.86 → 7.18, long 10.0 →
   11.1), precision 76% → 77%, gaps lane 89% → 93% precise. Search is unchanged.
 
+### Speed on long tasks and large corpora (2026-11)
+
+A refresh used to score every passage against every paragraph. It now keeps the excerpt check per paragraph and the scores per theme, so typing only recomputes what changed, and all 57 result sets compared stayed the same (same passages and order; scores within 0.1%). On a corpus simulated by repeating the sample 12 times (59,412 passages) with a 410-paragraph task, a refresh after an edit went from 15.3 s to 0.86 s on one slow core. The first refresh is still 5.8 s.
+
+Above 50,000 passages, "typical" similarity comes from a fixed sample of 20,000. Smaller corpora, including everything calibrated here, are unaffected. Simulated with samples of 500 to 2,000 on the sample corpus, 95-98% of suggestions stayed the same, and utility ranged from 7.58 to 7.95 against 7.87, with 1-3% of suggestions ungraded. A sample of 20,000 could not be tested on a corpus this small, nor on real data of that size.
+
 ### Themes come from the content alone (2026-11)
 
 Themes used to be the task's headings when it had two or more, and clusters of paragraphs otherwise. One heading pasted in with an excerpt could then decide them, so now they are always clusters. On the same 991 judgments, utility went from 8.21 to 7.87: long tasks gained (11.1 to 11.4), short ones lost (7.18 to 6.61), and the 5 tasks with headings lost most (9.9 to 8.4). Those 5 are the best case for headings, since their on-topic headings were written along with the tasks. Clustering from two paragraphs up, rather than three, scored about the same (7.87, 7.82) and lets a short task about two subjects have bridges.

@@ -58,7 +58,7 @@ The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and
 
 1. **Units.** The task is split into paragraphs. Paragraphs copied from the corpus are recognised as collected excerpts; a whole collected passage reuses its embedding from the index, so a long task is quick to refresh. Clusters of similar paragraphs become themes; headings play no part in them.
 2. **Signals.** The whole document is the query. Every corpus passage is scored two ways:
-   - its *robust z-score* of embedding similarity to the document vector (the length-weighted mean of the paragraph embeddings), meaning how far it stands out from the typical passage;
+   - its *robust z-score* of embedding similarity to the document vector (the length-weighted mean of the paragraph embeddings), meaning how far it stands out from the typical passage (above 50,000 passages, "typical" is estimated from a fixed sample of 20,000);
    - BM25 for the document's ~30 most distinctive terms.
 
    With `RelatedConfig(query="paragraphs")`, each paragraph is a query of its own instead. A passage then scores by its best match, and `cursor_boost` can weight the paragraph at the cursor. Use this when a document covers unrelated topics and you want strong matches to any one of them, not to their overlap.

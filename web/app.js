@@ -768,7 +768,31 @@ function renderRelatedEmpty(message) {
   $("#related-steer").hidden = true;
 }
 
-async function refreshRelated() {
+// One refresh at a time: on a long task they can take longer than a pause in typing, and the server
+// can't stop one it has started. A request during a refresh is served once that one ends, and any
+// number of them become a single refresh of the latest text.
+let relatedRunning = null;
+let relatedAgain = false;
+
+function refreshRelated() {
+  if (relatedRunning) {
+    relatedAgain = true;
+    return relatedRunning;
+  }
+  relatedRunning = (async () => {
+    try {
+      do {
+        relatedAgain = false;
+        await fetchRelated();
+      } while (relatedAgain);
+    } finally {
+      relatedRunning = null;
+    }
+  })();
+  return relatedRunning;
+}
+
+async function fetchRelated() {
   if (!state.task) {
     renderRelatedEmpty("Create a task to see related passages.");
     return;
