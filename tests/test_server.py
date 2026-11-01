@@ -1,5 +1,6 @@
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -268,3 +269,42 @@ def test_a_task_that_is_not_utf8_gives_a_clear_error(client, corpus):
 def test_no_pages_that_load_from_a_cdn(client):
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert client.get(path).status_code == 404
+
+
+def wait_until(check, seconds=10):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if check():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_the_watcher_follows_links_and_moved_folders(engine, corpus, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (corpus / "old-link").symlink_to(outside)
+    engine.refresh()
+    with TestClient(create_app(engine, TaskStore(corpus / "_tasks"), background=False, watch=True)):
+        time.sleep(1)
+        (outside / "a.md").write_text("Quokkaword, in a linked folder.\n")
+        assert wait_until(lambda: engine.search("quokkaword"))
+
+        added = tmp_path / "added"
+        added.mkdir()
+        (added / "b.md").write_text("Raccoonword, behind a link made while running.\n")
+        (corpus / "new-link").symlink_to(added)
+        assert wait_until(lambda: engine.search("raccoonword"))
+        time.sleep(1.5)  # the watch restarts to cover the new link
+        (added / "c.md").write_text("Salamanderword, added to that folder afterwards.\n")
+        assert wait_until(lambda: engine.search("salamanderword"))
+
+        (corpus / "new-link").unlink()
+        assert wait_until(lambda: not engine.search("raccoonword"))
+
+        moved = tmp_path / "moved" / "deep"
+        moved.mkdir(parents=True)
+        (moved / "d.md").write_text("Tapirword, in a folder moved into the corpus.\n")
+        (tmp_path / "moved").rename(corpus / "moved")
+        assert wait_until(lambda: engine.search("tapirword"))
+

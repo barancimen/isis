@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
-from ..engine.index import MARKDOWN, Engine
+from ..engine.index import MARKDOWN, Engine, configure_logging
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
 from ..engine.search import QueryError, SearchConfig
@@ -92,9 +92,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     reading the corpus or overwriting tasks through the browser."""
     def refresh() -> None:
         try:
-            stats = engine.refresh()
-            if stats["changed"] or stats["removed"] or stats["embedded"]:
-                log.info("index updated: %s", stats)
+            engine.refresh()  # it reports what changed
         except Exception:
             log.exception("index refresh failed")
 
@@ -109,10 +107,20 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
                 hidden = any(part.startswith(".") for part in p.relative_to(engine.root).parts)
             except ValueError:
                 return False
-            return p.suffix.lower() in MARKDOWN and tasks_dir not in p.parents and not hidden
+            if hidden or p == tasks_dir or tasks_dir in p.parents:
+                return False
+            # Besides markdown files: folders and links, which may bring many files at once (a
+            # moved folder is one event), and deleted paths, which may have been either.
+            return p.suffix.lower() in MARKDOWN or not p.is_file()
 
-        for _ in watch_files(engine.root, watch_filter=relevant, stop_event=stop, debounce=800):
-            refresh()
+        while not stop.is_set():  # a watch covers the linked folders that exist when it starts
+            links = engine.links
+            for _ in watch_files(engine.root, watch_filter=relevant, stop_event=stop, debounce=800):
+                refresh()
+                if engine.links != links:
+                    break
+            else:
+                return
 
     @asynccontextmanager
     async def lifespan(_):
@@ -269,7 +277,7 @@ def app_from_env() -> FastAPI:
     ISIS_HOSTS (comma-separated Host names to answer, or "*"; default: this machine only)."""
     from ..engine.semantic import Embedder
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    configure_logging()
     corpus = Path(os.environ["ISIS_CORPUS"])
     tasks_dir = Path(os.environ.get("ISIS_TASKS") or corpus / "_tasks")
     model = os.environ.get("ISIS_MODEL", "")

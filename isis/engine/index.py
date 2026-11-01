@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import stat as statmode
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,11 +25,41 @@ from .text import tokenize
 
 log = logging.getLogger(__name__)
 
+
+def configure_logging() -> None:
+    """What `isis` prints: its own progress messages, and only warnings from other libraries."""
+    logging.basicConfig(level=logging.WARNING, format="isis: %(message)s")
+    logging.getLogger("isis").setLevel(logging.INFO)
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n:,} {noun}" + ("" if n == 1 else "s")
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.1f} s" if seconds < 10 else f"{seconds:.0f} s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
+def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
+    """'100 new files, 2 changed, 1 removed', naming the files when there are only a few."""
+    parts = []
+    for paths, label in ((new, _count(len(new), "new file")), (modified, f"{len(modified):,} changed"),
+                         (removed, f"{len(removed):,} removed")):
+        if paths:
+            names = f" ({', '.join(sorted(paths))})" if len(new) + len(modified) + len(removed) <= 5 else ""
+            parts.append(label + names)
+    return ", ".join(parts)
+
 INDEX_VERSION = 2
 MARKDOWN = (".md", ".markdown")
 EMBED_GROUP = 256  # passages per embedding call while indexing
 PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
 SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
+REPORT_EVERY = 10.0  # seconds between progress messages during a long embedding run
 
 
 @dataclass
@@ -131,6 +162,9 @@ class Engine:
         # The model the cached vectors came from. Without a model they are kept as they are, so a
         # keyword-only run never throws away embeddings that took hours to compute.
         self._vectors_from = getattr(embedder, "name", None)
+        self.links: set[str] = set()  # corpus-relative paths of the folder links the last scan met
+        self._said: set[str] = set()  # one-time messages about links, so rescans stay quiet
+        self._refreshed = False
         self._load()
         self._publish()
 
@@ -141,28 +175,111 @@ class Engine:
     # ---- files ----
 
     def resolve(self, path: str) -> Path:
-        """The file for a corpus-relative path. Refuses anything outside the corpus."""
-        full = (self.root / path).resolve()
-        if self.root not in full.parents or full.suffix.lower() not in MARKDOWN:
+        """The file for a corpus-relative path. Refuses a path that climbs out of the corpus.
+        Links inside the corpus are followed wherever they point (that is how a folder from
+        elsewhere joins it), as long as what they reach is markdown too."""
+        rel = Path(path)
+        full = self.root / rel
+        if (rel.is_absolute() or ".." in rel.parts or full.suffix.lower() not in MARKDOWN
+                or full.resolve().suffix.lower() not in MARKDOWN):
             raise ValueError(f"not a markdown file in the corpus: {path}")
         return full
 
     def read_lines(self, path: str) -> list[str]:
         return split_lines(self.resolve(path).read_text(encoding="utf-8", errors="replace"))
 
+    def _say_once(self, level: int, message: str) -> None:
+        if message not in self._said:
+            self._said.add(message)
+            log.log(level, message)
+
     def _scan(self) -> dict[str, os.stat_result]:
-        found = {}
-        for dirpath, dirnames, filenames in os.walk(self.root):
-            here = Path(dirpath)
-            dirnames[:] = [
-                d for d in dirnames if not d.startswith(".") and (here / d).resolve() not in self.exclude
-            ]
-            for name in filenames:
-                if name.lower().endswith(MARKDOWN) and not name.startswith("."):
+        """Every markdown file under the corpus, following symlinks. The real folders come first and
+        links after them, and each folder or file is taken once (by device and inode), so a link
+        loop ends and something reachable both ways keeps its real path."""
+        found: dict[str, os.stat_result] = {}
+        folders, files = set(), set()
+        folder_links: list[Path] = []
+        file_links: list[Path] = []
+
+        def excluded(path: Path) -> bool:
+            real = path.resolve()
+            return real in self.exclude or any(parent in self.exclude for parent in real.parents)
+
+        def first_visit(path: Path) -> bool:
+            st = path.stat()
+            key = (st.st_dev, st.st_ino)
+            if key in folders:
+                return False
+            folders.add(key)
+            return True
+
+        def walk(top: Path) -> None:
+            for dirpath, dirnames, filenames in os.walk(top):
+                here = Path(dirpath)
+                keep = []
+                for d in sorted(dirnames):
+                    path = here / d
+                    if d.startswith(".") or (path.resolve() in self.exclude):
+                        continue
                     try:
-                        found[(here / name).relative_to(self.root).as_posix()] = (here / name).stat()
-                    except OSError:
+                        if path.is_symlink():
+                            folder_links.append(path)
+                        elif first_visit(path):
+                            keep.append(d)
+                    except OSError:  # deleted since os.walk listed it
                         pass
+                dirnames[:] = keep
+                for name in filenames:
+                    path = here / name
+                    if name.startswith("."):
+                        continue
+                    if not name.lower().endswith(MARKDOWN):
+                        if path.is_symlink() and not path.exists():  # a linked folder that has gone away
+                            rel = path.relative_to(self.root).as_posix()
+                            self._say_once(logging.WARNING, f"link {rel} skipped: its target doesn't exist")
+                        continue
+                    try:
+                        st = path.lstat()
+                    except OSError:
+                        continue
+                    if statmode.S_ISLNK(st.st_mode):
+                        file_links.append(path)
+                    else:
+                        found[path.relative_to(self.root).as_posix()] = st
+                        files.add((st.st_dev, st.st_ino))
+
+        first_visit(self.root)
+        walk(self.root)
+        links = set()
+        while folder_links:  # walking a linked folder can find more links
+            link = folder_links.pop(0)
+            rel = link.relative_to(self.root).as_posix()
+            links.add(rel)
+            try:
+                if excluded(link):
+                    continue
+                if not first_visit(link):
+                    self._say_once(logging.INFO, f"link {rel} skipped: its folder is already indexed")
+                    continue
+            except OSError as e:
+                self._say_once(logging.WARNING, f"link {rel} skipped: {e.strerror or e}")
+                continue
+            self._say_once(logging.INFO, f"following link {rel} -> {link.resolve()}")
+            walk(link)
+        self.links = links
+        for link in file_links:
+            rel = link.relative_to(self.root).as_posix()
+            try:
+                st = link.stat()
+            except OSError as e:
+                self._say_once(logging.WARNING, f"link {rel} skipped: {e.strerror or e}")
+                continue
+            if link.resolve().suffix.lower() not in MARKDOWN or excluded(link):
+                self._say_once(logging.INFO, f"link {rel} skipped: it doesn't point to a markdown file of the corpus")
+            elif (st.st_dev, st.st_ino) not in files:
+                found[rel] = st
+                files.add((st.st_dev, st.st_ino))
         return found
 
     def _read(self, path: str, stat: os.stat_result) -> FileRecord:
@@ -185,7 +302,11 @@ class Engine:
 
     def _refresh(self, on_progress) -> dict:
         started = time.perf_counter()
+        first = not self._refreshed
+        self._refreshed = True
         self._set_state("scanning", on_progress)
+        if first:
+            log.info("scanning %s", self.root)
         found = self._scan()
         removed = [p for p in self.files if p not in found]
         changed = [
@@ -193,6 +314,14 @@ class Engine:
             for p, st in found.items()
             if (r := self.files.get(p)) is None or (r.mtime_ns, r.size) != (st.st_mtime_ns, st.st_size)
         ]
+        new = [p for p in changed if p not in self.files]
+        modified = [p for p in changed if p in self.files]
+        if changed or removed:
+            total = f"{_count(len(found), 'markdown file')}: " if first else ""
+            log.info("%s%s", total, _changes(new, modified, removed))
+        elif first:
+            log.info("%s, no changes since the last run" if found else "no markdown files found in %s",
+                     _count(len(found), "markdown file") if found else self.root)
         for path in removed:
             del self.files[path]
         for path in changed:
@@ -215,8 +344,13 @@ class Engine:
             self._publish()
             self._save()
         self._set_state("ready", on_progress)
+        if first or removed or changed or embedded:
+            meaning = "" if self.embedder is not None else ", keywords only"
+            log.info("index ready: %s, %s%s (%s)", _count(len(self.files), "file"), _count(len(self.snapshot), "passage"),
+                     meaning, _duration(time.perf_counter() - started))
         return {
             "files": len(self.files),
+            "new": len(new),
             "changed": len(changed),
             "removed": len(removed),
             "embedded": embedded,
@@ -231,8 +365,11 @@ class Engine:
         self.status.embedded, self.status.to_embed = 0, sum(map(len, todo.values()))
         if self.status.to_embed:
             self._set_state("embedding", on_progress)
+            kept = sum(len(r.passages) for r in pending) - self.status.to_embed
+            log.info("embedding %s%s", _count(self.status.to_embed, "passage"),
+                     f" ({kept:,} unchanged kept their embeddings)" if kept else "")
 
-        last_publish = last_save = time.monotonic()
+        begun = last_report = last_publish = last_save = time.monotonic()
         group: list[FileRecord] = []
 
         def flush():
@@ -253,6 +390,12 @@ class Engine:
             if on_progress:
                 on_progress(self.status)
             now = time.monotonic()
+            if now - last_report > REPORT_EVERY and self.status.embedded:
+                last_report = now
+                done, total = self.status.embedded, self.status.to_embed
+                left = (now - begun) / done * (total - done)
+                log.info("embedded %s / %s passages (%d%%), about %s left", f"{done:,}", f"{total:,}", 100 * done / total,
+                         _duration(left))
             if now - last_publish > PUBLISH_EVERY:  # let searches use what is embedded so far
                 self._publish()
                 last_publish = now
@@ -377,9 +520,12 @@ class Engine:
             return
         self.vocab = vocab
         self.files = files
+        log.info("loaded the index cache: %s, %s", _count(len(files), "file"),
+                 _count(sum(len(r.passages) for r in files.values()), "passage"))
         if self.embedder is None:
             self._vectors_from = saved
         elif saved != self.embedder.name:  # a different model: keep the text, re-embed
+            log.info("the embedding model changed: every passage will be embedded again")
             for record in self.files.values():
                 record.vectors = None
 

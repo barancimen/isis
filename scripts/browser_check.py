@@ -91,6 +91,8 @@ def main() -> None:
         location = page.locator("#search-results .hit .hit-loc").first.inner_text()
         opens_as_shown(page, page.locator("#search-results .hit").first)
         expect(page.locator("#reader-path")).to_have_text(location.rsplit(":", 1)[0])
+        page.fill("#search-input", "")  # or the old results could be swapped out under the clicks below
+        expect(page.locator("#search-results .hit")).to_have_count(0)
         page.fill("#search-input", "whale ship")  # long passages that start and end inside paragraphs
         expect(page.locator("#search-results .hit").nth(5)).to_be_visible(timeout=10000)
         for i in range(6):

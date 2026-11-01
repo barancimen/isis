@@ -19,7 +19,7 @@ python3 -m venv .venv
 .venv/bin/isis serve sample_corpus           # then open http://127.0.0.1:8000
 ```
 
-Point `isis serve` at any folder of `.md` files.
+Point `isis serve` at any folder of `.md` files. Subfolders are scanned at any depth, and symlinked folders and files are followed, so a folder from elsewhere can join the corpus through a link (a link loop ends, and anything reachable twice is indexed once). Hidden files and folders are skipped. The terminal reports what happens: how many files are new, changed or removed, embedding progress, and links it follows or skips.
 
 - **First run.** It downloads the model (67 MB) and embeds every passage in the background. That runs at about 15 passages/s on one slow CPU core, and much faster on a laptop. Keyword search works while it runs.
 - **Later runs.** The index is cached in `<corpus>/.isis/`, and only changed files are re-read. The server watches the folder, so edits show up in search within seconds.

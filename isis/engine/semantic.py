@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import zlib
@@ -14,6 +15,7 @@ import numpy as np
 
 from .text import tokenize
 
+log = logging.getLogger(__name__)
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")  # read when huggingface_hub is imported
 
 DEFAULT_MODEL = "TaylorAI/bge-micro-v2"
@@ -40,6 +42,7 @@ class Embedder:
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
+        log.info("loading the embedding model %s", model_id)
         self.model_id = model_id
         self.name = f"{model_id}:{onnx_file}:{max_tokens}"  # identifies vectors in the index cache
         self.batch_size = batch_size
@@ -78,6 +81,7 @@ class Embedder:
             return cached
         if cached is not None:  # cached as missing from the repo
             raise FileNotFoundError(f"{self.model_id} has no {filename}")
+        log.info("downloading %s of %s (only the first time)", filename, self.model_id)
         return hf_hub_download(self.model_id, filename)
 
     def embed(self, texts: list[str], cache: bool = False) -> np.ndarray:

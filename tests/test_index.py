@@ -167,3 +167,107 @@ def test_a_cache_with_missing_parts_is_rebuilt(corpus, tmp_path):
     (index / "index.json").write_text(json.dumps(meta))
     e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)  # no crash
     assert e.refresh()["changed"] == 3
+
+
+def linked_corpus(tmp_path):
+    corpus = tmp_path / "corpus"
+    (corpus / "real").mkdir(parents=True)
+    (corpus / "real" / "here.md").write_text("Heronword is in the corpus.\n")
+    outside = tmp_path / "outside"
+    (outside / "sub" / "deeper").mkdir(parents=True)
+    (outside / "sub" / "deeper" / "there.md").write_text("Otterword is outside the corpus.\n")
+    (outside / "secret.txt").write_text("not markdown")
+    return corpus, outside
+
+
+def test_linked_folders_are_scanned_and_open(tmp_path):
+    corpus, outside = linked_corpus(tmp_path)
+    (corpus / "link").symlink_to(outside)
+    e = Engine(corpus, index_dir=tmp_path / "index")
+    e.refresh()
+    assert paths(e.search("otterword")) == ["link/sub/deeper/there.md"]
+    assert e.read_lines("link/sub/deeper/there.md")[0].startswith("Otterword")
+    assert e.links == {"link"}
+
+
+def test_linked_paths_cannot_climb_out_or_reach_other_files(tmp_path):
+    corpus, outside = linked_corpus(tmp_path)
+    (corpus / "link").symlink_to(outside)
+    (corpus / "disguised.md").symlink_to(outside / "secret.txt")
+    e = Engine(corpus, index_dir=tmp_path / "index")
+    e.refresh()
+    assert "disguised.md" not in e.snapshot.file_rows
+    for bad in ("../outside/sub/deeper/there.md", "link/../../outside/sub/deeper/there.md", "disguised.md", "link/secret.txt"):
+        with pytest.raises(ValueError):
+            e.resolve(bad)
+
+
+def test_link_loops_end_and_nothing_is_indexed_twice(tmp_path):
+    corpus, outside = linked_corpus(tmp_path)
+    (corpus / "a-to-real").symlink_to(corpus / "real")  # sorts before the real folder
+    (corpus / "real" / "up").symlink_to(corpus)
+    (outside / "back").symlink_to(outside)
+    (corpus / "one").symlink_to(outside)
+    (corpus / "two").symlink_to(outside)
+    (corpus / "a-file.md").symlink_to(corpus / "real" / "here.md")
+    (corpus / "broken").symlink_to(tmp_path / "nothing")
+    (corpus / "broken.md").symlink_to(tmp_path / "nothing.md")
+    e = Engine(corpus, index_dir=tmp_path / "index")
+    e.refresh()
+    assert sorted(e.snapshot.file_rows) == ["one/sub/deeper/there.md", "real/here.md"]
+
+
+def test_a_link_to_a_file_outside_is_indexed_and_follows_its_target(tmp_path):
+    corpus, outside = linked_corpus(tmp_path)
+    target = outside / "sub" / "deeper" / "there.md"
+    (corpus / "single.md").symlink_to(target)
+    e = Engine(corpus, index_dir=tmp_path / "index")
+    e.refresh()
+    assert paths(e.search("otterword")) == ["single.md"]
+    target.write_text("Stoatword replaced it, at some length.\n")
+    assert e.refresh()["changed"] == 1
+    assert paths(e.search("stoatword")) == ["single.md"]
+
+
+def test_links_into_the_tasks_folder_stay_out(tmp_path):
+    corpus, _ = linked_corpus(tmp_path)
+    tasks = corpus / "_tasks"
+    tasks.mkdir()
+    (tasks / "note.md").write_text("Newtword is a task.\n")
+    (corpus / "tasks-link").symlink_to(tasks)
+    (corpus / "note-link.md").symlink_to(tasks / "note.md")
+    e = Engine(corpus, index_dir=tmp_path / "index", exclude=(tasks,))
+    e.refresh()
+    assert sorted(e.snapshot.file_rows) == ["real/here.md"]
+
+
+def test_the_index_says_what_it_did(tmp_path, caplog):
+    corpus, outside = linked_corpus(tmp_path)
+    (corpus / "link").symlink_to(outside)
+    (corpus / "broken").symlink_to(tmp_path / "nothing")
+    index = tmp_path / "index"
+
+    def said(action):
+        caplog.clear()
+        with caplog.at_level("INFO", logger="isis"):
+            action()
+        return [r.getMessage() for r in caplog.records]
+
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    first = said(e.refresh)
+    assert any(m.startswith("following link link -> ") for m in first)
+    assert "2 markdown files: 2 new files (link/sub/deeper/there.md, real/here.md)" in first
+    assert "embedding 2 passages" in first
+    assert any("link broken skipped" in m for m in first)
+    assert any(m.startswith("index ready: 2 files, 2 passages") for m in first)
+    assert said(e.refresh) == []  # nothing changed: nothing to say
+
+    (corpus / "real" / "more.md").write_text("Pikeword is new.\n")
+    (corpus / "real" / "here.md").write_text("Heronword changed, in other words.\n")
+    third = said(e.refresh)
+    assert "1 new file (real/more.md), 1 changed (real/here.md)" in third
+    assert "embedding 2 passages" in third
+
+    again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    fourth = said(again.refresh)
+    assert "3 markdown files, no changes since the last run" in fourth

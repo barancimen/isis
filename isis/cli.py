@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import sys
-import time
 from pathlib import Path
 
+from .engine.index import configure_logging
 from .engine.semantic import DEFAULT_MODEL
 
 
@@ -24,21 +23,7 @@ def make_engine(corpus: str, tasks: str | None, model: str | None):
 
 def cmd_index(args) -> None:
     engine, _ = make_engine(args.corpus, args.tasks, None if args.no_model else args.model)
-    last = [0.0]
-
-    def progress(status):
-        now = time.monotonic()
-        if status.state == "embedding" and now - last[0] > 5:
-            last[0] = now
-            print(f"  embedding {status.embedded:,}/{status.to_embed:,} passages", flush=True)
-
-    print(f"indexing {engine.root}", flush=True)
-    stats = engine.refresh(progress)
-    print(
-        f"{stats['files']:,} files, {engine.status.passages:,} passages "
-        f"({stats['changed']} changed, {stats['removed']} removed, {stats['embedded']:,} embedded) "
-        f"in {stats['seconds']}s"
-    )
+    engine.refresh()  # it reports its progress
 
 
 def allowed_hosts(host: str, extra: list[str]) -> list[str]:
@@ -74,7 +59,7 @@ def cmd_serve(args) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    configure_logging()
     parser = argparse.ArgumentParser(prog="isis", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
