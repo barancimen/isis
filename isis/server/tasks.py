@@ -53,6 +53,11 @@ def _replace(path: Path, text: str) -> None:
         raise
 
 
+def _stamp() -> str:
+    """A name for a copy in .trash: renaming onto an older copy from the same second would lose it."""
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1_000_000:06d}"
+
+
 class TaskStore:
     def __init__(self, folder: str | Path):
         self.folder = Path(folder)
@@ -61,6 +66,7 @@ class TaskStore:
         self.trash = self.folder / ".trash"
         self._locks: dict[str, threading.RLock] = {}
         self._locks_lock = threading.Lock()
+        self._unnamed: set[str] = set()
 
     def lock(self, name: str) -> threading.RLock:
         """One lock per task, held while its preferences are read, changed and saved."""
@@ -83,9 +89,26 @@ class TaskStore:
             raise TaskError(f"no task named {name!r}", 404)
         return path
 
+    def _addressable(self, stem: str) -> bool:
+        """Whether a file name is one the API can reach. A hand-made "C# notes.md" isn't."""
+        try:
+            return self.clean(stem) == stem
+        except TaskError:
+            return False
+
     def list(self) -> list[dict]:
-        files = sorted(self.folder.glob("*.md"), key=lambda p: p.stem.lower())
-        return [{"name": p.stem, "mtime": _mtime(p)} for p in files]
+        out = []
+        for p in sorted(self.folder.glob("*.md"), key=lambda p: p.stem.lower()):
+            try:
+                if not self._addressable(p.stem):
+                    if p.name not in self._unnamed:
+                        self._unnamed.add(p.name)
+                        log.warning("task file %s not listed: rename it without these characters: \\ / : * ? \" < > | # ^ [ ]", p.name)
+                    continue
+                out.append({"name": p.stem, "mtime": _mtime(p)})
+            except OSError:  # deleted since the listing
+                continue
+        return out
 
     def create(self, name: str) -> dict:
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -137,7 +160,7 @@ class TaskStore:
         with self.lock(name):
             path = self._existing(name)
             self.trash.mkdir(exist_ok=True)
-            stamp = time.strftime("%Y%m%d-%H%M%S")
+            stamp = _stamp()
             path.rename(self.trash / f"{path.stem}.{stamp}.md")
             meta = self._meta_path(path.stem)
             if meta.exists():
@@ -154,12 +177,14 @@ class TaskStore:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return TaskPrefs()
+        except UnicodeDecodeError:
+            text = ""  # kept aside below, like bad JSON
         try:
             return TaskPrefs.from_dict(json.loads(text))
         except (ValueError, TypeError, AttributeError):  # saves are atomic, so the file itself is bad: keep it
             with self.lock(name):
                 self.trash.mkdir(exist_ok=True)
-                kept = self.trash / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.bad.json"
+                kept = self.trash / f"{path.stem}.{_stamp()}.bad.json"
                 try:
                     path.rename(kept)
                     log.warning("unreadable preferences for task %r moved to %s", path.stem, kept)
@@ -187,4 +212,4 @@ class TaskStore:
             path = self._meta_path(self._existing(name).stem)
             if path.exists():
                 self.trash.mkdir(exist_ok=True)
-                path.rename(self.trash / f"{path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.prefs.json")
+                path.rename(self.trash / f"{path.stem}.{_stamp()}.prefs.json")

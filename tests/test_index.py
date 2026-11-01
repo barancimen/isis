@@ -1,7 +1,9 @@
 import json
 import os
 import pickle
+import re
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -423,3 +425,115 @@ def test_folders_can_be_left_out_of_a_search_or_suggestions(tmp_path):
         assert e.search("whale harpoon", mode=mode, skip_folders=["books", "notes"]) == []
         assert e.search("+harpoon", mode=mode, skip_folders=["books"])[0].path == "notes/w.md"
     assert len(e.search("whale harpoon", skip_folders=["nonsense"])) == len(e.search("whale harpoon"))
+
+
+def refused_walk(monkeypatch, folder):
+    """os.walk, as if `folder` could not be read."""
+    real = os.walk
+
+    def walk(top, onerror=None, **kw):
+        for dirpath, dirnames, filenames in real(top, **kw):
+            if folder in dirnames:
+                dirnames.remove(folder)
+                onerror(OSError(13, "Permission denied", str(Path(dirpath) / folder)))
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr("isis.engine.index.os.walk", walk)
+
+
+def test_a_folder_it_cannot_read_keeps_its_files_and_embeddings(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    (corpus / "sub").mkdir(parents=True)
+    (corpus / "sub" / "a.md").write_text("Stoatword is here.\n")
+    (corpus / "b.md").write_text("Pikeword is here.\n")
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    e.refresh()
+    before = e.files["sub/a.md"].vectors
+    with monkeypatch.context() as m:
+        refused_walk(m, "sub")
+        (corpus / "b.md").unlink()
+        e.refresh()
+    assert sorted(e.files) == ["sub/a.md"]  # what is really gone still goes
+    assert e.files["sub/a.md"].vectors is before
+    e.refresh()
+    assert sorted(e.files) == ["sub/a.md"]
+    (corpus / "sub" / "a.md").unlink()
+    e.refresh()
+    assert sorted(e.files) == []  # readable again: its deletions count
+
+
+def test_a_folder_that_went_away_keeps_its_files_and_is_not_embedded_meanwhile(tmp_path):
+    corpus, other = tmp_path / "corpus", tmp_path / "other"
+    corpus.mkdir()
+    (corpus / "a.md").write_text("Stoatword is here.\n")
+    index = tmp_path / "index"
+    Engine(corpus, index_dir=index).refresh()  # no embeddings yet
+    corpus.rename(other)
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    assert e.refresh()["embedded"] == 0
+    assert sorted(e.files) == ["a.md"]
+    assert e.search("stoatword") == []  # nothing to show from it for now
+    other.rename(corpus)
+    assert e.refresh()["embedded"] == 1
+    assert e.search("stoatword")
+
+
+def test_a_failed_save_leaves_no_temporary_files(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.md").write_text("Stoatword is here.\n")
+    index = tmp_path / "index"
+    e = Engine(corpus, index_dir=index)
+    e.refresh()
+
+    def full(*_, **__):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("isis.engine.index.json.dumps", full)
+    with pytest.raises(OSError):
+        e._save()
+    assert not [p.name for p in index.rglob("*") if ".tmp" in p.name]
+
+
+def forget_chunker(index):
+    """Make a cache look like one written before files were split the current way."""
+    for path in index.rglob("index.json"):
+        meta = json.loads(path.read_text())
+        del meta["chunker"]
+        path.write_text(json.dumps(meta))
+
+
+class RecordingEmbedder(HashEmbedder):
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def embed(self, texts):
+        self.seen += texts
+        return super().embed(texts)
+
+
+def test_a_cache_split_the_old_way_is_read_again_keeping_embeddings(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "rule.md").write_text("---\nStoatword opens this note.\n---\n\nPikeword closes it.\n")
+    (corpus / "plain.md").write_text("Herringword is here.\n")
+    index = tmp_path / "index"
+    old = "isis.engine.chunker.YAML_LINE"
+    with monkeypatch.context() as m:
+        m.setattr(old, re.compile(""))  # what the chunker did: anything between two rules was skipped
+        Engine(corpus, embedder=HashEmbedder(), index_dir=index, target_words=0).refresh()
+    forget_chunker(index)
+
+    no_model = Engine(corpus, index_dir=index, target_words=0)  # can't embed: it waits for a run that can
+    no_model.refresh()
+    assert not no_model.search("stoatword")
+    assert no_model.files["plain.md"].vectors is not None
+    (corpus / "new.md").write_text("Troutword is new.\n")
+    no_model.refresh()  # and saving meanwhile doesn't mark the cache as done
+
+    embedder = RecordingEmbedder()
+    e = Engine(corpus, embedder=embedder, index_dir=index, target_words=0)
+    e.refresh()
+    assert e.search("stoatword")
+    assert sorted(embedder.seen) == ["Stoatword opens this note.\n---", "Troutword is new."]  # the others kept theirs

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HAS_WORD = re.compile(r"[^\W_]")
+YAML_LINE = re.compile(r"^(\s|#|-\s|[\w.-]+(?: [\w.-]+){0,3}:(\s|$))")  # a key, a list item, a comment, or indented
+MAX_FRONT_MATTER = 200  # lines, as in the page (reflow.js)
 
 TARGET_WORDS = 100  # short neighbouring paragraphs under one heading are merged up to this size
 MAX_WORDS = 180  # longer runs are cut at line boundaries, so most passages fit in 256 model tokens
@@ -34,12 +36,15 @@ def split_lines(content: str) -> list[str]:
 
 
 def _body_start(lines: list[str]) -> int:
-    """The first line after YAML frontmatter, if there is any."""
-    if lines and lines[0].strip() == "---":
-        for n in range(1, len(lines)):
-            if lines[n].strip() in ("---", "..."):
-                return n + 1
-    return 0
+    """The first line after YAML frontmatter, if there is any. Every line of it must read as YAML:
+    a note that opens with a rule and has another one further down is text, and is indexed. The
+    opening rule itself never is."""
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for n in range(1, min(len(lines), MAX_FRONT_MATTER)):
+        if lines[n].strip() in ("---", "..."):
+            return n + 1 if all(YAML_LINE.match(line) or not line.strip() for line in lines[1:n]) else 1
+    return 1
 
 
 def heading_texts(content: str) -> list[str]:

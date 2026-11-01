@@ -25,7 +25,7 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
 - **Folders too large to embed.** Put an empty file named `.no-embed` in a folder (`touch big/.no-embed`): it and its subfolders are then searched by keywords only. Adding the file drops embeddings already made for that folder; removing it embeds the folder. Meaning search can't find those passages. In a hybrid search their keyword rank counts in place of the meaning rank they lack, so strong keyword matches aren't buried; **Parameters › Not embedded** sets how much it counts, in both Search and Related. In Search, with it and *Keyword weight* both at 0, those passages are left out. Related shows them in Core only, and they get in on a top keyword rank alone, with no check on meaning.
 
 - **First run.** It downloads the model (67 MB) and embeds every passage in the background. That runs at about 15 passages/s on one slow CPU core, and much faster on a laptop. Keyword search works while it runs.
-- **Later runs.** The index is cached in `<corpus>/.isis/`, and only changed files are re-read. The server watches the folder, so edits show up in search within seconds.
+- **Later runs.** The index is cached in `<corpus>/.isis/`, and only changed files are re-read. The server watches the folder, so edits show up in search within seconds. A folder it can't read (changed permissions, an unmounted drive, a link whose target is away) keeps its files and embeddings in the index until it can be read again, and they just don't show up in results meanwhile. If its link is removed, they go.
 - **Options:**
   - `--tasks DIR`: where task documents live (default `_tasks` in the first folder). Task folders are never indexed.
   - `--no-model`: keyword search only.

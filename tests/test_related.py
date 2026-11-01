@@ -382,3 +382,22 @@ def test_naming_a_word_on_the_steer_line_stops_ignoring_it(line):
     prefs = TaskPrefs(ignored=["whale", "harpoon"])
     prefs.set_steer(line)
     assert prefs.ignored == ["harpoon"]
+
+
+def test_excerpt_weight_zero_on_a_task_of_excerpts_still_answers(engine):
+    text = engine.snapshot.passages[0].text
+    result = engine.related(text, config=RelatedConfig(excerpt_weight=0.0))
+    assert all(t.weight == t.weight for t in result.terms)  # no NaN
+
+
+def test_negative_saved_feedback_counts_are_clamped(engine):
+    prefs = TaskPrefs.from_dict({"feedback": {"core": [-1, -2]}})
+    assert prefs.feedback == {"core": [0, 0]}
+    engine.related("# Sea\nwhales and ships", prefs=prefs)
+
+
+def test_dismissing_a_liked_passage_takes_back_its_add():
+    prefs = TaskPrefs()
+    prefs.like("core", "a.md", "text")
+    prefs.dismiss("core", "a.md", "text")
+    assert prefs.liked == [] and prefs.feedback == {"core": [0, 1]}

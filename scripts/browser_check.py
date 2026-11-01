@@ -257,6 +257,13 @@ def main() -> None:
         expect(drawer.locator(".tune-count")).to_contain_text("1 dismissed", timeout=30000)
         expect(drawer.locator(".feedback-item")).to_have_count(1)
         shot(page, "feedback.png")
+        drawer.locator(".chip.ignored .chip-x").click()
+        expect(page.locator("#related-terms .chip.ignored")).to_have_count(0, timeout=30000)
+        expect(drawer.locator(".tune-count")).not_to_contain_text("ignored", timeout=30000)
+        assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["ignored"] == []
+        step("the drawer's × searches for an ignored keyword again")
+        page.locator("#related-terms .chip .chip-x").first.click()
+        expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
         drawer.locator(".feedback-item button", has_text="Restore").click()
         expect(drawer.locator(".tune-count")).not_to_contain_text("dismissed", timeout=30000)
         assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["dismissed"] == []

@@ -77,6 +77,9 @@ class RelatedRequest(BaseModel):
     skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
 
 
+WATCH_RETRY = 30  # seconds
+
+
 class TermRequest(BaseModel):
     term: str  # boost and exclude: the word as shown on its chip; unboost, ignore, unignore: its stem
     action: Literal["boost", "unboost", "ignore", "unignore", "exclude"]
@@ -128,14 +131,22 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             # moved folder is one event), and deleted paths, which may have been either.
             return p.suffix.lower() in MARKDOWN or not p.is_file()
 
+        said = ""
         while not stop.is_set():  # a watch covers the linked folders that exist when it starts
             links = engine.links
-            for _ in watch_files(*roots, watch_filter=relevant, stop_event=stop, debounce=800):
-                refresh()
-                if engine.links != links:
-                    break
-            else:
-                return
+            try:
+                for _ in watch_files(*roots, watch_filter=relevant, stop_event=stop, debounce=800):
+                    refresh()
+                    if engine.links != links:
+                        break
+                else:
+                    return
+            except Exception as e:  # no inotify capacity left, a folder gone: look every so often instead
+                if str(e) != said:
+                    said = str(e)
+                    log.warning("cannot watch the corpus for changes (%s): checking every %d s instead", e, WATCH_RETRY)
+                if not stop.wait(WATCH_RETRY):
+                    refresh()
 
     @asynccontextmanager
     async def lifespan(_):

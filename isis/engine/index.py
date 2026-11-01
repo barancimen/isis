@@ -61,6 +61,7 @@ def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
     return ", ".join(parts)
 
 INDEX_VERSION = 2
+CHUNKER_VERSION = 2  # raise it when files split differently: they are read again, and keep their embeddings
 MARKDOWN = (".md", ".markdown")
 NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
 EMBED_GROUP = 256  # passages per embedding call while indexing
@@ -198,6 +199,8 @@ class Engine:
         # The model the cached vectors came from. Without a model they are kept as they are, so a
         # keyword-only run never throws away embeddings that took hours to compute.
         self._vectors_from = {prefix: getattr(embedder, "name", None) for prefix in self.roots}
+        self._chunker_from: dict[str, int] = {}  # folders whose cache still has files split the old way
+        self._unread: list[str] = []
         self.no_embed: set[str] = set()  # corpus-relative folders with a .no-embed file ("" is the whole corpus)
         self.links: set[str] = set()  # corpus-relative paths of the folder links the last scan met
         self._said: set[str] = set()  # one-time messages about links, so rescans stay quiet
@@ -251,8 +254,10 @@ class Engine:
     def _scan(self) -> dict[str, os.stat_result]:
         """Every markdown file under the corpus folders, following symlinks. The real folders come
         first and links after them, and each folder or file is taken once (by device and inode), so
-        a link loop ends and something reachable both ways keeps its real path."""
+        a link loop ends and something reachable both ways keeps its real path. Folders it could
+        not read go in self._unread."""
         found: dict[str, os.stat_result] = {}
+        unread: list[str] = []
         folders, files = set(), set()
         folder_links: list[tuple[Path, Path, str]] = []
         file_links: list[tuple[Path, str]] = []
@@ -276,7 +281,12 @@ class Engine:
             return True
 
         def walk(top: Path, root: Path, prefix: str) -> None:
-            for dirpath, dirnames, filenames in os.walk(top):
+            def failed(e: OSError) -> None:
+                where = label(Path(e.filename), root, prefix) if e.filename else label(top, root, prefix)
+                unread.append(where)
+                self._say_once(logging.WARNING, f"could not read {where or 'the corpus'}: {e.strerror or e}; its files stay in the index")
+
+            for dirpath, dirnames, filenames in os.walk(top, onerror=failed):
                 here = Path(dirpath)
                 keep = []
                 for d in sorted(dirnames):
@@ -318,6 +328,7 @@ class Engine:
                 else:
                     self._say_once(logging.INFO, f"{root} skipped: it is already inside another folder being scanned")
             except OSError as e:
+                unread.append(label(root, root, prefix))
                 self._say_once(logging.WARNING, f"{root} skipped: {e.strerror or e}")
         links = set()
         while folder_links:  # walking a linked folder can find more links
@@ -331,6 +342,7 @@ class Engine:
                     self._say_once(logging.INFO, f"link {rel} skipped: its folder is already indexed")
                     continue
             except OSError as e:
+                unread.append(rel)
                 self._say_once(logging.WARNING, f"link {rel} skipped: {e.strerror or e}")
                 continue
             self._say_once(logging.INFO, f"following link {rel} -> {link.resolve()}")
@@ -348,7 +360,13 @@ class Engine:
                 found[rel] = st
                 files.add((st.st_dev, st.st_ino))
         self.no_embed = no_embed
+        self._unread = unread
         return found
+
+    def _is_unread(self, path: str) -> bool:
+        """Whether this file is under a folder the last scan could not read. It may only be away
+        for now (an unmounted drive, changed permissions), and embeddings can take hours to redo."""
+        return any(not d or path == d or path.startswith(f"{d}/") for d in self._unread)
 
     def _embeds(self, path: str) -> bool:
         """Whether this file gets embeddings: not under a folder with a .no-embed file."""
@@ -380,7 +398,7 @@ class Engine:
         if first:
             log.info("scanning %s", ", ".join(map(str, self.roots.values())))
         found = self._scan()
-        removed = [p for p in self.files if p not in found]
+        removed = [p for p in self.files if p not in found and not self._is_unread(p)]
         changed = [
             p
             for p, st in found.items()
@@ -443,7 +461,7 @@ class Engine:
     def _embed_missing(self, on_progress) -> int:
         if self.embedder is None:
             return 0
-        pending = [r for path, r in self.files.items() if self._embeds(path) and (r.vectors is None or r.vectors.shape[1:] != (self.dim,))]
+        pending = [r for path, r in self.files.items() if self._embeds(path) and not self._is_unread(path) and (r.vectors is None or r.vectors.shape[1:] != (self.dim,))]
         todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {})] for r in pending}
         self.status.embedded, self.status.to_embed = 0, sum(map(len, todo.values()))
         if self.status.to_embed:
@@ -572,6 +590,7 @@ class Engine:
         meta = {
             "version": INDEX_VERSION,
             "chunking": list(self.chunking),
+            "chunker": self._chunker_from.get(prefix, CHUNKER_VERSION),
             "embedder": self._vectors_from[prefix],
             "vocab": [self.vocab.terms[i] for i in used],
             "files": [
@@ -594,15 +613,16 @@ class Engine:
         }
         # The arrays go first: a cache is only used when its JSON matches them (see _load).
         unique = f"{os.getpid()}-{threading.get_ident()}"  # another process may share the folder
-        tmp = folder / f"index.{unique}.tmp.npz"
-        np.savez(tmp, **arrays)
-        os.replace(tmp, folder / "index.npz")
-        tmp = folder / f"index.{unique}.tmp"
-        tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, folder / "index.json")
-        old = folder / "index.pkl"
-        if old.exists():  # the version 1 cache, which this one replaces
-            old.unlink()
+        tmp_npz, tmp_json = folder / f"index.{unique}.tmp.npz", folder / f"index.{unique}.tmp"
+        try:
+            np.savez(tmp_npz, **arrays)
+            os.replace(tmp_npz, folder / "index.npz")
+            tmp_json.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp_json, folder / "index.json")
+        finally:  # a full disk must not also keep a copy of the index
+            tmp_npz.unlink(missing_ok=True)
+            tmp_json.unlink(missing_ok=True)
+        (folder / "index.pkl").unlink(missing_ok=True)  # the version 1 cache, which this one replaces
 
     def _load(self) -> None:
         for prefix in self.roots:
@@ -639,6 +659,14 @@ class Engine:
             log.info("the embedding model changed: every passage will be embedded again")
             for record in files.values():
                 record.vectors = None
+        chunker = meta.get("chunker", 1)
+        if chunker != CHUNKER_VERSION:
+            if self.embedder is None and any(r.vectors is not None for r in files.values()):
+                self._chunker_from[prefix] = chunker  # reading them again now would lose their embeddings: next run
+            else:
+                log.info("files are split differently now: reading them again (unchanged passages keep their embeddings)")
+                for record in files.values():
+                    record.mtime_ns = 0  # looks changed to the next refresh
 
     @staticmethod
     def _records(entries: list[dict], arrays: dict, lead: str = "") -> dict[str, FileRecord]:

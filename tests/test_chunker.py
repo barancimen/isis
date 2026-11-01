@@ -62,3 +62,17 @@ def test_heading_texts_lists_every_heading_line():
 
     text = "---\ntitle: no\n---\n# One\n\ntext\n\n## Two ##\n\n# One\n```\n# not a heading\n```\n"
     assert heading_texts(text) == ["One", "Two", "One"]
+
+
+def test_a_rule_at_the_top_is_not_frontmatter():
+    md = "---\nfirst line of prose\n\nNote: more prose\n---\nafter rule\n"
+    assert spans(chunk_markdown("a.md", md, target_words=0)) == [
+        ("", 1, 1, "first line of prose"),
+        ("", 3, 5, "Note: more prose\n---\nafter rule"),
+    ]
+
+
+def test_frontmatter_of_every_usual_shape_is_still_skipped():
+    for head in ("tags: x", "title: A\n\nDate Created: 2020\ntags:\n  - one\n- two\n# a comment", "description: >\n  folded text", ""):
+        passages = chunk_markdown("a.md", f"---\n{head}\n---\nbody text\n", target_words=0)
+        assert [p.text for p in passages] == ["body text"], head

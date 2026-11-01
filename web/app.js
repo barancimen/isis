@@ -57,6 +57,7 @@ const store = {
 };
 
 let flashTimer;
+let addedTimer;
 function flash(message) {
   $("#flash").textContent = message;
   clearTimeout(flashTimer);
@@ -557,7 +558,7 @@ async function saveTask(name, { keepalive = false } = {}) {
           setSaveState("Not saved");
         }
       } else {
-        setSaveState("Save failed");
+        if (name === state.task) setSaveState("Save failed");
         throw error;
       }
     }
@@ -628,7 +629,8 @@ async function addToTask(text, origin = null) {
     ],
     userEvent: "input.paste",
   });
-  setTimeout(() => taskView.dispatch({ effects: addedSlot.set.of(Decoration.none) }), 1600);
+  clearTimeout(addedTimer);
+  addedTimer = setTimeout(() => taskView.dispatch({ effects: addedSlot.set.of(Decoration.none) }), 1600);
   flash(`Added to “${state.task}”`);
   if (origin?.lane) {
     api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "add", lane: origin.lane, path: origin.path }).catch(fail);
@@ -899,6 +901,7 @@ function refreshRelated() {
       } while (relatedAgain);
     } catch (error) {
       state.relatedStale = true;
+      $("#related-status").textContent = `⚠ ${error.message}`;
       throw error;
     } finally {
       relatedRunning = null;
@@ -946,8 +949,8 @@ async function fetchRelated() {
   );
   state.lastRelatedKeys = keys;
   renderChips(state.relatedTerms);
-  showPrefs(result.prefs);
   $("#related-lanes").replaceChildren(...lanes);
+  showPrefs(result.prefs);
   const s = result.stats;
   const themes = result.themes.map((t) => t.label).join(" · ");
   $("#related-status").textContent = s.gated === undefined
@@ -979,13 +982,23 @@ function renderChips(terms) {
 }
 
 async function termAction(chip, term, action) {
-  const prefs = await api("POST", `/api/tasks/${enc(state.task)}/terms`, { term, action });
+  if (!(await changePrefs("POST", "/terms", { term, action }))) return;
+  if (!chip) return; // from the drawer: the word may not be among the task's keywords any more
   chip.boosted = action === "boost";
   chip.ignored = action === "ignore";
   if (action === "exclude") state.relatedTerms = state.relatedTerms.filter((t) => t !== chip);
   renderChips(state.relatedTerms);
+}
+
+// Change what the task remembers and show the result, unless the user has moved to another task
+// meanwhile: its panel must not get this task's steer line and feedback. Null in that case.
+async function changePrefs(method, path, body) {
+  const name = state.task;
+  const prefs = await api(method, `/api/tasks/${enc(name)}${path}`, body);
+  if (name !== state.task) return null;
   showPrefs(prefs);
   requestRelated();
+  return prefs;
 }
 
 // What the panel remembers changed: show it now, whether or not the suggestions are refreshed.
@@ -1018,11 +1031,10 @@ async function saveSteer(event) {
   const input = $("#steer-input");
   if (!state.task || input.value.trim() === (input.dataset.saved ?? "")) return;
   try {
-    const prefs = await api("PUT", `/api/tasks/${enc(state.task)}/steer`, { text: input.value });
-    input.value = input.dataset.saved = prefs.steer;
+    const prefs = await changePrefs("PUT", "/steer", { text: input.value });
+    if (!prefs) return;
+    input.value = prefs.steer;
     $("#steer-error").hidden = true;
-    showPrefs(prefs);
-    requestRelated();
   } catch (error) {
     if (error.status !== 400) throw error;
     $("#steer-error").textContent = `⚠ ${error.message}`;
@@ -1032,24 +1044,21 @@ async function saveSteer(event) {
 
 async function dismiss(hit, lane, element, avoid = false) {
   element?.remove();
-  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, {
+  await changePrefs("POST", "/feedback", {
     action: avoid ? "avoid" : "dismiss", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line,
-  }));
-  requestRelated();
+  });
 }
 
 async function likeHit(hit, lane) {
   const id = state.likedIds.get(`${hit.path}:${hit.start_line}`);
-  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, id
+  await changePrefs("POST", "/feedback", id
     ? { action: "unlike", id }
-    : { action: "like", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line }));
-  requestRelated();
+    : { action: "like", lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
 }
 
 async function unlikePassage(liked, element) {
   element?.remove();
-  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "unlike", id: liked.id }));
-  requestRelated();
+  await changePrefs("POST", "/feedback", { action: "unlike", id: liked.id });
 }
 
 // ---------- feedback drawer ----------
@@ -1100,7 +1109,7 @@ function renderFeedback(prefs, terms, lanes) {
   const ignoredChip = (term) =>
     h("span", { class: "chip ignored" },
       h("span", { class: "chip-label" }, labels.get(term) ?? term),
-      h("button", { class: "chip-x", title: "Search for it again", onclick: () => termAction(term, "unignore").catch(fail) }, "×"),
+      h("button", { class: "chip-x", title: "Search for it again", onclick: () => termAction(state.relatedTerms.find((t) => t.term === term), term, "unignore").catch(fail) }, "×"),
     );
   const laneCounts = counted.map(([lane, [adds, dismisses]]) =>
     `${laneTitles.get(lane) ?? lane}: ${[adds && `${adds} ${prefs.liked.length ? "added or ↑" : "added"}`, dismisses && `${dismisses} dismissed`].filter(Boolean).join(", ")}`);
@@ -1144,20 +1153,18 @@ function renderFeedback(prefs, terms, lanes) {
 
 async function restoreDismissed(dismissal, element) {
   element?.remove();
-  showPrefs(await api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "restore", id: dismissal.id }));
-  requestRelated();
+  await changePrefs("POST", "/feedback", { action: "restore", id: dismissal.id });
 }
 
 async function forgetFeedback() {
   const name = state.task;
   if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
-  const prefs = await api("DELETE", `/api/tasks/${enc(name)}/prefs`);
+  const prefs = await changePrefs("DELETE", "/prefs");
   flash(`Forgot the feedback for “${name}”`);
+  if (!prefs) return;
   state.relatedTerms = state.relatedTerms.filter((t) => !t.ignored);
   for (const t of state.relatedTerms) t.boosted = false;
   renderChips(state.relatedTerms);
-  showPrefs(prefs);
-  requestRelated();
 }
 
 // ---------- tunable parameters ----------

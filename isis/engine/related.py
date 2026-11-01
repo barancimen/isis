@@ -218,7 +218,7 @@ class TaskPrefs:
             dismissed=passages(data.get("dismissed")),
             liked=passages(data.get("liked")),
             feedback={
-                lane: [int(v[0]), int(v[1])]
+                lane: [max(0, v[0]), max(0, v[1])]  # the lane draw refuses negative counts
                 for lane, v in (data.get("feedback") if isinstance(data.get("feedback"), dict) else {}).items()
                 if isinstance(v, list) and len(v) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in v)
             },
@@ -307,7 +307,7 @@ class TaskPrefs:
                 avoid: bool = False) -> None:
         """Hide a passage. `avoid` also hides every passage close to it in meaning (an anti-query)."""
         self.record(lane, added=False)
-        self._drop_like(path, text)
+        self._drop_like(passage_id({"path": path, "text": text}))
         if text:
             entry = {"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line}
             self.dismissed.append({**entry, "avoid": True} if avoid else entry)
@@ -320,17 +320,17 @@ class TaskPrefs:
         self.liked.append({"path": path, "text": text, "lane": lane, "start_line": start_line, "end_line": end_line})
 
     def unlike(self, ident: str) -> None:
-        for d in self.liked:
-            if passage_id(d) == ident:
-                self.liked.remove(d)
-                if d.get("lane") in self.feedback:
-                    counts = self.feedback[d["lane"]]
-                    counts[0] = max(counts[0] - 1, 0)
-                return
+        self._drop_like(ident)
 
-    def _drop_like(self, path: str, text: str) -> None:
-        ident = passage_id({"path": path, "text": text})
-        self.liked = [d for d in self.liked if passage_id(d) != ident]
+    def _drop_like(self, ident: str) -> None:
+        """Take a like back, along with the add it counted for its lane."""
+        kept = []
+        for d in self.liked:
+            if passage_id(d) != ident:
+                kept.append(d)
+            elif counts := self.feedback.get(d.get("lane")):
+                counts[0] = max(counts[0] - 1, 0)
+        self.liked = kept
 
     def restore_id(self, ident: str) -> None:
         """restore() for the dismissal with this id (see summary())."""
@@ -637,7 +637,7 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
     skip = set(prefs.ignored) | steer.filters.excluded_terms
     boosted = set(steer.words) - steer.filters.excluded_terms
     top = [(s, t) for s, t in scored if t not in skip][: config.n_query_terms]
-    best = top[0][0] if top else 1.0
+    best = top[0][0] if top and top[0][0] > 0 else 1.0  # all 0 when every paragraph is an excerpt at weight 0
     top = [(best if t in boosted else s, t) for s, t in top]
     chosen = {t for _, t in top}
     for t in sorted(boosted - chosen):  # steered words always take part, at full weight
