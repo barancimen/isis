@@ -1,12 +1,12 @@
 import {
-  EditorState, EditorSelection, StateField, StateEffect,
+  EditorState, EditorSelection, StateField, StateEffect, Prec,
   EditorView, Decoration, WidgetType, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers,
   history, defaultKeymap, historyKeymap, indentWithTab,
   syntaxHighlighting, HighlightStyle, markdown, tags,
 } from "./vendor/codemirror.js";
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { planInsertion } from "./insert.js";
-import { envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { enterInList, envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
 
 // ---------- helpers ----------
 
@@ -109,7 +109,9 @@ const theme = EditorView.theme({
   // Each level is well indented, and wrapped lines align under the text, not under the bullet.
   ".cm-line.cm-li": { paddingLeft: "calc(22px + (var(--li-depth) + 1) * 1.7em)", textIndent: "-1.4em" },
   ".cm-line.cm-li-raw": { textIndent: "0" },
-  ".cm-li-marker": { display: "inline-block", minWidth: "1.4em", textIndent: "0", color: "var(--muted)" },
+  ".cm-li-marker, .cm-li-marker *": { color: "var(--muted) !important" },
+  ".cm-li-marker": { display: "inline-block", minWidth: "1.4em", textIndent: "0" },
+  ".cm-li-bullet": { width: "1em", minWidth: "1em", marginRight: "0.4em", textAlign: "center" }, // a bullet and its - share a centre
   ".cm-soft-break": { whiteSpace: "normal" }, // a joined line break: no stray space at the start of a wrapped line
   ".cm-hit-match": { backgroundColor: "var(--mark)", borderRadius: "2px" },
   ".cm-just-added": { backgroundColor: "var(--added)", transition: "background-color 1s" },
@@ -224,20 +226,48 @@ const softBreak = Decoration.replace({ widget: new SpaceWidget() });
 
 // What a list item's marker shows as: a bullet that changes with the level, or its number.
 class ListMarker extends WidgetType {
-  constructor(text) {
+  constructor(text, bullet) {
     super();
     this.text = text;
+    this.bullet = bullet;
   }
-  eq(other) { return other.text === this.text; }
+  eq(other) { return other.text === this.text && other.bullet === this.bullet; }
   toDOM() {
     const span = document.createElement("span");
-    span.className = "cm-li-marker";
+    span.className = markerClass(this.bullet);
     span.textContent = this.text;
     return span;
   }
 }
 const BULLETS = ["•", "◦", "▪"];
 const hidden = Decoration.replace({});
+const markerClass = (bullet) => (bullet ? "cm-li-marker cm-li-bullet" : "cm-li-marker");
+
+// Enter in a list: the next item, straight below (see reflow.js). A plain Enter would copy a blank
+// line from a list that has them, and CodeMirror's has no option against that.
+function continueList(view) {
+  const { state } = view;
+  const { main } = state.selection;
+  if (!main.empty) return false;
+  const line = state.doc.lineAt(main.head);
+  const lines = state.doc.toJSON();
+  const plan = enterInList(lines, line.number - 1, main.head - line.from);
+  if (!plan) return false;
+  const insert = `\n${plan.prefix}`;
+  view.dispatch({
+    changes: [
+      { from: main.head, insert },
+      ...plan.renumber.map((r) => {
+        const at = state.doc.line(r.line + 1).from;
+        return { from: at + r.from, to: at + r.to, insert: r.text };
+      }),
+    ],
+    selection: EditorSelection.cursor(main.head + insert.length),
+    scrollIntoView: true,
+    userEvent: "input",
+  });
+  return true;
+}
 const setFocused = StateEffect.define();
 
 function reflow({ editable }) {
@@ -247,27 +277,32 @@ function reflow({ editable }) {
     const editing = (i) => i >= lo && i <= hi;
     const cursorLine = editable && focused ? state.doc.lineAt(state.selection.main.head).number - 1 : -1;
     const decos = [];
+    const lists = listStructure(lines);
+    const inList = new Set([...lists.items, ...lists.continuations].map((entry) => entry.line));
     for (const i of softBreaks(lines)) {
-      if (i >= lo && i < hi) continue;
+      if (i >= lo && i < hi && !inList.has(i)) continue; // Enter there makes a new item, so a list stays as it is
       const end = state.doc.line(i + 1).to;
       // The break, and the indent of a list item's next line.
       decos.push(softBreak.range(end, end + 1 + /^\s*/.exec(lines[i + 1])[0].length));
     }
-    const lists = listStructure(lines);
-    for (const { line: i, depth, ordered, marker, textFrom } of lists.items) {
+    for (const { line: i, depth, ordered, marker, markerFrom, markerTo, textFrom } of lists.items) {
       const line = state.doc.line(i + 1);
-      const raw = i === cursorLine; // the line being edited shows what is in the file
-      decos.push(Decoration.line({ class: raw ? "cm-li cm-li-raw" : "cm-li", attributes: { style: `--li-depth: ${depth}` } }).range(line.from));
-      if (!raw) {
+      decos.push(Decoration.line({ class: "cm-li", attributes: { style: `--li-depth: ${depth}` } }).range(line.from));
+      if (i === cursorLine) {
+        // The real marker, in the same slot as the bullet it stands for: nothing else moves.
+        if (markerFrom) decos.push(hidden.range(line.from, line.from + markerFrom));
+        decos.push(Decoration.mark({ class: markerClass(!ordered) }).range(line.from + markerFrom, line.from + markerTo));
+        decos.push(hidden.range(line.from + markerTo, line.from + textFrom));
+      } else {
         const shown = ordered ? marker : BULLETS[depth % BULLETS.length];
-        decos.push(Decoration.replace({ widget: new ListMarker(shown) }).range(line.from, line.from + textFrom));
+        decos.push(Decoration.replace({ widget: new ListMarker(shown, !ordered) }).range(line.from, line.from + textFrom));
       }
     }
     for (const { line: i, depth, indent, joined } of lists.continuations) {
-      if (joined && !editing(i - 1)) continue; // it flows on from the line above
+      if (joined) continue; // it flows on from the line above
       const line = state.doc.line(i + 1);
       decos.push(Decoration.line({ class: "cm-li cm-li-raw", attributes: { style: `--li-depth: ${depth}` } }).range(line.from));
-      if (i !== cursorLine && indent) decos.push(hidden.range(line.from, line.from + indent));
+      if (indent) decos.push(hidden.range(line.from, line.from + indent));
     }
     const { envelopes, rules } = structure(lines);
     for (const { open, close, meta } of envelopes) {
@@ -336,6 +371,7 @@ function taskExtensions() {
       "Collect passages here: select text in the reader and press Ctrl/⌘+Enter, or use + on a result. " +
         "They go in at this cursor. Write your own notes around them: the Related panel reads this whole document."
     ),
+    Prec.highest(keymap.of([{ key: "Enter", run: continueList }])), // ahead of the markdown mode's Enter
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
     remeasureOnResize,
     EditorView.updateListener.of(onTaskUpdate),

@@ -435,6 +435,27 @@ def main() -> None:
             assert wrapped.replace("•", "").split() == ["hard", "wrapped", "and", "more"], wrapped  # it flows on
             assert (CORPUS / sample.name).read_text().startswith("- top\n  - sub")  # the file is unchanged
             step("lists: bullets per level, each clearly indented; hard-wrapped items flow; numbers stay")
+
+            page.evaluate("""() => { const v = window.isis.taskView;
+                v.dispatch({changes: {from: 0, to: v.state.doc.length, insert: '- one\\n\\n  - nested item\\n\\n- third'}}); v.focus(); }""")
+            spot = """() => { const r = document.createRange(); const line = [...document.querySelectorAll('#task-editor .cm-line')].find((l) => l.textContent.includes('nested item'));
+                const mark = line.querySelector('.cm-li-marker').getBoundingClientRect();
+                const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT); let node;
+                while ((node = walker.nextNode())) if (node.textContent.includes('nested')) break;
+                r.setStart(node, node.textContent.indexOf('nested')); r.setEnd(node, node.textContent.indexOf('nested') + 1);
+                return { marker: line.querySelector('.cm-li-marker').textContent, centre: mark.left + mark.width / 2, text: r.getBoundingClientRect().left }; }"""
+            page.evaluate("() => { const v = window.isis.taskView; v.dispatch({selection: {anchor: v.state.doc.line(5).to}}); }")
+            page.wait_for_timeout(150)
+            off = page.evaluate(spot)
+            page.evaluate("() => { const v = window.isis.taskView; v.dispatch({selection: {anchor: v.state.doc.line(3).to}}); }")
+            page.wait_for_timeout(150)
+            on = page.evaluate(spot)
+            assert (off["marker"], on["marker"]) == ("◦", "-"), (off, on)
+            assert abs(off["centre"] - on["centre"]) < 0.5 and abs(off["text"] - on["text"]) < 0.5, (off, on)  # nothing moves
+            page.keyboard.press("Enter")
+            page.keyboard.type("next")
+            assert task_text().split("\n")[2:4] == ["  - nested item", "  - next"], task_text()  # no blank line between
+            step("in a task the marker on the cursor's line takes the bullet's exact place; Enter goes straight to the next item")
         finally:
             sample.unlink()
         browser.close()

@@ -88,6 +88,8 @@ export function listStructure(lines) {
         depth: stack.length - 1,
         ordered: /\d/.test(item[2]),
         marker: item[2],
+        markerFrom: item[1].length,
+        markerTo: item[1].length + item[2].length,
         textFrom: item[0].length,
       });
     } else if (stack.length && indent > stack[0]) {
@@ -98,6 +100,39 @@ export function listStructure(lines) {
     }
   }
   return { items, continuations };
+}
+
+// What Enter does on line `n` at character `ch` when that starts a new item: straight on the next
+// line, whether or not the list has blank lines between its items. `prefix` starts the new line;
+// `renumber` lists the numbers below it that move up. Null when Enter should do what it does
+// elsewhere: outside a list, before the item's text, and on an empty item, which ends the list.
+export function enterInList(lines, n, ch) {
+  const { items, continuations } = listStructure(lines);
+  const onItem = items.find((item) => item.line === n);
+  const carriesOn = continuations.some((c) => c.line === n && c.joined);
+  const owner = onItem ?? (carriesOn ? items.filter((item) => item.line < n).at(-1) : null);
+  if (!owner) return null;
+  const text = lines[owner.line];
+  if (onItem && (ch < owner.textFrom || !text.slice(owner.textFrom).trim())) return null;
+  const box = /^\[[ xX]\]\s+/.exec(text.slice(owner.textFrom));
+  const lead = text.slice(0, owner.markerFrom);
+  const gap = text.slice(owner.markerTo, owner.textFrom);
+  const renumber = [];
+  let marker = owner.marker;
+  if (owner.ordered) {
+    const number = parseInt(owner.marker, 10);
+    const close = owner.marker.slice(-1);
+    marker = `${number + 1}${close}`;
+    let next = number + 1;
+    for (const item of items.filter((other) => other.line > owner.line)) {
+      if (item.depth < owner.depth) break;
+      if (item.depth === owner.depth && item.ordered) {
+        next += 1;
+        renumber.push({ line: item.line, from: item.markerFrom, to: item.markerTo, text: `${next}${item.marker.slice(-1)}` });
+      }
+    }
+  }
+  return { prefix: `${lead}${marker}${gap}${box ? "[ ] " : ""}`, renumber };
 }
 
 // Indices i of the lines whose break to line i + 1 shows as a space.

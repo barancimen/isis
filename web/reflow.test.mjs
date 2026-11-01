@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { enterInList, envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
 
 test("hard-wrapped paragraphs flow", () => {
   const lines = ["What the white whale was to Ahab, has been", "hinted; what, at times, he", "was to me.", "", "Next paragraph."];
@@ -96,4 +96,28 @@ test("lists inside --- sections, and text that already has bullet characters", (
   assert.deepEqual(depths(["---", "title: x", "tags:", "  - one", "---"]), [[3, 0]]);
   assert.deepEqual(depths(["• pasted", "• bullets", "  ◦ nested"]), [[0, 0], [1, 0], [2, 1]]);
   assert.deepEqual(softBreaks(["• pasted", "• bullets"]), []); // each stays on its own line
+});
+
+test("Enter in a list starts the next item, in the same style", () => {
+  const at = (lines, n, ch = lines[n].length) => enterInList(lines, n, ch);
+  assert.equal(at(["- one", "- two"], 1).prefix, "- ");
+  assert.equal(at(["* one", "  * two"], 1).prefix, "  * ");
+  assert.equal(at(["-   wide"], 0).prefix, "-   ");
+  assert.equal(at(["- [x] done"], 0).prefix, "- [ ] ");
+  assert.equal(at(["- one", "", "- two"], 2).prefix, "- "); // nothing about the blank line above
+  assert.equal(at(["- hard wrapped", "  and more"], 1).prefix, "- "); // from a line that carries on
+});
+
+test("Enter leaves other places to the editor", () => {
+  assert.equal(enterInList(["plain text"], 0, 3), null);
+  assert.equal(enterInList(["- "], 0, 2), null); // an empty item ends the list
+  assert.equal(enterInList(["- text"], 0, 1), null); // before the text
+  assert.equal(enterInList(["```", "- code", "```"], 1, 6), null);
+});
+
+test("numbers below a new item move up, at that level only", () => {
+  const { prefix, renumber } = enterInList(["1. one", "2. two", "   - sub", "3. three", "", "- other"], 0, 6);
+  assert.equal(prefix, "2. ");
+  assert.deepEqual(renumber.map((r) => [r.line, r.text]), [[1, "3."], [3, "4."]]);
+  assert.equal(enterInList(["1) a", "2) b"], 1, 4).prefix, "3) ");
 });
