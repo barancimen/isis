@@ -850,6 +850,12 @@ function describeHover(why) {
   return lines.join("\n");
 }
 
+// The document's title and, when it says something more, the heading the passage is under.
+function hitTitle(hit, file) {
+  if (!hit.title) return hit.heading || file;
+  return hit.heading && hit.heading !== hit.title ? `${hit.title} · ${hit.heading}` : hit.title;
+}
+
 function renderHit(hit, { lane = null, isNew = false } = {}) {
   const file = withoutExtension(hit.path.split("/").pop());
   const key = passageKey(hit);
@@ -879,7 +885,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
   return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, onclick: open, title: describeHover(hit.why) },
-    h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hit.heading || file), actions),
+    h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hitTitle(hit, file)), actions),
     h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
     why && h("div", { class: "hit-why" }, why),

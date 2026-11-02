@@ -1,4 +1,6 @@
-from isis.engine.chunker import chunk_markdown, split_lines
+import pytest
+
+from isis.engine.chunker import chunk_markdown, document_title, split_lines
 
 
 def spans(passages):
@@ -76,3 +78,18 @@ def test_frontmatter_of_every_usual_shape_is_still_skipped():
     for head in ("tags: x", "title: A\n\nDate Created: 2020\ntags:\n  - one\n- two\n# a comment", "description: >\n  folded text", ""):
         passages = chunk_markdown("a.md", f"---\n{head}\n---\nbody text\n", target_words=0)
         assert [p.text for p in passages] == ["body text"], head
+
+
+@pytest.mark.parametrize("text,title", [
+    ('---\ntitle: "A \\"Quoted\\" Title"\nauthor: X\n---\n\n# Heading\n', 'A "Quoted" Title'),
+    ("---\ntitle: Plain: with colon\n---\n\nText\n", "Plain: with colon"),
+    ("---\ntitle: 'It''s'\n---\n", "It's"),
+    ("---\ntags: [a]\n---\n\n# From the heading\n\nText\n", "From the heading"),
+    ("# First\n\n# Second\n", "First"),
+    ("## Not top level\n\nText\n", ""),
+    ("```\n# in code\n```\n", ""),
+    ("Just text\n", ""),
+    ("", ""),
+])
+def test_document_title(text, title):
+    assert document_title(split_lines(text)) == title

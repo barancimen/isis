@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -10,6 +11,8 @@ HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HAS_WORD = re.compile(r"[^\W_]")
 YAML_LINE = re.compile(r"^(\s|#|-\s|[\w.-]+(?: [\w.-]+){0,3}:(\s|$))")  # a key, a list item, a comment, or indented
+FRONT_MATTER_TITLE = re.compile(r"^title:\s*(.*?)\s*$", re.IGNORECASE)
+TITLE_SEARCH_LINES = 200  # a top-level heading further down is a part of the document, not its title
 MAX_FRONT_MATTER = 200  # lines, as in the page (reflow.js)
 
 TARGET_WORDS = 100  # short neighbouring paragraphs under one heading are merged up to this size
@@ -45,6 +48,31 @@ def _body_start(lines: list[str]) -> int:
         if lines[n].strip() in ("---", "..."):
             return n + 1 if all(YAML_LINE.match(line) or not line.strip() for line in lines[1:n]) else 1
     return 1
+
+
+def document_title(lines: list[str]) -> str:
+    """The title of a document: `title:` in its frontmatter, or else a top-level heading near the
+    start. Empty if it has neither, and then the file name has to do."""
+    body = _body_start(lines)
+    for line in lines[1:body - 1] if body > 1 else []:
+        if m := FRONT_MATTER_TITLE.match(line):
+            value = m.group(1).strip()
+            if len(value) >= 2 and value[0] == '"' == value[-1]:
+                try:
+                    value = json.loads(value)  # a double-quoted YAML string, with its escapes
+                except ValueError:
+                    value = value[1:-1]
+            elif len(value) >= 2 and value[0] == "'" == value[-1]:
+                value = value[1:-1].replace("''", "'")
+            if value:
+                return str(value)
+    in_fence = False
+    for line in lines[body:body + TITLE_SEARCH_LINES]:
+        if FENCE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and line.startswith("# ") and (m := HEADING.match(line)):
+            return m.group(1)
+    return ""
 
 
 def heading_texts(content: str) -> list[str]:

@@ -27,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from .chunker import HEADING
+from .chunker import HEADING, document_title
 from .index import Snapshot
 from .params import Group, tunable
 from .text import term_spans, tokenize, tokenize_with_surface
@@ -120,6 +120,7 @@ class Hit:
     snippet: list[SnippetLine]
     why: dict = field(default_factory=dict)
     marks: list[tuple[int, int, int]] = field(default_factory=list)  # (line, start, end) of every highlight in the passage
+    title: str = ""  # of the document, if it has one (see document_title)
 
 
 class QueryError(ValueError):
@@ -544,4 +545,4 @@ def make_hit(
     focus = match[0] if match else start
     marks = [(n, s, e) for n in ([above] if above is not None else []) + list(range(start, end + 1)) for s, e in spans_on(n)]
 
-    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why, marks)
+    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why, marks, title=document_title(lines))
