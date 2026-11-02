@@ -1104,6 +1104,11 @@ async function undoFeedback(action, id, element) {
 
 // ---------- feedback drawer ----------
 
+// The header of a collapsible section. Its reset button stays in view when the section is closed.
+function sectionHead(name, title, reset, count = "") {
+  return h("summary", { title }, h("span", { class: "tune-title" }, name, h("span", { class: "tune-count" }, count)), reset);
+}
+
 // Everything the panel remembers about the task, each with its undo. It stays with the task
 // when the text changes, so it should never be out of sight.
 function renderFeedback(prefs, terms, lanes) {
@@ -1164,7 +1169,14 @@ function renderFeedback(prefs, terms, lanes) {
     `${laneTitles.get(lane) ?? lane} (${[adds && `${adds} ${prefs.liked.length ? "added or ↑" : "added"}`, dismisses && `${dismisses} removed`].filter(Boolean).join(", ")})`);
 
   drawer.replaceChildren(
-    h("summary", { title: "See and change the data that the app keeps for this task. These changes stay when the text of the task changes." }, "Your changes", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
+    sectionHead("Your changes", "See and change the data that the app keeps for this task. These changes stay when the text of the task changes.",
+      h("button", {
+        class: "tune-reset",
+        type: "button",
+        disabled: empty,
+        title: "Remove all of the changes in this list for this task. A copy goes to the .trash folder in the tasks folder.",
+        onclick: () => forgetFeedback().catch(fail),
+      }, "Remove all changes"), summary.length ? ` · ${summary.join(" · ")}` : ""),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
         "You have no changes for this task at this time. This list shows the passages that you add (+) or want more of (↑). It also shows the passages and documents that you remove (×, ⊘, ⊠), your word rules, and the keywords that you stop. The app keeps these changes when the text of the task changes."),
@@ -1197,10 +1209,6 @@ function renderFeedback(prefs, terms, lanes) {
         h("div", { class: "tune-group" }, "Result groups"),
         h("p", { class: "feedback-note" }, `${laneCounts.join(" · ")}. Groups from which you add passages usually get more of the results.`),
       ],
-      !empty && h("div", { class: "tune-foot" },
-        h("button", { title: "Remove all of the changes in this list for this task.", onclick: () => forgetFeedback().catch(fail) }, "Remove all changes"),
-        h("p", { class: "feedback-note" }, "This removes all of the changes in this list for this task. A copy goes to the .trash folder in the tasks folder."),
-      ),
     ),
   );
 }
@@ -1324,13 +1332,18 @@ function buildTuner(kind) {
     rows.push(paramRow(kind, spec));
   }
   $(`#${kind}-tune`).replaceChildren(
-    h("summary", { title: "Change how the app finds and ranks passages." }, "Adjustments", h("span", { class: "tune-count" })),
+    sectionHead("Adjustments", "Change how the app finds and ranks passages.",
+      h("button", {
+        class: "tune-reset",
+        type: "button",
+        title: "Set all sliders in this list back to their standard values.",
+        onclick: () => resetParams(kind),
+      }, "Set all to standard")),
     h("div", { class: "tune-body" },
       h("p", { class: "feedback-note" },
         `Move a slider to change the results. Put the pointer on a slider to read about it. The “standard” button sets the slider back. ${kind === "search" ? "The results change immediately." : "Then select Refresh to see the new results."} This browser keeps your adjustments.`),
       rows,
       h("div", { class: "tune-foot" },
-        h("button", { title: "Set all sliders in this list back to their standard values.", onclick: () => resetParams(kind) }, "Set all to standard"),
         h("code", { class: "tune-python", title: "These adjustments as Python code. You can use this code in notebooks/explore.ipynb." }),
       ),
     ),
@@ -1342,6 +1355,7 @@ function updateTuner(kind) {
   const el = $(`#${kind}-tune`);
   const changed = Object.keys(state.params[kind]).length;
   el.querySelector(".tune-count").textContent = changed ? ` · ${changed} changed` : "";
+  el.querySelector(".tune-reset").disabled = !changed;
   for (const row of el.querySelectorAll(".tune-row")) row.classList.toggle("changed", row.dataset.name in state.params[kind]);
   el.querySelector(".tune-python").textContent = pythonSnippet(kind);
   if (kind === "search") $("#search-meaning").setAttribute("aria-pressed", String(meaningWeight() > 0));
@@ -1373,6 +1387,7 @@ function showPanel(name) {
     button.setAttribute("aria-selected", String(button.dataset.panel === name));
   }
   for (const panel of ["files", "search", "related"]) $(`#panel-${panel}`).hidden = panel !== name;
+  $("#related-refresh").hidden = name !== "related";
   if (name === "related" && state.task && state.relatedFor !== state.task) refreshRelated().catch(fail);
   if (name === "search") $("#search-input").focus();
 }

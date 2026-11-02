@@ -146,7 +146,8 @@ code { font-family: inherit; font-size: 0.92em; }
   min-height: 0;
   border-right: 1px solid var(--border);
 }
-.side-tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
+.side-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); }
+.side-tabs { display: flex; gap: 4px; }
 .side-tabs button {
   border: none;
   border-bottom: 2px solid transparent;
@@ -163,7 +164,7 @@ code { font-family: inherit; font-size: 0.92em; }
 .toggle { display: flex; gap: 4px; align-items: center; color: var(--muted); white-space: nowrap; font-size: 13.5px; }
 .hint, .status-line { color: var(--faint); font-size: 12.5px; }
 .related-bar { display: flex; gap: 8px; align-items: center; }
-#related-refresh { flex: none; }
+#related-refresh { flex: none; margin-left: auto; }
 #related-refresh:not(:disabled), .meaning-btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 #related-refresh:disabled, .meaning-btn:disabled { opacity: 0.5; cursor: default; }
 
@@ -250,7 +251,13 @@ code { font-family: inherit; font-size: 0.92em; }
 /* ---- tunable parameters ---- */
 
 .tune { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); flex: none; }
-.tune > summary { cursor: pointer; padding: 6px 10px; font-size: 13.5px; color: var(--muted); user-select: none; }
+.tune > summary { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; padding: 6px 10px; font-size: 13.5px; color: var(--muted); user-select: none; list-style: none; }
+.tune > summary::-webkit-details-marker { display: none; }
+.tune > summary::before { content: "▸"; flex: none; }
+.tune[open] > summary::before { content: "▾"; }
+.tune-title { flex: 1; min-width: 0; }
+.tune-reset { flex: none; padding: 0 6px; font-size: 12px; line-height: 1.5; color: var(--fg); }
+.tune-reset:disabled { opacity: 0.5; cursor: default; }
 .tune[open] > summary { border-bottom: 1px solid var(--border); }
 .tune-count { color: var(--accent); }
 .tune-body { padding: 2px 10px 10px; display: flex; flex-direction: column; gap: 2px; max-height: 46vh; overflow-y: auto; }

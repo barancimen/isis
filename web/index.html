@@ -18,10 +18,13 @@
   </nav>
 
   <aside id="side">
+    <div class="side-head">
     <div class="side-tabs" role="tablist">
       <button role="tab" data-panel="files" title="See all of your documents, and open a document to read it.">Files</button>
       <button role="tab" data-panel="search" title="Find passages in your documents with words that you write.">Search</button>
       <button role="tab" data-panel="related" title="See passages in your documents that are related to all of your task.">Related</button>
+    </div>
+    <button id="related-refresh" type="button" disabled title="Get new results. This button becomes active after you change your task or an adjustment. Until then, the results stay the same while you read them.">Refresh</button>
     </div>
     <section id="panel-files" class="panel" role="tabpanel">
       <input id="file-filter" spellcheck="false" type="search" placeholder="Find a file by its name…" aria-label="Find a file by its name">
@@ -43,7 +46,6 @@
       <details id="related-feedback" class="tune" hidden></details>
       <div id="related-folders" class="folder-picks" hidden></div>
       <div class="related-bar">
-        <button id="related-refresh" type="button" disabled title="Get new results. This button becomes active after you change your task or an adjustment. Until then, the results stay the same while you read them.">Refresh</button>
         <div id="related-status" class="status-line"></div>
       </div>
       <div id="related-terms" class="chips" aria-label="Keywords from your task"></div>
