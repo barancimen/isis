@@ -10,11 +10,20 @@ from __future__ import annotations
 
 import math
 from dataclasses import MISSING, field, fields
+from typing import NamedTuple
 
 
-def tunable(default=MISSING, *, label: str, help: str, group: str, min=None, max=None, step=None,
+class Group(NamedTuple):
+    """A heading in the page's list of sliders, and the text under it."""
+
+    title: str
+    help: str
+
+
+def tunable(default=MISSING, *, label: str, help: str, group: Group, min=None, max=None, step=None,
             choices=None, default_factory=MISSING, keys=None):
-    """A dataclass field the page may change. `keys` makes a dict field tunable key by key."""
+    """A dataclass field the page may change. `choices` maps each value to its label on the page.
+    `keys` makes a dict field tunable key by key, and maps each key to its label on the page."""
     meta = {"label": label, "help": help, "group": group, "min": min, "max": max, "step": step,
             "choices": choices, "keys": keys}
     if default_factory is not MISSING:
@@ -39,20 +48,22 @@ def specs(cls) -> list[dict]:
     for f, meta in _tunables(cls):
         value = getattr(defaults, f.name)
         if meta["keys"]:
-            entries = [(f"{f.name}.{k}", f"{meta['label']}: {k}", value[k]) for k in meta["keys"]]
+            entries = [(f"{f.name}.{k}", f"{meta['label']} ({shown})", value[k]) for k, shown in meta["keys"].items()]
         else:
             entries = [(f.name, meta["label"], value)]
         for name, label, default in entries:
             out.append({
                 "name": name,
                 "label": label,
-                "group": meta["group"],
+                "group": meta["group"].title,
+                "group_help": meta["group"].help,
                 "help": meta["help"],
                 "type": _kind(default, meta),
                 "min": meta["min"],
                 "max": meta["max"],
                 "step": meta["step"],
-                "choices": meta["choices"],
+                "choices": list(meta["choices"]) if meta["choices"] else None,
+                "choice_labels": meta["choices"],
                 "default": default,
             })
     return out

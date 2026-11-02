@@ -169,7 +169,7 @@ def test_bridges_link_two_themes(engine):
 
 def test_single_theme_tasks_explain_missing_lanes(engine):
     lanes = {l.name: l for l in engine.related("Whale harpoon ship captain sail.").lanes}
-    assert "two themes" in lanes["bridges"].note and not lanes["bridges"].items
+    assert "two or more topics" in lanes["bridges"].note and not lanes["bridges"].items
 
 
 def test_the_whole_document_is_the_query(engine):
@@ -208,7 +208,7 @@ def test_lexical_only_engine_still_suggests(engine, tmp_path):
     lexical.refresh()
     result = lexical.related("Whale harpoon ship captain sail.")
     lanes = {l.name: l for l in result.lanes}
-    assert lanes["core"].items and "Needs embeddings" in lanes["hidden"].note
+    assert lanes["core"].items and "meaning data" in lanes["hidden"].note
 
 
 def test_task_units_are_paragraphs_with_lines():
@@ -341,7 +341,7 @@ def test_headings_do_not_decide_the_themes(engine):
 
     assert themes(headed) == themes(plain)  # three headings, the same two groups of paragraphs
     assert "One" not in themes(headed)[1]
-    assert engine.related("# Only a title\nJust one short note about a whale.\n").themes[0].label == "Everything"
+    assert engine.related("# Only a title\nJust one short note about a whale.\n").themes[0].label == "All of the task"
 
 
 def test_heading_words_count_as_plain_text(engine):

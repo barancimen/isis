@@ -51,7 +51,7 @@ def refresh_related(page):
     expect(page.locator("#related-refresh")).to_be_enabled(timeout=30000)
     with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
         page.click("#related-refresh")
-    expect(page.locator("#related-status")).not_to_have_text("Updating…", timeout=30000)
+    expect(page.locator("#related-status")).not_to_have_text("Refresh started…", timeout=30000)
     page.wait_for_timeout(300)  # the response is rendered
 
 
@@ -118,7 +118,7 @@ def main() -> None:
         expect(page.locator("#search-results .hit .hit-why").first).to_have_text(re.compile(r"meaning #1$"), timeout=15000)
         assert any('"keyword_weight":0' in u for u in searches), searches
         assert page.locator("#search-tune .tune-python").inner_text() == "SearchConfig(keyword_weight=0)"
-        page.locator("#search-tune button", has_text="Reset to defaults").click()
+        page.locator("#search-tune button", has_text="Set all to standard").click()
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
 
@@ -140,7 +140,7 @@ def main() -> None:
         expect(slider("meaning_weight")).to_have_value("1")
         expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
         expect(page.locator("#search-tune [data-name=meaning_weight] .tune-default")).to_be_hidden()
-        page.locator("#search-tune button", has_text="Reset to defaults").click()
+        page.locator("#search-tune button", has_text="Set all to standard").click()
         expect(slider("k1")).to_have_value("1.2")
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
         step("Meaning button and Meaning weight slider move together; default buttons restore one slider or all")
@@ -204,7 +204,7 @@ def main() -> None:
         expect(page.locator("#related-tune [data-name=query] select")).to_have_value("document")
         expect(page.locator("#related-tune [data-name=query] .tune-default")).to_be_hidden()
         set_slider(page, "#related-tune [data-name=total_slots] input", 6)  # and all of them
-        page.locator("#related-tune button", has_text="Reset to defaults").click()
+        page.locator("#related-tune button", has_text="Set all to standard").click()
         expect(page.locator("#related-tune .tune-count")).to_have_text("")
         refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
@@ -246,7 +246,7 @@ def main() -> None:
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
         with page.expect_response(lambda r: r.url.endswith("/feedback"), timeout=30000):
-            page.locator("#related-lanes .hit button[title^='Not useful']").first.click()
+            page.locator("#related-lanes .hit button[title^='Remove this result. The app']").first.click()
         page.wait_for_timeout(200)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["ignored"] and meta["dismissed"]
@@ -254,20 +254,20 @@ def main() -> None:
 
         drawer = page.locator("#related-feedback")
         drawer.locator("summary").click()
-        expect(drawer.locator(".tune-count")).to_contain_text("1 dismissed", timeout=30000)
+        expect(drawer.locator(".tune-count")).to_contain_text("1 removed", timeout=30000)
         expect(drawer.locator(".feedback-item")).to_have_count(1)
         shot(page, "feedback.png")
         drawer.locator(".chip.ignored .chip-x").click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(0, timeout=30000)
-        expect(drawer.locator(".tune-count")).not_to_contain_text("ignored", timeout=30000)
+        expect(drawer.locator(".tune-count")).not_to_contain_text("not in use", timeout=30000)
         assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["ignored"] == []
         step("the drawer's × searches for an ignored keyword again")
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
-        drawer.locator(".feedback-item button", has_text="Restore").click()
-        expect(drawer.locator(".tune-count")).not_to_contain_text("dismissed", timeout=30000)
+        drawer.locator(".feedback-item button", has_text="Show again").click()
+        expect(drawer.locator(".tune-count")).not_to_contain_text("removed", timeout=30000)
         assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["dismissed"] == []
-        drawer.locator("button", has_text="Forget all").click()
+        drawer.locator("button", has_text="Remove all changes").click()
         expect(drawer.locator(".tune-count")).to_have_text("", timeout=30000)
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(0)
         assert not (TASKS / ".meta" / f"{WHALES}.json").exists()
@@ -296,7 +296,7 @@ def main() -> None:
         page.press("#steer-input", "Escape")
         expect(page.locator("#steer-input")).to_have_value("-squid +/[Ww]hal/")
         page.locator("#related-lanes .hit button.avoid").first.click()
-        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 avoided", timeout=30000)
+        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 removed with near passages", timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["steer"] == "-squid +/[Ww]hal/" and meta["dismissed"][0]["avoid"] is True
         shot(page, "steer.png")
@@ -308,7 +308,7 @@ def main() -> None:
         marked = page.locator("#related-lanes .hit", has=page.locator("button.like[aria-pressed=true]"))
         expect(marked).to_have_count(1, timeout=30000)
         assert marked.locator(".hit-loc").inner_text() == title  # it stays on show
-        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 more like this")
+        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 more of this")
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert len(meta["liked"]) == 1 and meta["liked"][0]["path"] == title.rsplit(":", 1)[0]
         assert task_text().count(meta["liked"][0]["text"][:40]) == 0  # not added to the document

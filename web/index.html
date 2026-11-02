@@ -11,29 +11,29 @@
   <nav id="tasks" aria-label="Tasks">
     <div class="tasks-head">
       <span class="brand">isis</span>
-      <button id="new-task" class="icon-btn" title="New task" aria-label="New task">+</button>
+      <button id="new-task" class="icon-btn" title="Make a new task. A task is a document where you collect passages and write your notes." aria-label="Make a new task">+</button>
     </div>
     <ul id="task-tabs" role="tablist" aria-orientation="vertical"></ul>
-    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="tasks" title="Drag to resize (or use the arrow keys); double-click to reset"></div>
+    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="tasks" title="Pull this border to change the width of the panel. You can also use the left and right arrow keys. Double-click the border to set the standard width."></div>
   </nav>
 
   <aside id="side">
     <div class="side-tabs" role="tablist">
-      <button role="tab" data-panel="files">Files</button>
-      <button role="tab" data-panel="search">Search</button>
-      <button role="tab" data-panel="related">Related</button>
+      <button role="tab" data-panel="files" title="See all of your documents, and open a document to read it.">Files</button>
+      <button role="tab" data-panel="search" title="Find passages in your documents with words that you write.">Search</button>
+      <button role="tab" data-panel="related" title="See passages in your documents that are related to all of your task.">Related</button>
     </div>
     <section id="panel-files" class="panel" role="tabpanel">
-      <input id="file-filter" spellcheck="false" type="search" placeholder="Filter files…" aria-label="Filter files">
+      <input id="file-filter" spellcheck="false" type="search" placeholder="Find a file by its name…" aria-label="Find a file by its name">
       <ul id="file-list"></ul>
     </section>
     <section id="panel-search" class="panel" role="tabpanel">
       <div class="search-row">
-        <input id="search-input" spellcheck="false" type="search" placeholder="Search the corpus…" aria-label="Search the corpus">
-        <button id="search-meaning" type="button" class="meaning-btn" aria-pressed="true" title="Also match by meaning (fuses BM25 with embeddings). Off is the same as Parameters › Meaning weight at 0.">Meaning</button>
+        <input id="search-input" spellcheck="false" type="search" placeholder="Find passages in your documents…" aria-label="Find passages in your documents">
+        <button id="search-meaning" type="button" class="meaning-btn" aria-pressed="true" title="When this button is on, the app also finds passages that are near your words in meaning. These passages can use different words. When this button is off, the app uses only your words. Off is the same as the slider &quot;How important meaning is&quot; at 0 in Adjustments.">Meaning</button>
       </div>
       <div id="search-folders" class="folder-picks" hidden></div>
-      <div class="hint">Words rank by BM25. A <code>"phrase"</code> or <code>/regex/</code> ranks like a word; <code>+x</code> requires x and <code>-x</code> excludes it, even with <em>Meaning</em> on. Ctrl/⌘+K jumps here.</div>
+      <div class="hint">A passage is a short part of a document. Write the words that you want to find. Passages with more of your words rank higher. Use <code>"two words"</code> to find a phrase. Use <code>/text/</code> for a regular expression. Use <code>+word</code> to show only passages with that word. Use <code>-word</code> to remove passages with that word. Push Ctrl/⌘+K to come back to this box.</div>
       <details id="search-tune" class="tune"></details>
       <div id="search-status" class="status-line"></div>
       <div id="search-results" class="results"></div>
@@ -43,43 +43,44 @@
       <details id="related-feedback" class="tune" hidden></details>
       <div id="related-folders" class="folder-picks" hidden></div>
       <div class="related-bar">
-        <button id="related-refresh" type="button" disabled title="Update the suggestions. Lights up when something has changed; until then they stay as they are while you read them.">Refresh</button>
+        <button id="related-refresh" type="button" disabled title="Get new results. This button becomes active after you change your task or an adjustment. Until then, the results stay the same while you read them.">Refresh</button>
         <div id="related-status" class="status-line"></div>
       </div>
-      <div id="related-terms" class="chips" aria-label="Terms taken from the task"></div>
+      <div id="related-terms" class="chips" aria-label="Keywords from your task"></div>
       <form id="related-steer" class="steer-row" hidden>
-        <input id="steer-input" type="search" spellcheck="false" placeholder='Steer: word  +required  -never  "a phrase"  /regex/' aria-label="Steer the suggestions">
-        <div class="hint">Plain words, phrases and patterns are preferred, <code>+x</code> is required, <code>-x</code> is never shown. Enter saves; it stays with the task.</div>
+        <div class="hint">These keywords come from your task. Select a keyword to make it more important. Select × to stop the use of a keyword.</div>
+        <input id="steer-input" type="search" spellcheck="false" placeholder='Word rules  word  +word  -word  "two words"  /text/' aria-label="Word rules for the results">
+        <div class="hint">Write word rules to change the results. A <code>word</code> makes passages with that word rank higher. <code>+word</code> shows only passages with that word. <code>-word</code> removes passages with that word. Push Enter to save. The app keeps the rules with this task.</div>
         <div id="steer-error" class="steer-error" hidden></div>
       </form>
       <div id="related-lanes" class="results"></div>
     </section>
-    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="side" title="Drag to resize (or use the arrow keys); double-click to reset"></div>
+    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="side" title="Pull this border to change the width of the panel. You can also use the left and right arrow keys. Double-click the border to set the standard width."></div>
   </aside>
 
   <main id="reader">
     <header class="pane-head">
-      <span id="reader-path" class="path">No file open</span>
-      <button id="reader-add" class="add-btn" title="Add the selected text to the task, at its cursor (Ctrl/⌘+Enter)" hidden>+ Add to task</button>
+      <span id="reader-path" class="path">No document open</span>
+      <button id="reader-add" class="add-btn" title="Add the selected text to your task, at the cursor in the task. You can also push Ctrl/⌘+Enter." hidden>+ Add to task</button>
     </header>
     <div id="reader-editor" class="editor"></div>
-    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="reader" title="Drag to resize (or use the arrow keys); double-click to reset"></div>
+    <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" data-resize="reader" title="Pull this border to change the width of the panel. You can also use the left and right arrow keys. Double-click the border to set the standard width."></div>
   </main>
 
   <section id="task" aria-label="Task document">
     <header class="pane-head">
       <span id="task-name" class="path">No task</span>
-      <span id="save-state" class="save-state"></span>
+      <span id="save-state" class="save-state" title="The app saves your task automatically while you write."></span>
     </header>
     <div id="conflict" class="banner" hidden>
-      This task changed on disk since it was loaded.
-      <button id="conflict-load">Load the disk version</button>
-      <button id="conflict-keep">Keep mine</button>
+      The file of this task changed on the disk after the app opened it.
+      <button id="conflict-load" title="Replace the text in this panel with the text on the disk. This removes your changes in this panel.">Use the version on the disk</button>
+      <button id="conflict-keep" title="Keep the text in this panel. The app replaces the version on the disk with this text.">Keep this version</button>
     </div>
     <div id="task-editor" class="editor"></div>
   </section>
 </div>
-<footer id="statusbar"><span id="index-status"></span><span id="flash" aria-live="polite"></span><span id="index-size"></span></footer>
+<footer id="statusbar"><span id="index-status" title="The number of passages that the app can find, and the name of the meaning model. A passage is a short part of a document."></span><span id="flash" aria-live="polite"></span><span id="index-size" title="The number of documents that the app can read, and the disk space that the search index uses."></span></footer>
 <script type="module" src="app.js"></script>
 </body>
 </html>

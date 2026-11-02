@@ -69,7 +69,7 @@ function flash(message) {
 
 function fail(error) {
   console.error(error);
-  flash(`Error: ${error.message}`);
+  flash(`Error. ${error.message}`);
 }
 
 // ---------- editors ----------
@@ -352,7 +352,7 @@ function readerState(doc) {
       theme,
       reflow({ editable: false }),
       hitSlot.field,
-      placeholder("Open a file from Files, or click a search result."),
+      placeholder("Open a document from Files, or select a result."),
       keymap.of([{
         key: "Mod-Enter",
         run: () => {
@@ -380,8 +380,8 @@ function taskExtensions() {
     reflow({ editable: true }),
     addedSlot.field,
     placeholder(
-      "Collect passages here: select text in the reader and press Ctrl/⌘+Enter, or use + on a result. " +
-        "They go in at this cursor. Write your own notes around them: the Related panel reads this whole document."
+      "Collect passages here. Select text in a document and push Ctrl/⌘+Enter, or select + on a result. " +
+        "The passage goes to this cursor. Write your notes around the passages. The Related panel reads all of this task."
     ),
     Prec.highest(keymap.of([{ key: "Enter", run: continueList }])), // ahead of the markdown mode's Enter
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
@@ -393,7 +393,7 @@ function taskExtensions() {
 const taskState = (doc) => EditorState.create({ doc, extensions: taskExtensions() });
 const noTaskState = () => EditorState.create({
   doc: "",
-  extensions: [theme, EditorState.readOnly.of(true), placeholder("Create a task with + to start collecting.")],
+  extensions: [theme, EditorState.readOnly.of(true), placeholder("Select + at the top left to make a task.")],
 });
 
 const reader = new EditorView({ parent: $("#reader-editor"), state: readerState("") });
@@ -433,7 +433,7 @@ function renderTaskTabs() {
   const list = $("#task-tabs");
   list.replaceChildren();
   if (!state.tasks.length) {
-    list.append(h("li", { class: "tasks-empty" }, "No tasks yet. Press + to create one."));
+    list.append(h("li", { class: "tasks-empty" }, "You have no tasks. Select + to make a task."));
     return;
   }
   for (const { name } of state.tasks) {
@@ -442,8 +442,8 @@ function renderTaskTabs() {
       h("li", { class: `task-tab${active ? " active" : ""}`, role: "presentation" },
         h("button", { class: "name", role: "tab", "aria-selected": String(active), title: name, onclick: () => switchTask(name).catch(fail) }, name),
         h("span", { class: "tab-actions" },
-          h("button", { title: "Rename task", "aria-label": `Rename ${name}`, onclick: () => renameTask(name).catch(fail) }, "✎"),
-          h("button", { title: "Delete task (moved to the tasks folder's .trash)", "aria-label": `Delete ${name}`, onclick: () => deleteTask(name).catch(fail) }, "×"),
+          h("button", { title: "Change the name of this task", "aria-label": `Change the name of ${name}`, onclick: () => renameTask(name).catch(fail) }, "✎"),
+          h("button", { title: "Remove this task. The app moves its file to the .trash folder in the tasks folder.", "aria-label": `Remove ${name}`, onclick: () => deleteTask(name).catch(fail) }, "×"),
         ),
       ),
     );
@@ -474,7 +474,7 @@ async function switchTask(name) {
   measureWholeDocument(taskView);
   $("#task-name").textContent = name;
   $("#conflict").hidden = true;
-  setSaveState(doc.dirty ? "Unsaved" : "Saved");
+  setSaveState(doc.dirty ? "Not saved" : "Saved");
   renderTaskTabs();
   state.relatedStale = false;
   updateRefreshButton();
@@ -494,7 +494,7 @@ function showNoTask() {
 }
 
 async function newTask() {
-  const name = prompt("Name of the new task:");
+  const name = prompt("Name of the new task");
   if (!name || !name.trim()) return null;
   const task = await api("POST", "/api/tasks", { name });
   await loadTasks();
@@ -503,7 +503,7 @@ async function newTask() {
 }
 
 async function renameTask(name) {
-  const newName = prompt("Rename task:", name);
+  const newName = prompt("New name of this task", name);
   if (!newName || newName.trim() === name) return;
   await saveTask(name);
   const task = await api("POST", `/api/tasks/${enc(name)}/rename`, { new_name: newName });
@@ -520,7 +520,7 @@ async function renameTask(name) {
 }
 
 async function deleteTask(name) {
-  if (!confirm(`Delete the task “${name}”? The file is moved to the tasks folder's .trash.`)) return;
+  if (!confirm(`Remove the task “${name}”? The app moves its file to the .trash folder in the tasks folder.`)) return;
   await api("DELETE", `/api/tasks/${enc(name)}`);
   state.docs.delete(name);
   await loadTasks();
@@ -549,7 +549,7 @@ async function saveTask(name, { keepalive = false } = {}) {
   if (!doc.dirty) return;
   const content = (name === state.task ? taskView.state : doc.state).doc.toString();
   doc.dirty = false;
-  if (name === state.task) setSaveState("Saving…");
+  if (name === state.task) setSaveState("Save started…");
   doc.saving = (async () => {
     try {
       const body = { content, base_mtime: doc.mtime };
@@ -557,7 +557,7 @@ async function saveTask(name, { keepalive = false } = {}) {
       const small = new TextEncoder().encode(JSON.stringify(body)).length < 60000;
       const result = await api("PUT", `/api/tasks/${enc(name)}`, body, { keepalive: keepalive && small });
       doc.mtime = result.mtime;
-      if (name === state.task) setSaveState(doc.dirty ? "Unsaved" : "Saved");
+      if (name === state.task) setSaveState(doc.dirty ? "Not saved" : "Saved");
     } catch (error) {
       doc.dirty = true;
       if (error.status === 409) {
@@ -567,7 +567,7 @@ async function saveTask(name, { keepalive = false } = {}) {
           setSaveState("Not saved");
         }
       } else {
-        if (name === state.task) setSaveState("Save failed");
+        if (name === state.task) setSaveState("Not saved. Error.");
         throw error;
       }
     }
@@ -613,7 +613,7 @@ function onTaskUpdate(update) {
   if (!state.task || update.state.readOnly || !update.docChanged) return;
   const doc = state.docs.get(state.task);
   if (doc) doc.dirty = true;
-  setSaveState("Unsaved");
+  setSaveState("Not saved");
   scheduleSave();
   requestRelated();
 }
@@ -727,7 +727,7 @@ function renderFiles() {
     }
   }
   if (more) list.append(h("li", { class: "folder" }, `…and ${more.toLocaleString()} more: narrow the filter.`));
-  if (!matches.length) list.append(h("li", { class: "folder" }, state.files.length ? "No matching files." : "No markdown files indexed yet."));
+  if (!matches.length) list.append(h("li", { class: "folder" }, state.files.length ? "No file has this name." : "The app did not find Markdown files."));
 }
 
 function toggleFolder(folder) {
@@ -757,7 +757,7 @@ async function loadFiles() {
 // ---------- results ----------
 
 const passageKey = (passage) => `${passage.path}:${passage.start_line}`;
-const LIKE_TITLE = "More like this: pull the suggestions toward this passage, without adding it";
+const LIKE_TITLE = "Show more passages near this passage, in meaning and in words. This does not add this passage to your task.";
 
 // Snippet lines flow as prose (hard-wrapped text would otherwise wrap twice in a narrow
 // panel); blank lines start a new paragraph. Context lines around the passage are dimmed.
@@ -787,21 +787,21 @@ function renderSnippet(hit) {
 }
 
 const WHY_LABELS = {
-  semantic_z: (v) => `meaning z ${v}`,
+  semantic_z: (v) => `meaning score ${v}`,
   lexical_rank: (v) => `keyword rank ${v}`,
-  obviousness: (v) => `keyword overlap ${Math.round(v * 100)}%`,
+  obviousness: (v) => `keyword score ${Math.round(v * 100)}%`,
   themes: (v) => v.join(" ↔ "),
-  rarity: (v) => `themes rarely meet (${Math.round(v * 100)}%)`,
-  collected_in_theme: (v) => `${v} collected in theme`,
-  matches_task_line: (v) => `closest to task line ${v + 1}`,
+  rarity: (v) => `the topics occur together in ${Math.round((1 - v) * 100)}% of their passages`,
+  collected_in_theme: (v) => `${v} collected in this topic`,
+  matches_task_line: (v) => `nearest to line ${v + 1} of your task`,
 };
 
 // For search hits found with Meaning on: where each signal ranked the passage.
 function describeSignals(why) {
   if (!("meaning_rank" in why)) return "";
   return [
-    why.keyword_rank ? `keywords #${why.keyword_rank}` : "not a top keyword match",
-    why.embedded === false ? "not embedded" : why.meaning_rank ? `meaning #${why.meaning_rank}` : "not a top meaning match",
+    why.keyword_rank ? `keywords #${why.keyword_rank}` : "not a top keyword result",
+    why.embedded === false ? "no meaning data" : why.meaning_rank ? `meaning #${why.meaning_rank}` : "not a top meaning result",
   ].join(" · ");
 }
 
@@ -810,6 +810,21 @@ function describeWhy(why) {
     .filter(([k, v]) => v !== null && WHY_LABELS[k])
     .map(([k, v]) => WHY_LABELS[k](v))
     .join(" · ");
+}
+
+// The text a result shows when the pointer is on it: what its numbers mean.
+function describeHover(why) {
+  const lines = ["Select this result to open the passage in its document."];
+  if (why.semantic_z !== undefined && why.semantic_z !== null) lines.push(`The meaning score is ${why.semantic_z}. A typical passage has a score of 0. A higher score is nearer to your task.`);
+  if (why.lexical_rank) lines.push(`The keyword rank is ${why.lexical_rank}. Rank 1 is the best result for the keywords of your task.`);
+  if (why.keyword_rank) lines.push(`The keyword rank is ${why.keyword_rank}. Rank 1 is the best result for your words.`);
+  if (why.meaning_rank) lines.push(`The meaning rank is ${why.meaning_rank}. Rank 1 is the nearest to your words in meaning.`);
+  if (why.obviousness !== undefined) lines.push(`The keyword score is ${Math.round(why.obviousness * 100)}% of the score of the best keyword result.`);
+  if (why.themes) lines.push(`The related topics of your task are ${why.themes.join(" and ")}.`);
+  if (why.rarity !== undefined) lines.push(`These topics occur together in ${Math.round((1 - why.rarity) * 100)}% of their passages. A lower number is more unusual.`);
+  if (why.collected_in_theme !== undefined) lines.push(`You collected ${why.collected_in_theme} passages for this topic.`);
+  if (why.matches_task_line !== undefined && why.matches_task_line !== null) lines.push(`The nearest text in your task is at line ${why.matches_task_line + 1}.`);
+  return lines.join("\n");
 }
 
 function renderHit(hit, { lane = null, isNew = false } = {}) {
@@ -828,19 +843,19 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     }).catch(fail);
   };
   const actions = h("span", { class: "hit-actions" },
-    h("button", { class: "add", title: "Add this passage to the task, at its cursor", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
+    h("button", { class: "add", title: "Add this passage to your task, at the cursor in the task.", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
     lane && h("button", {
       class: "like",
       "aria-pressed": String(Boolean(hit.why.liked)),
       title: LIKE_TITLE,
       onclick: () => likeHit(hit, lane).catch(fail),
     }, "↑"),
-    lane && h("button", { title: "Not useful: hide it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
-    lane && h("button", { class: "avoid", title: "Avoid: hide it and every passage like it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
-    lane && h("button", { class: "exclude-doc", title: `Exclude the document: never suggest anything from ${hit.path} for this task`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
+    lane && h("button", { title: "Remove this result. The app does not show this passage again for this task.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
+    lane && h("button", { class: "avoid", title: "Remove this result and all passages near it in meaning, for this task. The slider \"How near for ⊘\" in Adjustments sets how near.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
+    lane && h("button", { class: "exclude-doc", title: `Remove all passages from this document, for this task. The document is ${hit.path}. Search can find its passages.`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
-  return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
+  return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, onclick: open, title: describeHover(hit.why) },
     h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hit.heading || file), actions),
     h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
@@ -868,7 +883,7 @@ const runSearch = debounce(async () => {
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
     const how = result.hits.some((hit) => "meaning_rank" in hit.why) ? " by keywords and meaning" : "";
-    $("#search-status").textContent = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} passages${how} · ${result.ms} ms` : "No matches.";
+    $("#search-status").textContent = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} passages${how} · ${result.ms} ms` : "The app did not find passages.";
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
   } catch (error) {
     if (seq !== state.searchSeq) return;
@@ -880,7 +895,7 @@ const runSearch = debounce(async () => {
 
 // ---------- related panel ----------
 
-const NO_TASK_RELATED = "Create a task to see related passages.";
+const NO_TASK_RELATED = "Make a task to see related passages.";
 
 // One refresh at a time: on a long task they can take longer than a pause in typing, and the server
 // can't stop one it has started. A request during a refresh is served once that one ends, and any
@@ -940,7 +955,7 @@ async function fetchRelated() {
   const name = state.task;
   state.relatedStale = false;
   updateRefreshButton();
-  $("#related-status").textContent = "Updating…";
+  $("#related-status").textContent = "Refresh started…";
   const result = await api("POST", `/api/tasks/${enc(name)}/related`, {
     text: taskView.state.doc.toString(),
     params: state.params.related,
@@ -974,7 +989,7 @@ async function fetchRelated() {
   const themes = result.themes.map((t) => t.label).join(" · ");
   $("#related-status").textContent = s.gated === undefined
     ? (result.lanes[0]?.note || "")
-    : `${s.gated} clearly related of ${s.passages.toLocaleString()} passages${themes ? ` · themes: ${themes}` : ""}`;
+    : `${s.gated} of ${s.passages.toLocaleString()} passages are clearly related${themes ? ` · the topics are ${themes}` : ""}`;
 }
 
 // The keywords taken from the task. Boosting writes the word into the steer line; ignoring takes
@@ -982,15 +997,15 @@ async function fetchRelated() {
 function renderChips(terms) {
   const chip = (t) => {
     const [title, term, action] = t.ignored
-      ? ["Ignored: click to search for it again", t.term, "unignore"]
+      ? ["The app does not use this keyword. Select it to use the keyword again.", t.term, "unignore"]
       : t.boosted
-        ? ["Boosted by the steer line: click to stop boosting", t.term, "unboost"]
-        : ["Click to boost: always search for it, at full weight (adds it to the steer line)", t.label, "boost"];
+        ? ["This keyword is more important because it is in your word rules. Select it to remove it from your word rules.", t.term, "unboost"]
+        : ["Make this keyword more important. The app always uses it, and adds it to your word rules.", t.label, "boost"];
     return h("span", { class: `chip${t.boosted ? " boosted" : ""}${t.ignored ? " ignored" : ""}`, style: `--w: ${t.weight.toFixed(2)}` },
       h("button", { class: "chip-label", title, onclick: () => termAction(t, term, action).catch(fail) }, t.label),
       t.ignored
-        ? h("button", { class: "chip-x", title: `Exclude: never show passages containing “${t.label}” (adds -${t.label} to the steer line)`, onclick: () => termAction(t, t.label, "exclude").catch(fail) }, "⊘")
-        : h("button", { class: "chip-x", title: "Ignore: stop searching for this word (passages containing it can still be suggested)", onclick: () => termAction(t, t.term, "ignore").catch(fail) }, "×"),
+        ? h("button", { class: "chip-x", title: `Do not show passages that contain “${t.label}”. This adds -${t.label} to your word rules.`, onclick: () => termAction(t, t.label, "exclude").catch(fail) }, "⊘")
+        : h("button", { class: "chip-x", title: "Stop the use of this keyword. Passages that contain it can show. To remove these passages, select ⊘ after this step.", onclick: () => termAction(t, t.term, "ignore").catch(fail) }, "×"),
     );
   };
   $("#related-terms").replaceChildren(...terms.map(chip));
@@ -1025,7 +1040,7 @@ function showPrefs(prefs) {
     const on = state.likedIds.has(card.dataset.key);
     const button = card.querySelector("button.like");
     button.setAttribute("aria-pressed", String(on));
-    button.title = on ? "More like this is on: click to stop" : LIKE_TITLE;
+    button.title = on ? "The app shows more passages near this passage. Select this button to stop this." : LIKE_TITLE;
   }
 }
 
@@ -1105,13 +1120,13 @@ function renderFeedback(prefs, terms, lanes) {
   const counted = Object.entries(prefs.feedback).filter(([, [adds, dismisses]]) => adds || dismisses);
   const added = Math.max(counted.reduce((sum, [, [adds]]) => sum + adds, 0) - prefs.liked.length, 0); // a ↑ also counts for its lane
   const summary = [
-    prefs.liked.length && `${prefs.liked.length} more like this`,
-    prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} dismissed`,
-    avoided && `${avoided} avoided`,
-    prefs.excluded_docs.length && `${prefs.excluded_docs.length} ${prefs.excluded_docs.length === 1 ? "document" : "documents"} excluded`,
-    prefs.steer && "steered",
+    prefs.liked.length && `${prefs.liked.length} more of this`,
+    prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} removed`,
+    avoided && `${avoided} removed with near passages`,
+    prefs.excluded_docs.length && `${prefs.excluded_docs.length} ${prefs.excluded_docs.length === 1 ? "document" : "documents"} removed`,
+    prefs.steer && "word rules",
     added && `${added} added`,
-    ignored.length && `${ignored.length} ignored`,
+    ignored.length && `${ignored.length} ${ignored.length === 1 ? "keyword" : "keywords"} not in use`,
   ].filter(Boolean);
   const empty = !prefs.liked.length && !prefs.dismissed.length && !prefs.excluded_docs.length && !prefs.steer && !ignored.length && !counted.length;
 
@@ -1122,69 +1137,69 @@ function renderFeedback(prefs, terms, lanes) {
     const where = known ? `${d.path}:${d.start_line + 1}` : d.path;
     return h("li", { class: "feedback-item" },
       h("div", { class: "feedback-head" },
-        h("button", { class: "feedback-open", title: `Open ${where} in the reader`, onclick: () => openFile(d.path, location).catch(fail) }, where),
+        h("button", { class: "feedback-open", title: known ? `Open this document at line ${d.start_line + 1}` : "Open this document", onclick: () => openFile(d.path, location).catch(fail) }, where),
         undo,
       ),
       h("div", { class: "feedback-text" }, tag, text.length > 160 ? `${text.slice(0, 160).trimEnd()}…` : text),
     );
   };
   const dismissed = [...prefs.dismissed].reverse().map((d) => passageItem(d,
-    h("button", { title: "Let it be suggested again, and take back its dismissal", onclick: (e) => undoFeedback("restore", d.id, e.target.closest("li")).catch(fail) }, "Restore"),
-    d.avoid && h("span", { class: "feedback-tag", title: "Avoided: passages like this one are hidden too" }, "⊘ avoided")));
+    h("button", { title: "Let the app show this passage again.", onclick: (e) => undoFeedback("restore", d.id, e.target.closest("li")).catch(fail) }, "Show again"),
+    d.avoid && h("span", { class: "feedback-tag", title: "You selected ⊘ for this passage. The app also removes passages near it in meaning." }, "⊘ with near passages")));
   const liked = [...prefs.liked].reverse().map((d) => passageItem(d,
-    h("button", { title: "Stop pulling the suggestions toward this passage", onclick: (e) => undoFeedback("unlike", d.id, e.target.closest("li")).catch(fail) }, "Stop")));
+    h("button", { title: "Stop the search for more passages near this passage.", onclick: (e) => undoFeedback("unlike", d.id, e.target.closest("li")).catch(fail) }, "Stop")));
   const excludedDocs = [...prefs.excluded_docs].reverse().map((path) =>
     h("li", { class: "feedback-item" },
       h("div", { class: "feedback-head" },
-        h("button", { class: "feedback-open", title: `Open ${path} in the reader`, onclick: () => openFile(path).catch(fail) }, path),
-        h("button", { title: "Let this document be suggested again", onclick: (e) => includeDoc(path, e.target.closest("li")).catch(fail) }, "Include"),
+        h("button", { class: "feedback-open", title: "Open this document", onclick: () => openFile(path).catch(fail) }, path),
+        h("button", { title: "Let the app show passages from this document again.", onclick: (e) => includeDoc(path, e.target.closest("li")).catch(fail) }, "Show again"),
       ),
     ));
   const ignoredChip = (term) =>
     h("span", { class: "chip ignored" },
       h("span", { class: "chip-label" }, labels.get(term) ?? term),
-      h("button", { class: "chip-x", title: "Search for it again", onclick: () => termAction(state.relatedTerms.find((t) => t.term === term), term, "unignore").catch(fail) }, "×"),
+      h("button", { class: "chip-x", title: "Use this keyword again.", onclick: () => termAction(state.relatedTerms.find((t) => t.term === term), term, "unignore").catch(fail) }, "×"),
     );
   const laneCounts = counted.map(([lane, [adds, dismisses]]) =>
-    `${laneTitles.get(lane) ?? lane}: ${[adds && `${adds} ${prefs.liked.length ? "added or ↑" : "added"}`, dismisses && `${dismisses} dismissed`].filter(Boolean).join(", ")}`);
+    `${laneTitles.get(lane) ?? lane} (${[adds && `${adds} ${prefs.liked.length ? "added or ↑" : "added"}`, dismisses && `${dismisses} removed`].filter(Boolean).join(", ")})`);
 
   drawer.replaceChildren(
-    h("summary", {}, "Feedback", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
+    h("summary", { title: "See and change the data that the app keeps for this task. These changes stay when the text of the task changes." }, "Your changes", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
-        "Nothing yet. The passages you add (+), want more like (↑), dismiss (×) or avoid (⊘) here, the documents you exclude (⊠), the steer line, and the keywords you ignore are remembered for this task, whatever its text."),
+        "You have no changes for this task at this time. This list shows the passages that you add (+) or want more of (↑). It also shows the passages and documents that you remove (×, ⊘, ⊠), your word rules, and the keywords that you stop. The app keeps these changes when the text of the task changes."),
       liked.length > 0 && [
-        h("div", { class: "tune-group" }, "More like this"),
-        h("p", { class: "feedback-note" }, "These pull the suggestions toward them, in meaning and keywords, without being part of the task. Parameters › More like this sets how strongly."),
+        h("div", { class: "tune-group" }, "More of this"),
+        h("p", { class: "feedback-note" }, "The app shows more passages near these passages, in meaning and in keywords. These passages are not part of your task. The slider \"How strong ↑ is\" in Adjustments sets how strong this effect is."),
         h("ul", { class: "feedback-list" }, liked),
       ],
       dismissed.length > 0 && [
-        h("div", { class: "tune-group" }, "Dismissed and avoided passages"),
-        h("p", { class: "feedback-note" }, "Never suggested again. Passages like an avoided one are hidden too (Parameters › Avoid: similarity), and Parameters › Dismissal push can also rank passages like dismissed ones lower."),
+        h("div", { class: "tune-group" }, "Removed passages"),
+        h("p", { class: "feedback-note" }, "The app does not show these passages again. If a passage has the mark ⊘, the app also removes the passages near it. The sliders \"How near for ⊘\" and \"Effect of removed passages\" in Adjustments control this."),
         h("ul", { class: "feedback-list" }, dismissed),
       ],
       excludedDocs.length > 0 && [
-        h("div", { class: "tune-group" }, "Excluded documents"),
-        h("p", { class: "feedback-note" }, "Nothing from these is suggested for this task. Search still finds them."),
+        h("div", { class: "tune-group" }, "Removed documents"),
+        h("p", { class: "feedback-note" }, "The app does not show passages from these documents for this task. Search can find them."),
         h("ul", { class: "feedback-list" }, excludedDocs),
       ],
       prefs.steer && [
-        h("div", { class: "tune-group" }, "Steer line"),
+        h("div", { class: "tune-group" }, "Word rules"),
         h("code", { class: "feedback-steer" }, prefs.steer),
-        h("p", { class: "feedback-note" }, "Edit it in the box above the suggestions."),
+        h("p", { class: "feedback-note" }, "Change your word rules in the box above the results."),
       ],
       ignored.length > 0 && [
-        h("div", { class: "tune-group" }, "Ignored keywords"),
-        h("p", { class: "feedback-note" }, "Not searched for; passages containing them can still be suggested."),
+        h("div", { class: "tune-group" }, "Keywords not in use"),
+        h("p", { class: "feedback-note" }, "The app does not use these keywords. Passages that contain them can show."),
         h("div", { class: "chips" }, ignored.map(ignoredChip)),
       ],
       counted.length > 0 && [
-        h("div", { class: "tune-group" }, "Lane feedback"),
-        h("p", { class: "feedback-note" }, `${laneCounts.join(" · ")}. Lanes you add from get more of the results.`),
+        h("div", { class: "tune-group" }, "Result groups"),
+        h("p", { class: "feedback-note" }, `${laneCounts.join(" · ")}. Groups from which you add passages usually get more of the results.`),
       ],
       !empty && h("div", { class: "tune-foot" },
-        h("button", { onclick: () => forgetFeedback().catch(fail) }, "Forget all"),
-        h("p", { class: "feedback-note" }, "Clears all of the above for this task. A copy goes to the tasks folder's .trash."),
+        h("button", { title: "Remove all of the changes in this list for this task.", onclick: () => forgetFeedback().catch(fail) }, "Remove all changes"),
+        h("p", { class: "feedback-note" }, "This removes all of the changes in this list for this task. A copy goes to the .trash folder in the tasks folder."),
       ),
     ),
   );
@@ -1192,9 +1207,9 @@ function renderFeedback(prefs, terms, lanes) {
 
 async function forgetFeedback() {
   const name = state.task;
-  if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages and excluded documents can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
+  if (!confirm(`Remove all your changes for “${name}”? The app can then show the removed passages and documents again. It also removes your word rules and the keywords that you stopped. All result groups become equal again.`)) return;
   const prefs = await changePrefs("DELETE", "/prefs");
-  flash(`Forgot the feedback for “${name}”`);
+  flash(`Removed your changes for “${name}”`);
   if (!prefs) return;
   state.relatedTerms = state.relatedTerms.filter((t) => !t.ignored);
   for (const t of state.relatedTerms) t.boosted = false;
@@ -1255,7 +1270,7 @@ function paramRow(kind, spec) {
   const value = state.params[kind][spec.name] ?? spec.default;
   const output = h("output", {}, formatValue(spec, value));
   const input = spec.type === "choice"
-    ? h("select", {}, spec.choices.map((c) => h("option", { value: c, selected: c === value }, c)))
+    ? h("select", {}, spec.choices.map((c) => h("option", { value: c, selected: c === value }, spec.choice_labels[c])))
     : h("input", { type: "range", min: spec.min, max: spec.max, step: spec.step, value });
   input.addEventListener("input", () => {
     const v = spec.type === "choice" ? input.value : Number(input.value);
@@ -1269,11 +1284,11 @@ function paramRow(kind, spec) {
   const toDefault = h("button", {
     class: "tune-default",
     type: "button",
-    title: `Back to the default, ${formatValue(spec, spec.default)}`,
+    title: `Set this slider back to the standard value, ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.`,
     onclick: () => setTuned(kind, spec.name, spec.default),
-  }, "default");
+  }, "standard");
   input.id = `tune-${kind}-${spec.name}`;
-  return h("div", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nDefault: ${formatValue(spec, spec.default)}` },
+  return h("div", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nThe standard value is ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.` },
     h("label", { class: "tune-label", for: input.id }, spec.label), input, spec.type === "choice" ? null : output, toDefault);
 }
 
@@ -1304,16 +1319,19 @@ function buildTuner(kind) {
     if (spec.group !== group) {
       group = spec.group;
       rows.push(h("div", { class: "tune-group" }, group));
+      rows.push(h("p", { class: "feedback-note" }, spec.group_help));
     }
     rows.push(paramRow(kind, spec));
   }
   $(`#${kind}-tune`).replaceChildren(
-    h("summary", {}, "Parameters", h("span", { class: "tune-count" })),
+    h("summary", { title: "Change how the app finds and ranks passages." }, "Adjustments", h("span", { class: "tune-count" })),
     h("div", { class: "tune-body" },
+      h("p", { class: "feedback-note" },
+        `Move a slider to change the results. Put the pointer on a slider to read about it. The “standard” button sets the slider back. ${kind === "search" ? "The results change immediately." : "Then select Refresh to see the new results."} This browser keeps your adjustments.`),
       rows,
       h("div", { class: "tune-foot" },
-        h("button", { onclick: () => resetParams(kind) }, "Reset to defaults"),
-        h("code", { class: "tune-python", title: "The same settings in Python, for notebooks/explore.ipynb" }),
+        h("button", { title: "Set all sliders in this list back to their standard values.", onclick: () => resetParams(kind) }, "Set all to standard"),
+        h("code", { class: "tune-python", title: "These adjustments as Python code. You can use this code in notebooks/explore.ipynb." }),
       ),
     ),
   );
@@ -1375,7 +1393,7 @@ function renderFolderPicks(folders) {
     const box = $(`#${panel}-folders`);
     box.hidden = folders.length < 2;
     box.replaceChildren(...folders.map((name) =>
-      h("label", { class: "toggle", title: `Include ${name} in ${panel === "search" ? "Search" : "Related"}` },
+      h("label", { class: "toggle", title: `Show results from the folder ${name} in ${panel === "search" ? "Search" : "Related"}. Remove the mark to stop this.` },
         h("input", {
           type: "checkbox",
           checked: !skipped.has(name),
@@ -1399,9 +1417,9 @@ function formatBytes(bytes) {
 }
 
 function statusText(s) {
-  if (s.state === "embedding") return `Embedding ${s.embedded.toLocaleString()} / ${s.to_embed.toLocaleString()} passages… (search works meanwhile)`;
-  if (s.state === "error") return `Indexing failed: ${s.error} (see the server log; it retries when files change)`;
-  if (s.state !== "ready") return "Indexing…";
+  if (s.state === "embedding") return `The app prepared meaning data for ${s.embedded.toLocaleString()} of ${s.to_embed.toLocaleString()} passages. You can use Search during this time.`;
+  if (s.state === "error") return `The app cannot read your documents. ${s.error}. Refer to the server log. The app tries again when a file changes.`;
+  if (s.state !== "ready") return "The app reads your documents…";
   const model = s.model ? s.model.split("/").pop() : "keywords only";
   const keywordsOnly = s.model && s.unembedded ? ` (${s.unembedded.toLocaleString()} keywords only)` : "";
   return `${s.passages.toLocaleString()} passages${keywordsOnly} · ${model}`;
@@ -1421,7 +1439,7 @@ async function pollStatus() {
     }
     state.indexUpdated = s.updated;
   } catch {
-    $("#index-status").textContent = "Server not reachable";
+    $("#index-status").textContent = "The app cannot connect to the server";
   }
   setTimeout(pollStatus, settled ? 10000 : 2000);
 }
@@ -1548,7 +1566,7 @@ async function init() {
     const button = $("#search-meaning");
     button.disabled = true;
     button.setAttribute("aria-pressed", "false");
-    button.title = "Running without a model: keywords only.";
+    button.title = "The app has no meaning model. It uses only your words.";
   }
   showPanel(store.get("panel") || "search");
   await Promise.all([loadTasks(), loadFiles()]);

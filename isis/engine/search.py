@@ -25,7 +25,7 @@ import numpy as np
 
 from .chunker import HEADING
 from .index import Snapshot
-from .params import tunable
+from .params import Group, tunable
 from .text import term_spans, tokenize, tokenize_with_surface
 
 # One clause: an optional operator, then a "phrase" (its closing quote may still be missing), a
@@ -35,44 +35,63 @@ PREFER, REQUIRE, NEVER = "", "+", "-"
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 
-KEYWORDS = "Keywords (BM25)"
-FUSION = "Fusion"
+KEYWORDS = Group("Keyword score", "The keyword score shows how much the words in a passage agree with your words.")
+FUSION = Group(
+    "Mixture of keywords and meaning",
+    "The app makes two ranked lists of passages. One list uses keywords and the other list uses meaning. "
+    "Then the app mixes the two lists into one list of results.",
+)
 
 
 @dataclass
 class SearchConfig:
     k1: float = tunable(
-        1.2, label="k1", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
-        help="How fast repeated words stop adding to a passage's score. 0: one occurrence counts as much as many.",
+        1.2, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
+        help="This slider sets how much a word adds to the score when it occurs many times in a passage.\n"
+        "With a higher value, passages that use your words many times rank higher.\n"
+        "With a lower value, more uses of a word add less to the score. At 0, a word that occurs one time counts the same as a word that occurs many times.",
     )
     b: float = tunable(
-        0.35, label="b", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
-        help="How much long passages are penalised. 0: length ignored; 1: fully normalised.",
+        0.35, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        help="Long passages contain more words. Thus they can get a high score only because of their length. "
+        "This slider sets how much the score of a long passage decreases.\n"
+        "With a higher value, short passages rank higher. At 1, the app makes the full correction for length.\n"
+        "With a lower value, long passages rank higher. At 0, length has no effect.",
     )
     rrf_k: int = tunable(
-        20, label="Fusion k", group=FUSION, min=1, max=100, step=1,
-        help="Reciprocal-rank fusion: each list adds weight / (k + rank). Small k keeps the best of each "
-        "list on top; large k favours passages ranked fairly well in both.",
+        20, label="Good rank in the two lists", group=FUSION, min=1, max=100, step=1,
+        help="This slider sets which passages come first when the app mixes the keyword list and the meaning list.\n"
+        "With a higher value, passages with a good rank in the two lists come first.\n"
+        "With a lower value, the top passages of each list come first, also if they have a bad rank in the other list.",
     )
     keyword_weight: float = tunable(
-        1.0, label="Keyword weight", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="Weight of the keyword ranking in the fusion. 0: rank by meaning only (passages without embeddings "
-        "then count only through Not embedded).",
+        1.0, label="How important keywords are", group=FUSION, min=0.0, max=3.0, step=0.1,
+        help="This slider sets how much the keyword list counts in the mix.\n"
+        "With a higher value, results that contain your words rank higher.\n"
+        "With a lower value, the meaning list counts more. At 0, the app ranks passages only by meaning. "
+        "Passages with no meaning data then count only through the slider \"Passages with no meaning data\".",
     )
     meaning_weight: float = tunable(
-        1.0, label="Meaning weight", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="Weight of the embedding ranking in the fusion. 0: rank by keywords only, the same as turning the "
-        "Meaning button off.",
+        1.0, label="How important meaning is", group=FUSION, min=0.0, max=3.0, step=0.1,
+        help="This slider sets how much the meaning list counts in the mix.\n"
+        "With a higher value, results that are near your words in meaning rank higher, also if they use different words.\n"
+        "With a lower value, the keyword list counts more. At 0, the app ranks passages only by keywords. "
+        "This is the same as when the Meaning button is off.",
     )
     unembedded_weight: float = tunable(
-        1.0, label="Not embedded", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="A passage without embeddings has no meaning rank, so its keyword rank counts in its place, times "
-        "this. 0: it only counts through Keyword weight, which buries it below passages that score on both "
-        "lists; with Keyword weight 0 too, it is left out.",
+        1.0, label="Passages with no meaning data", group=FUSION, min=0.0, max=3.0, step=0.1,
+        help="The app can have no meaning data for some passages. These passages are not in the meaning list. "
+        "The app uses their keyword rank value as their meaning rank, multiplied by this number.\n"
+        "With a higher value, these passages rank higher.\n"
+        "With a lower value, these passages rank lower. At 0, they count only through \"How important keywords are\". "
+        "If that slider is also at 0, the app does not show these passages.",
     )
     candidates: int = tunable(
-        300, label="Candidates per list", group=FUSION, min=20, max=2000, step=10,
-        help="How deep each ranking goes before fusing. A passage outside both lists can't be found.",
+        300, label="Length of each list", group=FUSION, min=20, max=2000, step=10,
+        help="This slider sets how many passages go into each list before the mix. "
+        "The app cannot show a passage that is not in one of the two lists.\n"
+        "With a higher value, the app can find more passages, but it can operate more slowly.\n"
+        "With a lower value, the app operates more quickly, but it can find a smaller number of passages.",
     )
 
 
