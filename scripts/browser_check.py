@@ -465,6 +465,68 @@ def main() -> None:
             step("in a task the marker on the cursor's line takes the bullet's exact place; Enter goes straight to the next item")
         finally:
             sample.unlink()
+
+        def open_from_files(path):
+            page.click(".side-tabs button[data-panel=files]")
+            page.fill("#file-filter", path)
+            page.click(f'#file-list .file[data-path="{path}"]')
+            expect(page.locator("#reader-path")).to_have_text(path)
+            page.wait_for_timeout(200)
+
+        def top_of_reader():
+            return page.evaluate("""() => {
+                const view = window.isis.reader, box = view.scrollDOM.getBoundingClientRect();
+                return view.posAtCoords({ x: view.contentDOM.getBoundingClientRect().left + 1, y: box.top + 1 }, false);
+            }""")
+
+        def scroll_reader(share):
+            page.evaluate("""(share) => {
+                const box = window.isis.reader.scrollDOM;
+                box.scrollTop = (box.scrollHeight - box.clientHeight) * share;
+            }""", share)
+            page.wait_for_timeout(500)  # the position is saved shortly after scrolling stops
+            return top_of_reader()
+
+        longest = page.evaluate("""async () => {  // leaving out this script's own files, just deleted
+            const paths = (await (await fetch("api/files")).json()).map((f) => f.path).filter((p) => !p.startsWith("e2e-")).slice(0, 40);
+            const sized = await Promise.all(paths.map(async (path) =>
+                [(await (await fetch(`api/file?path=${encodeURIComponent(path)}`)).json()).content.length, path]));
+            return sized.sort((a, b) => b[0] - a[0]).slice(0, 2).map((s) => s[1]);
+        }""")
+        first, second = longest
+        page.evaluate("localStorage.removeItem('isis.reader-scroll'); window.isis.state.readerScroll = {}")
+        open_from_files(first)
+        page.evaluate("document.querySelector('#reader .cm-scroller').scrollTop = 0")
+        first_at = scroll_reader(0.6)
+        assert first_at > 0
+        open_from_files(second)
+        assert page.evaluate("window.isis.reader.scrollDOM.scrollTop") == 0  # never opened: at the top
+        second_at = scroll_reader(0.3)
+        open_from_files(first)
+        assert abs(top_of_reader() - first_at) < 200, (top_of_reader(), first_at)
+        open_from_files(second)
+        assert abs(top_of_reader() - second_at) < 200, (top_of_reader(), second_at)
+        scroll_reader(0)  # back at the top is remembered too
+        open_from_files(first)
+        page.set_viewport_size({"width": 1100, "height": 800})  # another width moves the same text
+        page.wait_for_timeout(500)
+        scrolled_at = scroll_reader(0.5)
+        open_from_files(second)
+        assert page.evaluate("window.isis.reader.scrollDOM.scrollTop") == 0
+        page.set_viewport_size({"width": 1500, "height": 800})
+        page.wait_for_timeout(500)
+        open_from_files(first)
+        assert abs(top_of_reader() - scrolled_at) < 300, (top_of_reader(), scrolled_at)
+        page.reload()
+        expect(page.locator("#new-task")).to_be_visible()
+        page.wait_for_timeout(500)
+        open_from_files(first)
+        assert abs(top_of_reader() - scrolled_at) < 300, (top_of_reader(), scrolled_at)  # also after a reload
+        open_from_files(second)
+        page.evaluate("(path) => window.isis.openFile(path, { line: 5 })", first)  # a result goes to its match
+        page.wait_for_timeout(300)
+        assert top_of_reader() < scrolled_at / 2, (top_of_reader(), scrolled_at)
+        step("Files opens a document where it was last read, or at the top the first time; a result still opens at its match")
         browser.close()
 
     for name in (WHALES, ISLANDS):

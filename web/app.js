@@ -409,6 +409,7 @@ const state = {
   tasks: [], // [{name, mtime}]
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again, conflictMtime}
   readerPath: null,
+  readerScroll: store.json("reader-scroll", {}), // document path -> where its reader view was left
   openedHit: null, // the result last opened in the reader, which stays marked
   files: [],
   openFolders: new Set(), // folders open in the Files panel; all are closed at first
@@ -656,11 +657,33 @@ function addReaderSelection() {
 
 // ---------- reader ----------
 
+// Where a document was left is kept as a place in its text, not in pixels: the panel may have a
+// different width when the document opens again, and then the same text sits at another height.
+function rememberReaderScroll() {
+  if (!state.readerPath) return;
+  const box = reader.scrollDOM.getBoundingClientRect();
+  const left = reader.contentDOM.getBoundingClientRect().left;
+  const place = reader.posAtCoords({ x: left + 1, y: box.top + 1 }, false);
+  if (place > 0) state.readerScroll[state.readerPath] = place;
+  else delete state.readerScroll[state.readerPath];
+  store.set("reader-scroll", JSON.stringify(state.readerScroll));
+}
+
+function restoreReaderScroll(path) {
+  const place = state.readerScroll[path];
+  reader.scrollDOM.scrollTop = 0;
+  if (!Number.isFinite(place) || place <= 0) return;
+  const at = Math.min(place, reader.state.doc.length); // the file may have become shorter
+  reader.dispatch({ effects: EditorView.scrollIntoView(at, { y: "start", yMargin: 0 }) });
+}
+
 async function openFile(path, location = null) {
   if (path !== state.readerPath) {
     const { content } = await api("GET", `api/file?path=${enc(path)}`);
+    rememberReaderScroll();
     reader.setState(readerState(content));
     measureWholeDocument(reader);
+    if (!location) restoreReaderScroll(path);
     state.readerPath = path;
     $("#reader-path").textContent = path;
     $("#reader-path").title = path;
@@ -1543,6 +1566,8 @@ function bind() {
   $("#conflict-load").addEventListener("click", () => resolveConflict(false).catch(fail));
   $("#conflict-keep").addEventListener("click", () => resolveConflict(true).catch(fail));
   $("#file-filter").addEventListener("input", debounce(renderFiles, 120));
+  reader.scrollDOM.addEventListener("scroll", debounce(rememberReaderScroll, 250));
+  window.addEventListener("pagehide", rememberReaderScroll);
   $("#search-input").addEventListener("input", runSearch);
   $("#search-meaning").addEventListener("click", toggleMeaning);
   $("#related-refresh").addEventListener("click", () => refreshRelated().catch(fail));
