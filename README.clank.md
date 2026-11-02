@@ -32,12 +32,24 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
   - `--model REPO`: another Hugging Face model with ONNX weights, such as `BAAI/bge-small-en-v1.5`.
   - `--port`, `--host`.
   - `--allow-host NAME`: also answer requests addressed to this name (repeatable; see below).
+  - `--public`: serve the public behind a proxy (see Public mode below).
   - `--reload`: restart when the Python code changes, handy while you tune the algorithm.
 - `isis index DIR...` builds the index without starting the server.
 
 **Nothing leaves the machine.** Once the model is cached (after the first run), isis makes no network requests at all: model files are read from the local Hugging Face cache without asking the network, Hugging Face telemetry is off, the page loads nothing from outside (no fonts, CDNs or analytics; FastAPI's `/docs` pages, which load from a CDN, are turned off), and the search fields have spellcheck off so a browser's cloud spellcheck never sees them. The only downloads are `pip install`, the model on the first run, and `scripts/fetch_sample_corpus.py`. To be certain, set `HF_HUB_OFFLINE=1`, or run it without network access.
 
 The server has no authentication. Keep the default `--host 127.0.0.1`, and use an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 yourserver`) to reach it on a remote machine. It answers only requests addressed to this machine or to the `--host` address, so a web page can't reach it by pointing its own domain at 127.0.0.1 (DNS rebinding); `--allow-host` adds names. With `--host 0.0.0.0` and no `--allow-host`, any name is answered.
+
+### Public mode
+
+`isis serve CORPUS --public --tasks FOLDER --allow-host NAME` lets anyone use the site without logging in, behind a proxy that sets `CF-Connecting-IP`, such as a Cloudflare Tunnel. Install the extra library first: `pip install -e ".[public]"`. It refuses to start on a non-loopback `--host`, or with a tasks folder inside the corpus. Without `--public`, none of this applies. The code is in `isis/server/public.py`, and the numbers are in `Limits` there. To serve the site under a path on a domain, add `--base-path /isis`: the proxy forwards the path unchanged, and the cookie stays within it.
+
+- **Private tasks.** An anonymous cookie picks each visitor's folder, named by a hash of the cookie. The folder appears with the first task. Clearing cookies loses access to those tasks. Deleted tasks are removed, not moved to `.trash`.
+- **Read-only corpus.** `/api/file` serves only indexed files, so `_tasks` and hidden files in the corpus stay private. Everything indexed is public.
+- **Space.** 20 tasks, 512 KB per task and 2 MB per visitor, 1 GB and 5,000 workspaces in all. A workspace unused for 30 days is deleted.
+- **Rates per address.** Separate limits for search, Related, saves and everything else, and 5 new workspaces per hour. A long Related request counts as several. IPv6 addresses count per /64.
+- **Busy limit.** Two searches or Related refreshes run at once. Others wait up to 3 s, then get a 503.
+- **Regexes.** They run through the `regex` library, with 1 s for each request. Syntax is still checked by `re`, so what is valid stays the same. Patterns over 300 characters or with counted repeats multiplying past 2,000 are refused, because `regex` expands repeats when it compiles and `(x{65535}){65535}` would use all the memory. Fuzzy syntax such as `{e<=1}` is refused too, as `re` reads it as plain text.
 
 ## Using it
 

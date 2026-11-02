@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import zlib
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +24,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
-from ..engine.search import QueryError, SearchConfig
+from ..engine.search import QueryError, SearchConfig, pattern_time_limit
+from .public import PATTERN_SECONDS, PublicGuard, Workspaces
 from .tasks import Conflict, TaskError, TaskStore
 
 log = logging.getLogger(__name__)
@@ -97,11 +98,17 @@ class FeedbackRequest(BaseModel):
     end_line: int | None = None
 
 
-def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, watch: bool = True,
+def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: bool = True, watch: bool = True,
                allowed_hosts: list[str] | None = None) -> FastAPI:
     """`allowed_hosts`: the Host headers the API answers (None: any). A page on another site can
     point its own domain at 127.0.0.1 (DNS rebinding); checking the Host header stops it from
-    reading the corpus or overwriting tasks through the browser."""
+    reading the corpus or overwriting tasks through the browser.
+
+    `tasks` as Workspaces serves the public: each visitor gets private tasks, and requests are
+    limited (see public.py)."""
+    public = isinstance(tasks, Workspaces)
+    time_limit = (lambda: pattern_time_limit(PATTERN_SECONDS)) if public else nullcontext
+
     def refresh() -> None:
         try:
             engine.refresh()  # it reports what changed
@@ -153,12 +160,16 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             threading.Thread(target=refresh, daemon=True, name="isis-index").start()
         if watch:
             threading.Thread(target=watch_corpus, args=(stop,), daemon=True, name="isis-watch").start()
+        if public and background:
+            threading.Thread(target=tasks.keep_clean, args=(stop,), daemon=True, name="isis-clean").start()
         yield
         stop.set()
 
     # No /docs or /redoc: FastAPI's pages for them load scripts from a public CDN.
     app = FastAPI(title="isis", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    if allowed_hosts is not None:
+    if public:
+        app.add_middleware(PublicGuard, workspaces=tasks)
+    if allowed_hosts is not None:  # added last, so it runs first
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.exception_handler(TaskError)
@@ -172,8 +183,11 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
     @app.get("/api/status")
     def status():
+        state = plain(engine.status)
+        if public and state["error"]:
+            state["error"] = "the index could not be updated"  # the full message can name server paths
         return {
-            **plain(engine.status),
+            **state,
             "index_bytes": engine.index_bytes(),
             "folders": [name for name in engine.roots if name],  # when serving several folders
             "model": getattr(engine.embedder, "model_id", None),
@@ -185,6 +199,8 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
     @app.get("/api/file")
     def file(path: str):
+        if public and path not in engine.snapshot.file_rows:
+            raise HTTPException(404, f"no such file: {path}")  # only what search can show
         try:
             content = engine.resolve(path).read_text(encoding="utf-8", errors="replace")
         except ValueError as e:
@@ -209,8 +225,9 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
             raise HTTPException(400, "params must be a JSON object, and skip a list of folders")
         started = time.perf_counter()
         try:
-            hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
-                                 skip_folders=[str(f) for f in skip_folders])
+            with time_limit():
+                hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
+                                     skip_folders=[str(f) for f in skip_folders])
         except QueryError as e:
             raise HTTPException(400, str(e))
         return {"hits": plain(hits), "ms": round((time.perf_counter() - started) * 1000, 1)}
@@ -245,14 +262,18 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     @app.post("/api/tasks/{name}/related")
     def related(name: str, body: RelatedRequest):
         prefs = tasks.prefs(name)
-        result = engine.related(
-            body.text,
-            cursor_line=body.cursor_line,
-            prefs=prefs,
-            config=configure(RelatedConfig, body.params),
-            skip_folders=body.skip_folders,
-            seed=zlib.crc32(name.encode()),
-        )
+        try:
+            with time_limit():
+                result = engine.related(
+                    body.text,
+                    cursor_line=body.cursor_line,
+                    prefs=prefs,
+                    config=configure(RelatedConfig, body.params),
+                    skip_folders=body.skip_folders,
+                    seed=zlib.crc32(name.encode()),
+                )
+        except QueryError as e:  # a regex that ran out of time
+            raise HTTPException(400, str(e))
         return {**plain(result), "prefs": prefs.summary()}
 
     @app.get("/api/tasks/{name}/prefs")
@@ -267,7 +288,7 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
     @app.put("/api/tasks/{name}/steer")
     def steer(name: str, body: SteerRequest):
         try:
-            with tasks.edit_prefs(name) as prefs:
+            with time_limit(), tasks.edit_prefs(name) as prefs:
                 prefs.set_steer(body.text)
         except QueryError as e:
             raise HTTPException(400, str(e))
@@ -310,8 +331,9 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
 def app_from_env() -> FastAPI:
     """The app `isis serve` runs, configured through ISIS_CORPUS (folders separated like PATH),
-    ISIS_TASKS, ISIS_MODEL and ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
-    this machine only)."""
+    ISIS_TASKS, ISIS_MODEL, ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
+    this machine only), ISIS_PUBLIC ("1": serve the public, see public.py) and ISIS_BASE_PATH (with
+    ISIS_PUBLIC: where the site lives on its domain, such as /isis)."""
     from ..engine.semantic import Embedder
 
     configure_logging()
@@ -320,4 +342,6 @@ def app_from_env() -> FastAPI:
     model = os.environ.get("ISIS_MODEL", "")
     engine = Engine(folders, embedder=Embedder(model) if model else None, exclude=corpus_exclude(folders, tasks_dir))
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
-    return create_app(engine, TaskStore(tasks_dir), allowed_hosts=hosts)
+    store = (Workspaces(tasks_dir, base_path=os.environ.get("ISIS_BASE_PATH", ""))
+             if os.environ.get("ISIS_PUBLIC") == "1" else TaskStore(tasks_dir))
+    return create_app(engine, store, allowed_hosts=hosts)

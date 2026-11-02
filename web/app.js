@@ -451,7 +451,7 @@ function renderTaskTabs() {
 }
 
 async function loadTasks() {
-  state.tasks = await api("GET", "/api/tasks");
+  state.tasks = await api("GET", "api/tasks");
   renderTaskTabs();
 }
 
@@ -463,7 +463,7 @@ async function switchTask(name) {
   }
   let doc = state.docs.get(name);
   if (!doc) {
-    const task = await api("GET", `/api/tasks/${enc(name)}`);
+    const task = await api("GET", `api/tasks/${enc(name)}`);
     doc = { state: taskState(task.content), mtime: task.mtime, dirty: false };
     state.docs.set(name, doc);
   }
@@ -496,7 +496,7 @@ function showNoTask() {
 async function newTask() {
   const name = prompt("Name of the new task");
   if (!name || !name.trim()) return null;
-  const task = await api("POST", "/api/tasks", { name });
+  const task = await api("POST", "api/tasks", { name });
   await loadTasks();
   await switchTask(task.name);
   return task.name;
@@ -506,7 +506,7 @@ async function renameTask(name) {
   const newName = prompt("New name of this task", name);
   if (!newName || newName.trim() === name) return;
   await saveTask(name);
-  const task = await api("POST", `/api/tasks/${enc(name)}/rename`, { new_name: newName });
+  const task = await api("POST", `api/tasks/${enc(name)}/rename`, { new_name: newName });
   const doc = state.docs.get(name);
   state.docs.delete(name);
   if (doc) state.docs.set(task.name, { ...doc, mtime: task.mtime });
@@ -521,7 +521,7 @@ async function renameTask(name) {
 
 async function deleteTask(name) {
   if (!confirm(`Remove the task “${name}”? The app moves its file to the .trash folder in the tasks folder.`)) return;
-  await api("DELETE", `/api/tasks/${enc(name)}`);
+  await api("DELETE", `api/tasks/${enc(name)}`);
   state.docs.delete(name);
   await loadTasks();
   if (state.task === name) {
@@ -555,7 +555,7 @@ async function saveTask(name, { keepalive = false } = {}) {
       const body = { content, base_mtime: doc.mtime };
       // Browsers refuse keepalive requests over 64 KiB; a larger task saves as a normal request.
       const small = new TextEncoder().encode(JSON.stringify(body)).length < 60000;
-      const result = await api("PUT", `/api/tasks/${enc(name)}`, body, { keepalive: keepalive && small });
+      const result = await api("PUT", `api/tasks/${enc(name)}`, body, { keepalive: keepalive && small });
       doc.mtime = result.mtime;
       if (name === state.task) setSaveState(doc.dirty ? "Not saved" : "Saved");
     } catch (error) {
@@ -592,7 +592,7 @@ async function resolveConflict(keepMine) {
     doc.dirty = true;
     await saveTask(name);
   } else {
-    const task = await api("GET", `/api/tasks/${enc(name)}`);
+    const task = await api("GET", `api/tasks/${enc(name)}`);
     doc.state = taskState(task.content);
     doc.mtime = task.mtime;
     doc.dirty = false;
@@ -644,7 +644,7 @@ async function addToTask(text, origin = null) {
   addedTimer = setTimeout(() => taskView.dispatch({ effects: addedSlot.set.of(Decoration.none) }), 1600);
   flash(`Added to “${state.task}”`);
   if (origin?.lane) {
-    api("POST", `/api/tasks/${enc(state.task)}/feedback`, { action: "add", lane: origin.lane, path: origin.path }).catch(fail);
+    api("POST", `api/tasks/${enc(state.task)}/feedback`, { action: "add", lane: origin.lane, path: origin.path }).catch(fail);
   }
 }
 
@@ -658,7 +658,7 @@ function addReaderSelection() {
 
 async function openFile(path, location = null) {
   if (path !== state.readerPath) {
-    const { content } = await api("GET", `/api/file?path=${enc(path)}`);
+    const { content } = await api("GET", `api/file?path=${enc(path)}`);
     reader.setState(readerState(content));
     measureWholeDocument(reader);
     state.readerPath = path;
@@ -750,7 +750,7 @@ function markCurrentFile() {
 }
 
 async function loadFiles() {
-  state.files = await api("GET", "/api/files");
+  state.files = await api("GET", "api/files");
   renderFiles();
 }
 
@@ -879,7 +879,7 @@ const runSearch = debounce(async () => {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
     const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
     // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
-    const result = await api("GET", `/api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}`);
+    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
     const how = result.hits.some((hit) => "meaning_rank" in hit.why) ? " by keywords and meaning" : "";
@@ -956,7 +956,7 @@ async function fetchRelated() {
   state.relatedStale = false;
   updateRefreshButton();
   $("#related-status").textContent = "Refresh started…";
-  const result = await api("POST", `/api/tasks/${enc(name)}/related`, {
+  const result = await api("POST", `api/tasks/${enc(name)}/related`, {
     text: taskView.state.doc.toString(),
     params: state.params.related,
     skip_folders: [...state.skipped.related],
@@ -1024,7 +1024,7 @@ async function termAction(chip, term, action) {
 // meanwhile: its panel must not get this task's steer line and feedback. Null in that case.
 async function changePrefs(method, path, body) {
   const name = state.task;
-  const prefs = await api(method, `/api/tasks/${enc(name)}${path}`, body);
+  const prefs = await api(method, `api/tasks/${enc(name)}${path}`, body);
   if (name !== state.task) return null;
   showPrefs(prefs);
   requestRelated();
@@ -1369,7 +1369,7 @@ function resetParams(kind) {
 }
 
 async function loadParamSpecs() {
-  state.paramSpecs = await api("GET", "/api/params");
+  state.paramSpecs = await api("GET", "api/params");
   for (const kind of ["search", "related"]) {
     const known = new Set(state.paramSpecs[kind].map((s) => s.name));
     for (const name of Object.keys(state.params[kind])) if (!known.has(name)) delete state.params[kind][name];
@@ -1443,7 +1443,7 @@ function statusText(s) {
 async function pollStatus() {
   let settled = false; // nothing to wait for: poll slowly
   try {
-    const s = await api("GET", "/api/status");
+    const s = await api("GET", "api/status");
     settled = s.state === "ready" || s.state === "error";
     const documents = `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`;
     $("#index-size").textContent = s.index_bytes ? `${documents} · index ${formatBytes(s.index_bytes)}` : documents;
@@ -1575,7 +1575,7 @@ function bind() {
 async function init() {
   bind();
   await loadParamSpecs();
-  const status = await api("GET", "/api/status");
+  const status = await api("GET", "api/status");
   renderFolderPicks(status.folders);
   if (!status.model) {
     const button = $("#search-meaning");

@@ -59,9 +59,10 @@ def _stamp() -> str:
 
 
 class TaskStore:
-    def __init__(self, folder: str | Path):
+    def __init__(self, folder: str | Path, *, make_folder: bool = True):
         self.folder = Path(folder)
-        self.folder.mkdir(parents=True, exist_ok=True)
+        if make_folder:
+            self.folder.mkdir(parents=True, exist_ok=True)
         self.meta = self.folder / ".meta"
         self.trash = self.folder / ".trash"
         self._locks: dict[str, threading.RLock] = {}

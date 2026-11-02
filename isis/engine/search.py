@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import bisect
 import re
+import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -122,13 +126,78 @@ class QueryError(ValueError):
     """The query can't be run, e.g. an invalid regular expression."""
 
 
-def compile_pattern(pattern: str) -> re.Pattern:
+# A public server runs regexes under a time limit, and refuses ones that are costly to compile.
+# The `regex` library takes a timeout, but expands counted repeats when it compiles, so
+# /(x{65535}){65535}/ would use all the memory before any matching starts.
+MAX_PATTERN_LENGTH = 300
+MAX_PATTERN_REPEATS = 2000
+COUNTED_REPEAT = re.compile(r"\{(\d*)(?:,(\d*))?\}")
+FUZZY = re.compile(r"\{[^{}]*\b\d*[deis](?:<=?\d+|\b)[^{}]*\}")  # `regex` reads /a{e<=1}/ as fuzzy; `re` as plain text
+_pattern_deadline: ContextVar[float | None] = ContextVar("isis_pattern_deadline", default=None)
+
+
+@contextmanager
+def pattern_time_limit(seconds: float):
+    """Regexes compiled inside this block share `seconds` of matching time; running out raises
+    QueryError. Outside any such block they are plain `re` patterns with no limit."""
+    token = _pattern_deadline.set(time.monotonic() + seconds)
+    try:
+        yield
+    finally:
+        _pattern_deadline.reset(token)
+
+
+@dataclass(frozen=True)
+class TimedPattern:
+    """A compiled `regex` pattern with the parts of re.Pattern that searching uses."""
+
+    compiled: Any
+
+    @property
+    def pattern(self) -> str:
+        return self.compiled.pattern
+
+    @property
+    def flags(self) -> int:
+        return self.compiled.flags
+
+    def finditer(self, text: str) -> Iterator:
+        left = (_pattern_deadline.get() or 0) - time.monotonic()
+        try:
+            if left <= 0:
+                raise TimeoutError
+            # concurrent: other requests keep running while this one matches.
+            yield from self.compiled.finditer(text, timeout=left, concurrent=True)
+        except TimeoutError:
+            raise QueryError(f"this pattern took too long: /{self.pattern}/") from None
+
+
+def timed_pattern(pattern: str, flags: int) -> TimedPattern:
+    import regex
+
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise QueryError(f"this pattern is too long (the limit is {MAX_PATTERN_LENGTH} characters)")
+    if FUZZY.search(pattern):
+        raise QueryError(f"invalid pattern /{pattern}/: fuzzy matching is not available")
+    repeats = 1
+    for low, high in COUNTED_REPEAT.findall(pattern):
+        repeats *= max(int(low or 1), int(high or 1), 1)  # as if nested, the worst case
+    if repeats > MAX_PATTERN_REPEATS:
+        raise QueryError(f"this pattern has too many counted repeats (the limit is {MAX_PATTERN_REPEATS})")
+    try:
+        return TimedPattern(regex.compile(pattern, regex.IGNORECASE if flags & re.IGNORECASE else 0))
+    except regex.error as e:
+        raise QueryError(f"invalid pattern /{pattern}/: {e}") from None
+
+
+def compile_pattern(pattern: str) -> re.Pattern | TimedPattern:
     """A user's regex. Smart case: case-insensitive unless it contains a capital letter."""
     smart = 0 if any(c.isupper() for c in re.sub(r"\\.", "", pattern)) else re.IGNORECASE
     try:
-        return re.compile(pattern, smart)
-    except re.error as e:
+        compiled = re.compile(pattern, smart)  # also when timed: the same syntax is valid everywhere
+    except (re.error, OverflowError, RecursionError) as e:
         raise QueryError(f"invalid pattern /{pattern}/: {e}") from None
+    return compiled if _pattern_deadline.get() is None else timed_pattern(pattern, smart)
 
 
 def phrase_pattern(phrase: str) -> re.Pattern:
