@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -24,7 +25,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.requests import cookie_parser
 
-from .tasks import TaskError, TaskStore
+from .tasks import MAX_DISMISSED, TaskError, TaskStore
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,13 @@ TOUCH_EVERY = 3600  # seconds between marks that a workspace is still in use
 TOTALS_FOR = 30  # seconds that the total size of all workspaces is reused
 STORES_KEPT = 2000
 SLOT_CHECK = 0.05  # seconds between looks for a free slot
+SECURITY_HEADERS = [
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    # 'unsafe-inline' for styles only: the editor adds its own style elements.
+    ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
+]
 
 
 @dataclass(frozen=True)
@@ -48,7 +56,9 @@ class Limits:
     max_workspaces: int = 5000
     idle_days: int = 30  # a workspace not used for this long is deleted
     new_workspaces_per_hour: int = 5  # per address, so a cleared cookie doesn't get round the caps
-    request_bytes: int = 1024 * 1024
+    max_liked: int = 200  # each one is embedded and scored on every Related refresh
+    request_bytes: int = 1024 * 1024  # a saved task
+    small_request_bytes: int = 16 * 1024  # anything else that is stored, such as a dismissed passage
     related_bytes: int = 128 * 1024  # the text of a task to refresh Related for: it may all be embedded
     query_bytes: int = 8 * 1024  # a URL's query string, which holds a search
     # What one address may do: (burst, requests per second after the burst).
@@ -59,6 +69,9 @@ class Limits:
         "read": (300, 10.0),
     })
     related_bytes_per_token: int = 16 * 1024  # a long Related request counts as several
+    # Seconds that one address's searches and Related refreshes may run: (burst, seconds per second
+    # after it). Charged afterwards, so a request's real cost counts, whatever made it expensive.
+    work: tuple[float, float] = (30.0, 0.25)
     busy_slots: int = 2  # searches and Related refreshes that run at once (the server has few CPUs)
     busy_waiters: int = 16  # requests that may queue for a slot; beyond that they are told to retry
     busy_wait: float = 3.0  # seconds a request queues before it is told to retry
@@ -74,15 +87,25 @@ class RateLimiter:
         self.buckets: dict[str, tuple[float, float]] = {}  # key -> (tokens, when)
         self.lock = threading.Lock()
 
+    def _tokens(self, key: str, burst: float, per_second: float, now: float) -> float:
+        if len(self.buckets) >= self.MAX_BUCKETS and key not in self.buckets:
+            self.buckets.clear()  # forgetting everyone errs on the side of letting them in
+        tokens, when = self.buckets.get(key, (burst, now))
+        return min(burst, tokens + (now - when) * per_second)
+
+    def charge(self, key: str, burst: float, per_second: float, amount: float) -> None:
+        """Take `amount` tokens for work already done. The balance can go below zero, and
+        retry_after with cost=0 then waits until it is paid off."""
+        now = self.clock()
+        with self.lock:
+            self.buckets[key] = (self._tokens(key, burst, per_second, now) - amount, now)
+
     def retry_after(self, key: str, burst: float, per_second: float, cost: float = 1) -> float:
         """Take `cost` tokens and return 0, or return the seconds to wait if there are too few."""
         cost = min(cost, burst)
         now = self.clock()
         with self.lock:
-            if len(self.buckets) >= self.MAX_BUCKETS and key not in self.buckets:
-                self.buckets.clear()  # forgetting everyone errs on the side of letting them in
-            tokens, when = self.buckets.get(key, (burst, now))
-            tokens = min(burst, tokens + (now - when) * per_second)
+            tokens = self._tokens(key, burst, per_second, now)
             if tokens < cost:
                 self.buckets[key] = (tokens, now)
                 return (cost - tokens) / per_second
@@ -137,7 +160,13 @@ class VisitorStore(TaskStore):
 
     def save_prefs(self, name: str, prefs) -> None:
         self.workspaces.check_room()
-        if self.used() > self.limits.max_workspace_bytes:
+        if len(prefs.liked) > self.limits.max_liked:
+            raise TaskError(f"you can ask for more like at most {self.limits.max_liked} passages per task", 403)
+        prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
+        path = self._existing_meta_path(name)
+        before = path.stat().st_size if path.exists() else 0
+        size = len(json.dumps(prefs.to_dict(), indent=1))  # pure ASCII, so characters are bytes
+        if self.used() - before + size > self.limits.max_workspace_bytes:
             raise TaskError(self._full(), 413)
         super().save_prefs(name, prefs)
 
@@ -245,6 +274,14 @@ class Workspaces:
                 return
 
 
+def body_limit(limits: Limits, kind: str, method: str, path: str) -> int:
+    if kind == "related":
+        return limits.related_bytes
+    if method == "PUT" and path.startswith("/api/tasks/") and not path.endswith("/steer"):
+        return limits.request_bytes  # the text of a task
+    return limits.small_request_bytes
+
+
 def kind_of(method: str, path: str) -> str:
     if path == "/api/search":
         return "search"
@@ -282,11 +319,26 @@ class PublicGuard:
         limits, headers = self.limits, Headers(scope=scope)
         kind = kind_of(scope["method"], scope["path"])
         address = client_address(scope)
-        max_body = limits.related_bytes if kind == "related" else limits.request_bytes
+        max_body = body_limit(limits, kind, scope["method"], scope["path"])
+        limiter = self.workspaces.limiter
+        token, renew = "", False
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                out = MutableHeaders(scope=message)
+                for name, value in SECURITY_HEADERS:
+                    out[name] = value
+                if scope["path"].startswith("/api/"):  # answers differ per visitor: never keep them
+                    out["Cache-Control"] = "no-store"
+                    out.add_vary_header("Cookie")
+                if renew:
+                    out.append("Set-Cookie", f"{COOKIE}={token}; Path={self.base_path or '/'}; "
+                                             f"Max-Age={COOKIE_DAYS * 86400}; HttpOnly; SameSite=Lax; Secure")
+            await send(message)
 
         async def refuse(status: int, detail: str, retry_after: float | None = None):
             extra = {} if retry_after is None else {"Retry-After": str(max(1, round(retry_after)))}
-            await JSONResponse({"detail": detail}, status, headers=extra)(scope, receive, send)
+            await JSONResponse({"detail": detail}, status, headers=extra)(scope, receive, send_with_headers)
 
         if len(scope.get("query_string", b"")) > limits.query_bytes:
             return await refuse(414, "this request is too long")
@@ -298,7 +350,10 @@ class PublicGuard:
 
         burst, per_second = limits.rates[kind]
         cost = 1 + int(length or 0) // limits.related_bytes_per_token if kind == "related" else 1
-        wait = self.workspaces.limiter.retry_after(f"{kind}:{address}", burst, per_second, cost)
+        wait = limiter.retry_after(f"{kind}:{address}", burst, per_second, cost)
+        expensive = kind in ("search", "related")
+        if not wait and expensive:
+            wait = limiter.retry_after(f"work:{address}", *limits.work, cost=0)
         if wait:
             return await refuse(429, "too many requests from this address; wait a moment and try again", wait)
 
@@ -308,13 +363,6 @@ class PublicGuard:
             token, renew = secrets.token_urlsafe(32), True
         _visitor_store.set(self.workspaces.store(token))
         _visitor_address.set(address)
-
-        async def send_with_cookie(message):
-            if renew and message["type"] == "http.response.start":
-                secure = "; Secure" if headers.get("x-forwarded-proto") == "https" else ""
-                MutableHeaders(scope=message).append("Set-Cookie", (
-                    f"{COOKIE}={token}; Path={self.base_path or '/'}; Max-Age={COOKIE_DAYS * 86400}; HttpOnly; SameSite=Lax{secure}"))
-            await send(message)
 
         received = 0
 
@@ -326,14 +374,16 @@ class PublicGuard:
                 raise HTTPException(413, f"this request is too long (the limit is {max_body // 1024} KB)")
             return message
 
-        if kind not in ("search", "related"):
-            return await self.app(scope, receive_some, send_with_cookie)
+        if not expensive:
+            return await self.app(scope, receive_some, send_with_headers)
         if not await self._take_slot():
             return await refuse(503, "the server is busy; try again in a moment", 2)
+        started = time.monotonic()
         try:
-            await self.app(scope, receive_some, send_with_cookie)
+            await self.app(scope, receive_some, send_with_headers)
         finally:
             self.running -= 1
+            limiter.charge(f"work:{address}", *limits.work, time.monotonic() - started)
 
     async def _take_slot(self) -> bool:
         """Wait a little for a place among the expensive requests. All of this runs on the one

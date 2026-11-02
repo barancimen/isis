@@ -46,9 +46,11 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 
 - **Private tasks.** An anonymous cookie picks each visitor's folder, named by a hash of the cookie. The folder appears with the first task. Clearing cookies loses access to those tasks. Deleted tasks are removed, not moved to `.trash`.
 - **Read-only corpus.** `/api/file` serves only indexed files, so `_tasks` and hidden files in the corpus stay private. Everything indexed is public.
-- **Space.** 20 tasks, 512 KB per task and 2 MB per visitor, 1 GB and 5,000 workspaces in all. A workspace unused for 30 days is deleted.
+- **Space.** 20 tasks, 512 KB per task and 2 MB per visitor, 1 GB and 5,000 workspaces in all. Requests that store anything other than a task's text are capped at 16 KB, and a task can have 200 liked passages. A workspace unused for 30 days is deleted.
 - **Rates per address.** Separate limits for search, Related, saves and everything else, and 5 new workspaces per hour. A long Related request counts as several. IPv6 addresses count per /64.
+- **Work per address.** Searches and Related refreshes are charged afterwards by the time they took: 30 s at first, then 0.25 s per second. An address in debt gets a 429 until it is paid off, so a request can't cost more than it is charged for, whatever made it slow.
 - **Busy limit.** Two searches or Related refreshes run at once. Others wait up to 3 s, then get a 503.
+- **Browser headers.** The cookie is always `Secure`, so the site works only over HTTPS (browsers also accept it on localhost). Every answer has a content security policy, and API answers have `Cache-Control: no-store`.
 - **Regexes.** They run through the `regex` library, with 1 s for each request. Syntax is still checked by `re`, so what is valid stays the same. Patterns over 300 characters or with counted repeats multiplying past 2,000 are refused, because `regex` expands repeats when it compiles and `(x{65535}){65535}` would use all the memory. Fuzzy syntax such as `{e<=1}` is refused too, as `re` reads it as plain text.
 
 ## Using it

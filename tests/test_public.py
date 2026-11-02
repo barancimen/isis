@@ -16,6 +16,7 @@ from isis.server.tasks import TaskStore
 
 pytest.importorskip("regex")
 ROOMY = {"search": (1000, 100.0), "related": (1000, 100.0), "write": (1000, 100.0), "read": (1000, 100.0)}
+HTTPS = "https://testserver"  # the cookie is Secure, so a plain http client would not send it back
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def make_client(engine, tmp_path):
 
     def make(limits=None, *, address="203.0.113.7", share=None):
         workspaces = share or Workspaces(tmp_path / "public", limits or Limits(rates=ROOMY))
-        client = TestClient(create_app(engine, workspaces, background=False, watch=False),
+        client = TestClient(create_app(engine, workspaces, background=False, watch=False), base_url=HTTPS,
                             headers={"CF-Connecting-IP": address})
         client.__enter__()
         made.append(client)
@@ -37,7 +38,7 @@ def make_client(engine, tmp_path):
 
 
 def visitor(client, share, address="203.0.113.8"):
-    return TestClient(client.app, headers={"CF-Connecting-IP": address})
+    return TestClient(client.app, base_url=HTTPS, headers={"CF-Connecting-IP": address})
 
 
 def test_visitors_have_separate_private_tasks(make_client):
@@ -57,10 +58,10 @@ def test_the_cookie_is_private_and_kept(make_client):
     client = make_client()
     first = client.get("/api/tasks").headers["set-cookie"]
     assert first.startswith(f"{COOKIE}=") and "HttpOnly" in first and "SameSite=lax" in first.replace("Lax", "lax")
-    assert "Secure" not in first  # plain http here
+    assert "Secure" in first
     assert "set-cookie" not in client.get("/api/tasks").headers
-    behind_tls = TestClient(client.app, headers={"X-Forwarded-Proto": "https"}).get("/api/status")
-    assert "Secure" in behind_tls.headers["set-cookie"]
+    spoofed = TestClient(client.app, headers={"X-Forwarded-Proto": "http"}).get("/api/status")
+    assert "Secure" in spoofed.headers["set-cookie"]  # whatever a request claims
 
 
 def test_a_made_up_cookie_is_replaced(make_client):
@@ -98,6 +99,51 @@ def test_there_is_no_way_to_write_to_the_corpus(make_client):
     client = make_client()
     assert client.put("/api/file", params={"path": "whales.md"}, json={"content": "x"}).status_code in (404, 405)
     assert client.post("/api/file", params={"path": "whales.md"}, json={"content": "x"}).status_code in (404, 405)
+
+
+def test_answers_about_a_visitor_are_never_kept(make_client):
+    client = make_client(Limits(rates={**ROOMY, "search": (1, 0.01)}))
+    for response in (client.get("/api/tasks"), client.get("/api/search", params={"q": "whale"}),
+                     client.get("/api/search", params={"q": "whale"})):  # the last is refused
+        assert response.headers["cache-control"] == "no-store" and "cookie" in response.headers["vary"].lower()
+    assert client.get("/app.js").headers["cache-control"] == "no-cache"
+
+
+def test_security_headers_are_on_every_answer(make_client):
+    client = make_client(Limits(rates={**ROOMY, "search": (1, 0.01)}))
+    client.get("/api/search", params={"q": "whale"})
+    for response in (client.get("/"), client.get("/api/status"), client.get("/api/search", params={"q": "whale"})):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_a_stored_passage_cannot_overshoot_the_space(make_client):
+    client = make_client(Limits(rates=ROOMY, max_workspace_bytes=20_000))
+    client.post("/api/tasks", json={"name": "t"}).raise_for_status()
+    passage = {"action": "dismiss", "lane": "best", "path": "whales.md"}
+    assert client.post("/api/tasks/t/feedback", json={**passage, "text": "x" * 15_000}).status_code == 200
+    assert client.post("/api/tasks/t/feedback", json={**passage, "text": "y" * 15_000}).status_code == 413
+    (folder,) = client.workspaces.folder.iterdir()
+    assert sum(p.stat().st_size for p in folder.rglob("*") if p.is_file()) <= 20_000
+
+
+def test_only_a_saved_task_may_be_a_large_request(make_client):
+    client = make_client(Limits(rates=ROOMY, small_request_bytes=500))
+    client.post("/api/tasks", json={"name": "t"}).raise_for_status()
+    large = {"action": "dismiss", "lane": "best", "path": "whales.md", "text": "x" * 600}
+    assert client.post("/api/tasks/t/feedback", json=large).status_code == 413
+    assert client.put("/api/tasks/t/steer", json={"text": "x" * 600}).status_code == 413
+    assert client.post("/api/tasks", json={"name": "x" * 600}).status_code == 413
+    assert client.put("/api/tasks/t", json={"content": "x" * 600}).status_code == 200
+
+
+def test_likes_are_capped(make_client):
+    client = make_client(Limits(rates=ROOMY, max_liked=2))
+    client.post("/api/tasks", json={"name": "t"}).raise_for_status()
+    codes = [client.post("/api/tasks/t/feedback", json={"action": "like", "lane": "best", "path": "whales.md", "text": f"passage {i}"}).status_code
+             for i in range(3)]
+    assert codes == [200, 200, 403]
 
 
 def test_task_caps(make_client):
@@ -140,7 +186,7 @@ def test_clearing_cookies_does_not_get_round_the_workspace_limit(make_client):
         client.cookies.clear()
         response = client.post("/api/tasks", json={"name": "t"})
         assert response.status_code == (429 if i == 2 else 200)
-    elsewhere = TestClient(client.app, headers={"CF-Connecting-IP": "198.51.100.1"})
+    elsewhere = TestClient(client.app, base_url=HTTPS, headers={"CF-Connecting-IP": "198.51.100.1"})
     elsewhere.post("/api/tasks", json={"name": "t"}).raise_for_status()
 
 
@@ -200,6 +246,31 @@ def test_the_address_comes_from_the_proxy():
     assert client_address({**scope, "headers": ipv6}) == client_address({**scope, "headers": other})
 
 
+def test_expensive_work_is_charged_by_the_time_it_took(tmp_path):
+    workspaces = Workspaces(tmp_path / "public", Limits(rates=ROOMY, work=(0.1, 0.01)))
+    ran = []
+
+    async def slow(scope, receive, send):
+        ran.append(scope["path"])
+        await asyncio.sleep(0.2)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    async def main():
+        transport = httpx.ASGITransport(app=PublicGuard(slow, workspaces))
+        async with httpx.AsyncClient(transport=transport, base_url="https://t") as client:
+            first = await client.get("/api/search", headers={"CF-Connecting-IP": "203.0.113.1"})
+            second = await client.get("/api/search", headers={"CF-Connecting-IP": "203.0.113.1"})
+            cheap = await client.get("/api/status", headers={"CF-Connecting-IP": "203.0.113.1"})
+            other = await client.get("/api/search", headers={"CF-Connecting-IP": "203.0.113.2"})
+            return first, second, cheap, other
+
+    first, second, cheap, other = asyncio.run(main())
+    assert (first.status_code, second.status_code, cheap.status_code, other.status_code) == (200, 429, 200, 200)
+    assert int(second.headers["retry-after"]) >= 5  # the 0.1 s it overspent, at 0.01 s per second
+    assert len(ran) == 3
+
+
 def test_rate_limiter_refills():
     now = [0.0]
     limiter = RateLimiter(clock=lambda: now[0])
@@ -244,7 +315,7 @@ def test_busy_limit_runs_a_few_and_turns_the_rest_away(tmp_path):
 
 def test_the_site_can_live_under_a_path(engine, tmp_path):
     workspaces = Workspaces(tmp_path / "public", Limits(rates=ROOMY), base_path="/isis")
-    with TestClient(create_app(engine, workspaces, background=False, watch=False), follow_redirects=False) as client:
+    with TestClient(create_app(engine, workspaces, background=False, watch=False), base_url=HTTPS, follow_redirects=False) as client:
         redirect = client.get("/isis", params={"a": "1"})
         assert redirect.status_code == 308 and redirect.headers["location"] == "/isis/?a=1"
         page = client.get("/isis/")
