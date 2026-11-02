@@ -84,7 +84,12 @@ class BM25:
         idf = np.log1p((self.n_docs - df + 0.5) / (df + 0.5))
         tf = counts.astype(np.float32)
         norm = self.k1 * (1 - self.b + self.b * self.doc_len / self.avg_len)
-        return (idf * tf * (self.k1 + 1) / (tf + norm)).astype(np.float32)
+        # Only where it matches, like the terms in the matrix. Elsewhere the score is 0, and the
+        # sum below would be 0/0 if norm is 0: with k1 at 0, or b at 1 for a passage of stopwords.
+        scores = np.zeros(self.n_docs, np.float32)
+        hit = tf > 0
+        scores[hit] = idf * tf[hit] * (self.k1 + 1) / (tf[hit] + norm[hit])
+        return scores
 
     def scores(self, term_ids, weights) -> np.ndarray:
         """BM25 score of every passage for a query given as term ids with weights."""

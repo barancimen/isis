@@ -1,4 +1,5 @@
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -62,3 +63,24 @@ def test_empty_index():
     _, bm25 = build([])
     assert bm25.n_docs == 0 and bm25.scores([], []).shape == (0,)
     assert np.isfinite(bm25.idf).all()
+
+
+@pytest.mark.parametrize("k1,b", [(0.0, 0.75), (1.2, 1.0), (0.0, 1.0), (0.0, 0.0), (3.0, 1.0)])
+def test_pattern_scores_are_finite_at_the_ends_of_the_sliders(k1, b):
+    """A passage with no words (only stopwords, say) has length 0. Passages without a match score 0."""
+    vocab = Vocabulary()
+    bm25 = BM25(*term_counts([["whale", "sea"], [], ["ship"]], vocab), n_terms=len(vocab), k1=k1, b=b)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        scores = bm25.pattern_scores(np.array([2.0, 0.0, 0.0]))
+    assert np.isfinite(scores).all()
+    assert scores[0] > 0 and scores[1] == scores[2] == 0
+
+
+def test_pattern_scores_are_unchanged_where_they_match():
+    vocab = Vocabulary()
+    bm25 = BM25(*term_counts([["whale", "sea"], ["ship", "sea", "oil"], ["ship"]], vocab), n_terms=len(vocab), k1=1.2, b=0.75)
+    counts = np.array([2.0, 1.0, 0.0])
+    idf = np.log1p((3 - 2 + 0.5) / (2 + 0.5))
+    expected = idf * counts * 2.2 / (counts + 1.2 * (0.25 + 0.75 * bm25.doc_len / bm25.avg_len))
+    assert np.allclose(bm25.pattern_scores(counts)[:2], expected[:2]) and bm25.pattern_scores(counts)[2] == 0

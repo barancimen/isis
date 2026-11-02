@@ -1,12 +1,18 @@
+import dataclasses
 import json
+import warnings
 
+import numpy as np
 import pytest
+from conftest import write_corpus
 from fastapi.testclient import TestClient
 
+from isis.engine.index import Engine
 from isis.engine.lexical import BM25, Vocabulary, term_counts
 from isis.engine.params import configure, specs
-from isis.engine.related import RelatedConfig
+from isis.engine.related import RelatedConfig, TaskPrefs
 from isis.engine.search import SearchConfig
+from isis.engine.semantic import HashEmbedder
 from isis.server.app import create_app
 from isis.server.tasks import TaskStore
 
@@ -90,3 +96,45 @@ def test_api_lists_params_and_accepts_overrides(client):
     small = client.post("/api/tasks/t/related", json={"text": "The sperm whale and ambergris.", "params": {"total_slots": 4}})
     assert small.status_code == 200 and small.json()["stats"]["slots"]
     assert sum(small.json()["stats"]["slots"].values()) <= 4
+
+
+ODD_FILES = {
+    "words.md": "# Whales\n\nThe white whale and the sea.\n\nAhab hunted the whale across the sea.\n",
+    "stopwords.md": "the and of it\n\nthe\n\n# of\n\nand it is\n",
+    "one.md": "whale\n",
+    "symbols.md": "---\n\n***\n\n1 2 3\n\n$$$ ??? !!!\n",
+}
+
+
+def _is_finite(x) -> bool:
+    if dataclasses.is_dataclass(x):
+        return all(_is_finite(getattr(x, f.name)) for f in dataclasses.fields(x))
+    if isinstance(x, dict):
+        return all(_is_finite(v) for v in x.values())
+    if isinstance(x, (list, tuple)):
+        return all(_is_finite(v) for v in x)
+    return not isinstance(x, (float, np.floating)) or bool(np.isfinite(x))
+
+
+@pytest.mark.parametrize("cls", [SearchConfig, RelatedConfig])
+def test_every_slider_end_gives_finite_results_without_warnings(tmp_path, cls):
+    root = write_corpus(tmp_path / "corpus", ODD_FILES)
+    engine = Engine(root, embedder=HashEmbedder())
+    engine.refresh()
+    text = "# Whales\n\nThe white whale.\n\n# Stopwords\n\nthe and of\n\nThe sea and Ahab.\n"
+    prefs = TaskPrefs(steer='whale "the sea" /wh.le/')
+    settings = [{}]
+    for spec in specs(cls):
+        ends = spec["choices"] if spec.get("choices") else [spec["min"], spec["max"]]
+        settings += [{spec["name"]: end} for end in ends]
+    settings += [{s["name"]: s["min"] for s in specs(cls) if not s.get("choices")},
+                 {s["name"]: s["max"] for s in specs(cls) if not s.get("choices")}]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        for overrides in settings:
+            config = configure(cls, overrides)
+            if cls is SearchConfig:
+                for query, mode in (("white whale", "hybrid"), ('"the sea"', "lexical"), ("+/wh.le/ sea", "hybrid"), ("the", "hybrid")):
+                    assert _is_finite(engine.search(query, limit=20, mode=mode, config=config)), (overrides, query)
+            else:
+                assert _is_finite(engine.related(text, prefs=prefs, config=config)), overrides
