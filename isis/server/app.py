@@ -88,7 +88,7 @@ class SteerRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    action: Literal["add", "dismiss", "avoid", "restore", "like", "unlike"]
+    action: Literal["add", "dismiss", "avoid", "restore", "like", "unlike", "exclude_doc", "include_doc"]
     lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
     path: str = ""
     text: str = ""
@@ -282,10 +282,14 @@ def create_app(engine: Engine, tasks: TaskStore, *, background: bool = True, wat
 
     @app.post("/api/tasks/{name}/feedback")
     def feedback(name: str, body: FeedbackRequest):
-        if body.action not in ("restore", "unlike") and not body.lane:
+        if body.action not in ("restore", "unlike", "exclude_doc", "include_doc") and not body.lane:
             raise HTTPException(400, "feedback needs the lane the passage was shown in")
         with tasks.edit_prefs(name) as prefs:
-            if body.action == "like":
+            if body.action == "exclude_doc":
+                prefs.exclude_doc(body.path)
+            elif body.action == "include_doc":
+                prefs.include_doc(body.path)
+            elif body.action == "like":
                 prefs.like(body.lane, body.path, body.text, body.start_line, body.end_line)
             elif body.action == "unlike":
                 prefs.unlike(body.id)

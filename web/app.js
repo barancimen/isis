@@ -837,9 +837,10 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     }, "↑"),
     lane && h("button", { title: "Not useful: hide it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
     lane && h("button", { class: "avoid", title: "Avoid: hide it and every passage like it", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
+    lane && h("button", { class: "exclude-doc", title: `Exclude the document: never suggest anything from ${hit.path} for this task`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
-  return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
+  return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, onclick: open, title: lane ? JSON.stringify(hit.why, null, 1) : null },
     h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hit.heading || file), actions),
     h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
@@ -1068,6 +1069,18 @@ async function likeHit(hit, lane) {
   await changePrefs("POST", "/feedback", id ? { action: "unlike", id } : { action: "like", ...passageFields(hit, lane) });
 }
 
+async function excludeDoc(path) {
+  for (const card of document.querySelectorAll("#related-lanes .hit")) {
+    if (card.dataset.path === path) card.remove();
+  }
+  await changePrefs("POST", "/feedback", { action: "exclude_doc", path });
+}
+
+async function includeDoc(path, element) {
+  element?.remove();
+  await changePrefs("POST", "/feedback", { action: "include_doc", path });
+}
+
 // From the drawer: "restore" a dismissed passage, or "unlike" a liked one.
 async function undoFeedback(action, id, element) {
   element?.remove();
@@ -1095,11 +1108,12 @@ function renderFeedback(prefs, terms, lanes) {
     prefs.liked.length && `${prefs.liked.length} more like this`,
     prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} dismissed`,
     avoided && `${avoided} avoided`,
+    prefs.excluded_docs.length && `${prefs.excluded_docs.length} ${prefs.excluded_docs.length === 1 ? "document" : "documents"} excluded`,
     prefs.steer && "steered",
     added && `${added} added`,
     ignored.length && `${ignored.length} ignored`,
   ].filter(Boolean);
-  const empty = !prefs.liked.length && !prefs.dismissed.length && !prefs.steer && !ignored.length && !counted.length;
+  const empty = !prefs.liked.length && !prefs.dismissed.length && !prefs.excluded_docs.length && !prefs.steer && !ignored.length && !counted.length;
 
   const passageItem = (d, undo, tag) => {
     const known = d.start_line !== undefined && d.start_line !== null;
@@ -1119,6 +1133,13 @@ function renderFeedback(prefs, terms, lanes) {
     d.avoid && h("span", { class: "feedback-tag", title: "Avoided: passages like this one are hidden too" }, "⊘ avoided")));
   const liked = [...prefs.liked].reverse().map((d) => passageItem(d,
     h("button", { title: "Stop pulling the suggestions toward this passage", onclick: (e) => undoFeedback("unlike", d.id, e.target.closest("li")).catch(fail) }, "Stop")));
+  const excludedDocs = [...prefs.excluded_docs].reverse().map((path) =>
+    h("li", { class: "feedback-item" },
+      h("div", { class: "feedback-head" },
+        h("button", { class: "feedback-open", title: `Open ${path} in the reader`, onclick: () => openFile(path).catch(fail) }, path),
+        h("button", { title: "Let this document be suggested again", onclick: (e) => includeDoc(path, e.target.closest("li")).catch(fail) }, "Include"),
+      ),
+    ));
   const ignoredChip = (term) =>
     h("span", { class: "chip ignored" },
       h("span", { class: "chip-label" }, labels.get(term) ?? term),
@@ -1131,7 +1152,7 @@ function renderFeedback(prefs, terms, lanes) {
     h("summary", {}, "Feedback", h("span", { class: "tune-count" }, summary.length ? ` · ${summary.join(" · ")}` : "")),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
-        "Nothing yet. The passages you add (+), want more like (↑), dismiss (×) or avoid (⊘) here, the steer line, and the keywords you ignore are remembered for this task, whatever its text."),
+        "Nothing yet. The passages you add (+), want more like (↑), dismiss (×) or avoid (⊘) here, the documents you exclude (⊠), the steer line, and the keywords you ignore are remembered for this task, whatever its text."),
       liked.length > 0 && [
         h("div", { class: "tune-group" }, "More like this"),
         h("p", { class: "feedback-note" }, "These pull the suggestions toward them, in meaning and keywords, without being part of the task. Parameters › More like this sets how strongly."),
@@ -1141,6 +1162,11 @@ function renderFeedback(prefs, terms, lanes) {
         h("div", { class: "tune-group" }, "Dismissed and avoided passages"),
         h("p", { class: "feedback-note" }, "Never suggested again. Passages like an avoided one are hidden too (Parameters › Avoid: similarity), and Parameters › Dismissal push can also rank passages like dismissed ones lower."),
         h("ul", { class: "feedback-list" }, dismissed),
+      ],
+      excludedDocs.length > 0 && [
+        h("div", { class: "tune-group" }, "Excluded documents"),
+        h("p", { class: "feedback-note" }, "Nothing from these is suggested for this task. Search still finds them."),
+        h("ul", { class: "feedback-list" }, excludedDocs),
       ],
       prefs.steer && [
         h("div", { class: "tune-group" }, "Steer line"),
@@ -1166,7 +1192,7 @@ function renderFeedback(prefs, terms, lanes) {
 
 async function forgetFeedback() {
   const name = state.task;
-  if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
+  if (!confirm(`Forget all feedback for “${name}”? Dismissed and avoided passages and excluded documents can come back, the steer line and ignored keywords are cleared, and the lanes start even.`)) return;
   const prefs = await changePrefs("DELETE", "/prefs");
   flash(`Forgot the feedback for “${name}”`);
   if (!prefs) return;

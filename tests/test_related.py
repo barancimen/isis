@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from isis.engine.index import Engine
-from isis.engine.related import LANES, RelatedConfig, TaskPrefs, allocate_slots, task_units
+from isis.engine.related import LANES, RelatedConfig, TaskPrefs, allocate_slots, passage_id, task_units
 from isis.engine.semantic import HashEmbedder
 
 TOPICS = {
@@ -270,6 +270,41 @@ def test_more_like_this_pulls_the_suggestions(engine):
 
     prefs.unlike(prefs.summary()["liked"][0]["id"])
     assert prefs.liked == [] and prefs.feedback == {"core": [0, 0]}
+
+
+def test_an_excluded_document_is_never_suggested(engine):
+    task = "# Sea\nThe whale and the harpoon, the ship and its captain.\n"
+    shown = items(engine.related(task))
+    path = shown[0].path
+    assert {h.path for h in shown} - {path}, "the corpus should offer another document too"
+
+    prefs = TaskPrefs()
+    prefs.exclude_doc(path)
+    prefs.exclude_doc(path)
+    assert prefs.excluded_docs == [path]
+    again = items(engine.related(task, prefs=prefs))
+    assert again and path not in {h.path for h in again}
+
+    prefs = TaskPrefs.from_dict(prefs.to_dict())  # it is remembered
+    assert path not in {h.path for h in items(engine.related(task, prefs=prefs))}
+    prefs.include_doc(path)
+    assert path in {h.path for h in items(engine.related(task, prefs=prefs))}
+
+
+def test_a_passage_liked_in_an_excluded_document_keeps_pulling(engine):
+    task = "# Sea\nThe whale and the harpoon, the ship and its captain.\n"
+    first = items(engine.related(task))[0]
+    prefs = TaskPrefs()
+    prefs.like("core", first.path, first.text, first.start_line, first.end_line)
+    prefs.exclude_doc(first.path)
+    assert [d["path"] for d in prefs.liked] == [first.path]
+    assert prefs.feedback == {"core": [1, 0]}
+
+    pulled = items(engine.related(task, prefs=prefs))
+    assert pulled and first.path not in {h.path for h in pulled}
+    prefs.unlike(passage_id({"path": first.path, "text": first.text}))
+    plain = items(engine.related(task, prefs=prefs))
+    assert [h.text for h in pulled] != [h.text for h in plain]  # the like still changed the results
 
 
 def test_dismissing_a_passage_takes_back_more_like_this():

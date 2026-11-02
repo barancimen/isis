@@ -80,6 +80,16 @@ def test_related_terms_and_feedback(client):
     assert client.post("/api/tasks/t/feedback", json={"action": "add", "path": "whales.md"}).status_code == 400
 
 
+def test_documents_can_be_excluded_and_included_again(client):
+    client.post("/api/tasks", json={"name": "t"})
+    body = {"action": "exclude_doc", "path": "whales.md"}  # no lane: it judges the document
+    prefs = client.post("/api/tasks/t/feedback", json=body).json()
+    assert prefs["excluded_docs"] == ["whales.md"] and prefs["feedback"] == {}
+    assert client.get("/api/tasks/t/prefs").json()["excluded_docs"] == ["whales.md"]
+    prefs = client.post("/api/tasks/t/feedback", json={"action": "include_doc", "path": "whales.md"}).json()
+    assert prefs["excluded_docs"] == []
+
+
 def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     client.post("/api/tasks", json={"name": "t"})
     for text in ("x", "y"):
@@ -93,7 +103,7 @@ def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     assert prefs["dismissed"] == [] and prefs["feedback"]["hidden"] == [0, 0]
 
     client.put("/api/tasks/t/steer", json={"text": "whale"})
-    assert client.delete("/api/tasks/t/prefs").json() == {"steer": "", "ignored": [], "dismissed": [], "feedback": {}, "liked": []}
+    assert client.delete("/api/tasks/t/prefs").json() == {"steer": "", "ignored": [], "dismissed": [], "feedback": {}, "liked": [], "excluded_docs": []}
     assert client.get("/api/tasks/t/prefs").json()["steer"] == ""
     assert len(list((corpus / "_tasks" / ".trash").glob("t.*.prefs.json"))) == 1
 

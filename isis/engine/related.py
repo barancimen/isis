@@ -14,8 +14,8 @@
             scores by its best match (optionally weighted toward the cursor).
 3. gate     Keep only clearly relevant passages: a strong semantic z-score, or a top lexical hit
             with some semantic support. Drop what is already collected or was dismissed, what
-            the steer line rules out (+x requires x, -x excludes it), and what is close to an
-            avoided passage.
+            the steer line rules out (+x requires x, -x excludes it), what is close to an
+            avoided passage, and every passage of an excluded document.
 4. lanes    Rank the survivors four ways:
               core      reciprocal-rank fusion of both signals
               hidden    high meaning, low keyword overlap: the same idea in other words
@@ -220,6 +220,7 @@ class TaskPrefs:
     dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line", "avoid"?}
     feedback: dict = field(default_factory=dict)  # lane -> [adds, dismisses]
     liked: list[dict] = field(default_factory=list)  # "more like this": {"path", "text", "lane", "start_line", "end_line"}
+    excluded_docs: list[str] = field(default_factory=list)  # paths of documents never to suggest from
 
     @classmethod
     def from_dict(cls, data: dict | None) -> TaskPrefs:
@@ -233,6 +234,7 @@ class TaskPrefs:
             ignored=_strings(data.get("ignored")),
             dismissed=_remembered_passages(data.get("dismissed")),
             liked=_remembered_passages(data.get("liked")),
+            excluded_docs=_strings(data.get("excluded_docs")),
             feedback={
                 lane: [max(0, v[0]), max(0, v[1])]  # the lane draw refuses negative counts
                 for lane, v in (data.get("feedback") if isinstance(data.get("feedback"), dict) else {}).items()
@@ -342,6 +344,16 @@ class TaskPrefs:
             elif counts := self.feedback.get(d.get("lane")):
                 counts[0] = max(counts[0] - 1, 0)
         self.liked = kept
+
+    def exclude_doc(self, path: str) -> None:
+        """Never suggest anything from this document. Passages liked in it keep pulling: wanting
+        more like a paragraph, but nothing from where it came, is a fair thing to ask. This judges
+        the document rather than the lane that showed it, so the lane counts stay out of it."""
+        if path and path not in self.excluded_docs:
+            self.excluded_docs.append(path)
+
+    def include_doc(self, path: str) -> None:
+        self.excluded_docs = [p for p in self.excluded_docs if p != path]
 
     def restore_id(self, ident: str) -> None:
         """restore() for the dismissal with this id (see summary())."""
@@ -808,6 +820,7 @@ def gate(snapshot: Snapshot, units: list[Unit], signals: SemanticSignals, lex: n
 
     collected = {r for u in units for r in u.source_rows}
     dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
+    excluded_docs = set(prefs.excluded_docs)
     excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
     near_excerpt = ExcerptMatcher(excerpts)
 
@@ -816,6 +829,8 @@ def gate(snapshot: Snapshot, units: list[Unit], signals: SemanticSignals, lex: n
         if row in collected:
             continue
         p = snapshot.passages[row]
+        if p.path in excluded_docs:
+            continue
         if dismissed_keys or excerpts:
             hay = _norm(p.text)
             if (p.path, hay) in dismissed_keys or near_excerpt(hay):
