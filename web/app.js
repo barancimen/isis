@@ -3,6 +3,7 @@ import {
   EditorView, Decoration, WidgetType, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers,
   history, defaultKeymap, historyKeymap, indentWithTab,
   syntaxHighlighting, HighlightStyle, markdown, tags,
+  search, SearchQuery, setSearchQuery, findNext, findPrevious, openSearchPanel, closeSearchPanel,
 } from "./vendor/codemirror.js";
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { planInsertion } from "./insert.js";
@@ -100,6 +101,9 @@ const theme = EditorView.theme({
   ".cm-placeholder": { color: "var(--faint)", fontStyle: "italic" },
   ".cm-hit-range": { backgroundColor: "var(--hit-line)" },
   ".cm-env": { backgroundColor: "var(--panel)", boxShadow: "inset 3px 0 0 var(--border)" },
+  // The selection is drawn under the lines, so this background would hide it. Here the browser's own
+  // highlight shows instead, which the editor otherwise turns off.
+  ".cm-line.cm-env ::selection, .cm-line.cm-env::selection": { backgroundColor: "var(--selection) !important" },
   ".cm-env-meta": { fontSize: "0.8em", lineHeight: "1.55", color: "var(--muted)" },
   ".cm-env-key": { fontWeight: "600" },
   ".cm-env-edge": { fontSize: "6px", lineHeight: "16px", userSelect: "none" },
@@ -339,6 +343,110 @@ function reflow({ editable }) {
   return editable ? [field, EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing))] : field;
 }
 
+// ---------- find in a pane ----------
+
+// Each editor has its own box. The browser's own find can't do this: an editor only keeps the text
+// near the screen on the page, so the browser would miss the rest of the document.
+const FIND_COUNT_LIMIT = 5000;
+const findState = new WeakMap(); // view -> { text, anchor }: what it looks for, and where from
+
+function findQuery(text) {
+  // Any white space in the words matches any white space in the text, line breaks too: a hard
+  // wrapped paragraph shows as one line, so two words may look adjacent across a break.
+  const pattern = text.trim().replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new SearchQuery({ search: pattern, regexp: true, caseSensitive: false });
+}
+
+function findCount(view, query) {
+  if (!query.valid) return "";
+  const { from, to } = view.state.selection.main;
+  const matches = query.getCursor(view.state);
+  let total = 0;
+  let current = 0;
+  for (let m = matches.next(); !m.done && total < FIND_COUNT_LIMIT; m = matches.next()) {
+    total += 1;
+    if (m.value.from === from && m.value.to === to) current = total;
+  }
+  if (!total) return "No matches";
+  const shown = total >= FIND_COUNT_LIMIT ? `${total.toLocaleString()}+` : total.toLocaleString();
+  return current ? `${current.toLocaleString()} of ${shown}` : `${shown} ${total === 1 ? "match" : "matches"}`;
+}
+
+function findPanel(view, label) {
+  const remembered = () => findState.get(view) ?? { text: "", anchor: view.state.selection.main.from };
+  const count = h("span", { class: "find-count", "aria-live": "polite" });
+  const input = h("input", {
+    type: "text", spellcheck: "false", "main-field": "true", placeholder: label, "aria-label": label,
+    oninput: () => {
+      const { anchor } = remembered();
+      findState.set(view, { text: input.value, anchor });
+      view.dispatch({ selection: EditorSelection.cursor(Math.min(anchor, view.state.doc.length)), effects: setSearchQuery.of(findQuery(input.value)) });
+      if (input.value.trim()) {
+        findNext(view);
+        input.setSelectionRange(input.value.length, input.value.length); // it selects the box's text
+      }
+    },
+    onkeydown: (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        (e.shiftKey ? findPrevious : findNext)(view);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closeFind(view);
+      }
+    },
+  });
+  input.value = remembered().text;
+  const button = (text, title, onclick) => h("button", { type: "button", title, "aria-label": title, onclick }, text);
+  const dom = h("div", { class: "find-panel" }, input, count,
+    button("↑", "Previous match (Shift+Enter)", () => findPrevious(view)),
+    button("↓", "Next match (Enter)", () => findNext(view)),
+    button("×", "Close (Esc)", () => closeFind(view)));
+  const show = (state) => {
+    if (input.value !== remembered().text) input.value = remembered().text;
+    count.textContent = input.value.trim() ? findCount({ state }, findQuery(input.value)) : "";
+    count.classList.toggle("none", count.textContent === "No matches");
+  };
+  return {
+    dom,
+    top: true,
+    mount: () => {
+      show(view.state);
+      input.focus();
+      input.select();
+    },
+    update: (update) => {
+      if (update.docChanged || update.selectionSet || update.transactions.some((tr) => tr.effects.some((e) => e.is(setSearchQuery)))) show(update.state);
+    },
+  };
+}
+
+function closeFind(view) {
+  closeSearchPanel(view);
+  view.focus();
+}
+
+function findInPane(label) {
+  return [
+    search({
+      top: true,
+      createPanel: (view) => findPanel(view, label),
+      scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
+    }),
+    keymap.of([{ key: "Escape", run: closeSearchPanel }]),
+  ];
+}
+
+function openFind(view) {
+  const { from, to } = view.state.selection.main;
+  const selected = view.state.sliceDoc(from, to);
+  const usable = selected.trim() && selected.length <= 200 && !selected.includes("\n");
+  const text = usable ? selected : findState.get(view)?.text ?? "";
+  findState.set(view, { text, anchor: from });
+  openSearchPanel(view); // first, as it sets a query of its own
+  view.dispatch({ effects: setSearchQuery.of(findQuery(text)) });
+}
+
 function readerState(doc) {
   return EditorState.create({
     doc,
@@ -351,6 +459,7 @@ function readerState(doc) {
       syntaxHighlighting(markdownStyle),
       theme,
       reflow({ editable: false }),
+      findInPane("Find in this document"),
       hitSlot.field,
       placeholder("Open a document from Files, or select a result."),
       keymap.of([{
@@ -378,6 +487,7 @@ function taskExtensions() {
     syntaxHighlighting(markdownStyle),
     theme,
     reflow({ editable: true }),
+    findInPane("Find in this task"),
     addedSlot.field,
     placeholder(
       "Collect passages here. Select text in a document and push Ctrl/⌘+Enter, or select + on a result. " +
@@ -681,7 +791,14 @@ async function openFile(path, location = null) {
   if (path !== state.readerPath) {
     const { content } = await api("GET", `api/file?path=${enc(path)}`);
     rememberReaderScroll();
+    const finding = Boolean(reader.dom.querySelector(".find-panel"));
     reader.setState(readerState(content));
+    if (finding) { // a new state starts without the box: keep looking for the same words
+      const text = findState.get(reader)?.text ?? "";
+      findState.set(reader, { text, anchor: 0 });
+      openSearchPanel(reader);
+      reader.dispatch({ effects: setSearchQuery.of(findQuery(text)) });
+    }
     measureWholeDocument(reader);
     if (!location) restoreReaderScroll(path);
     state.readerPath = path;
@@ -950,6 +1067,17 @@ function renderRelatedEmpty(message) {
   $("#related-lanes").replaceChildren();
   $("#related-feedback").hidden = true;
   $("#related-steer").hidden = true;
+}
+
+// After Refresh, the first group of results starts at the top of the panel. With few results the
+// panel couldn't scroll that far, so the list gets at least the panel's height.
+function scrollToBestResults() {
+  const panel = $("#panel-related");
+  const lanes = $("#related-lanes");
+  const heading = lanes.querySelector(".lane h3");
+  if (!heading) return;
+  lanes.style.minHeight = `${panel.clientHeight}px`;
+  panel.scrollTop += heading.getBoundingClientRect().top - panel.getBoundingClientRect().top;
 }
 
 function refreshRelated() {
@@ -1576,7 +1704,7 @@ function bind() {
   window.addEventListener("pagehide", rememberReaderScroll);
   $("#search-input").addEventListener("input", runSearch);
   $("#search-meaning").addEventListener("click", toggleMeaning);
-  $("#related-refresh").addEventListener("click", () => refreshRelated().catch(fail));
+  $("#related-refresh").addEventListener("click", () => refreshRelated().then(scrollToBestResults).catch(fail));
   $("#related-steer").addEventListener("submit", (e) => saveSteer(e).catch(fail));
   $("#steer-input").addEventListener("input", () => ($("#steer-error").hidden = true));
   $("#steer-input").addEventListener("keydown", (e) => {
@@ -1588,6 +1716,21 @@ function bind() {
   for (const button of document.querySelectorAll(".side-tabs button")) {
     button.addEventListener("click", () => showPanel(button.dataset.panel));
   }
+  // Ctrl/⌘+F finds in the pane last clicked. With the cursor elsewhere, such as a box in the side
+  // panel, it stays the browser's own find.
+  let lastPane = null;
+  const paneOf = (target) => (target?.closest?.("#reader") ? reader : target?.closest?.("#task") ? taskView : null);
+  document.addEventListener("pointerdown", (e) => {
+    lastPane = paneOf(e.target);
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "f") return;
+    const active = document.activeElement;
+    const pane = paneOf(active) ?? (active === document.body ? lastPane : null);
+    if (!pane || (pane === taskView && !state.task)) return;
+    e.preventDefault();
+    openFind(pane);
+  }, true);
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();

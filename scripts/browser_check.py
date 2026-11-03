@@ -409,6 +409,9 @@ def main() -> None:
                           "---\nA **prose** section that\nis hard wrapped.\n---\n\nA real heading\n---\n\nBefore a rule.\n\n---\n\nAfter it.\n")
         try:
             page.evaluate("(p) => window.isis.openFile(p)", sample.name)
+            page.wait_for_selector("#reader .cm-env-meta:not(.cm-env-edge)")
+            highlight = page.evaluate("getComputedStyle(document.querySelector('#reader .cm-env-meta:not(.cm-env-edge)'), '::selection').backgroundColor")
+            assert highlight != "rgba(0, 0, 0, 0)", highlight  # a selection in the card must show
             editor = page.locator("#reader-editor")
             line = lambda text: editor.locator(".cm-line", has_text=text)
             weight = lambda locator: int(locator.evaluate("e => getComputedStyle(e).fontWeight"))
@@ -527,6 +530,73 @@ def main() -> None:
         page.wait_for_timeout(300)
         assert top_of_reader() < scrolled_at / 2, (top_of_reader(), scrolled_at)
         step("Files opens a document where it was last read, or at the top the first time; a result still opens at its match")
+
+        reader_box, task_box = "#reader .find-panel input", "#task .find-panel input"
+        page.evaluate("(path) => window.isis.openFile(path)", first)
+        page.wait_for_timeout(300)
+        page.click("#reader .cm-content")
+        page.keyboard.press("Control+f")
+        expect(page.locator(reader_box)).to_be_focused()
+        expect(page.locator(task_box)).to_have_count(0)  # only the pane that was clicked
+        page.keyboard.type("the")
+        expect(page.locator("#reader .find-count")).to_contain_text("of", timeout=5000)
+        total = page.locator("#reader .find-count").inner_text().split(" of ")[1]
+        scrolled = page.evaluate("window.isis.reader.scrollDOM.scrollTop")
+        for _ in range(200):
+            page.keyboard.press("Enter")
+        assert page.locator("#reader .find-count").inner_text().split(" of ")[1] == total
+        assert page.evaluate("window.isis.reader.scrollDOM.scrollTop") > scrolled + 50  # the scrollbar follows
+        chosen = page.evaluate("""() => {
+            const s = window.isis.reader.state, m = s.selection.main, box = window.isis.reader.scrollDOM.getBoundingClientRect();
+            const at = window.isis.reader.coordsAtPos(m.from);
+            return { word: s.sliceDoc(m.from, m.to), visible: Boolean(at) && at.top >= box.top && at.bottom <= box.bottom };
+        }""")
+        assert chosen["word"].lower() == "the" and chosen["visible"], chosen
+        before = page.locator("#reader .find-count").inner_text()
+        page.keyboard.press("Shift+Enter")
+        assert page.locator("#reader .find-count").inner_text() != before
+        page.click("#task .cm-content")
+        page.keyboard.press("Control+f")
+        expect(page.locator(task_box)).to_be_focused()
+        expect(page.locator(reader_box)).to_be_visible()  # each pane keeps its own
+        page.keyboard.type("zzzqqq")
+        expect(page.locator("#task .find-count")).to_have_text("No matches")
+        assert page.locator(reader_box).input_value() == "the"
+        page.keyboard.press("Escape")
+        expect(page.locator(task_box)).to_have_count(0)
+        expect(page.locator(reader_box)).to_be_visible()
+        page.evaluate("""() => {  // two words on either side of a line break are found
+            const s = window.isis.taskView.state; window.isis.taskView.dispatch({ changes: { from: 0, to: s.doc.length, insert: "alpha\\nbeta and alpha beta\\n" } });
+        }""")
+        page.click("#task .cm-content")
+        page.keyboard.press("Control+f")
+        page.keyboard.press("Control+a")
+        page.keyboard.type("alpha beta")
+        expect(page.locator("#task .find-count")).to_have_text(re.compile(r"of 2$"))
+        page.keyboard.press("Escape")
+        page.click("#reader .cm-content")
+        page.keyboard.press("Escape")
+        expect(page.locator(reader_box)).to_have_count(0)
+        step("Ctrl+F finds in the pane last clicked, each with its own box; Enter steps through the matches and the scrollbar follows")
+
+        page.click(".side-tabs button[data-panel=related]")
+        for text in ("The white whale and the sea, and Ahab.\\n", "The white whale, the sea, and the ship.\\n"):
+            page.evaluate("""(text) => {
+                const s = window.isis.taskView.state;
+                window.isis.taskView.dispatch({ changes: { from: 0, to: s.doc.length, insert: text } });
+            }""", text.replace("\\n", "\n"))
+            expect(page.locator("#related-refresh")).to_be_enabled(timeout=10000)
+            page.evaluate("document.querySelector('#panel-related').scrollTop = 0")
+            page.click("#related-refresh")
+            expect(page.locator("#related-lanes .hit").first).to_be_visible(timeout=20000)
+            expect(page.locator("#related-refresh")).to_be_disabled(timeout=20000)
+            page.wait_for_timeout(200)
+            gap = page.evaluate("""() => {
+                const heading = document.querySelector('#related-lanes .lane h3');
+                return { text: heading.textContent, gap: heading.getBoundingClientRect().top - document.querySelector('#panel-related').getBoundingClientRect().top };
+            }""")
+            assert gap["text"].startswith("Best results") and abs(gap["gap"]) < 1, gap
+        step("Refresh brings the top of Best results to the top of the panel")
         browser.close()
 
     for name in (WHALES, ISLANDS):
