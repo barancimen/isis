@@ -553,6 +553,7 @@ const state = {
   relatedLanes: [],
   likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
   searchSeq: 0,
+  searchAsTyped: null, // the query to search for without correcting its spelling
   indexUpdated: null,
   pageVersion: null, // of the files this page loaded
   paramSpecs: { search: [], related: [] }, // from /api/params
@@ -1048,11 +1049,21 @@ const runSearch = debounce(async () => {
     const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
     const hide = state.hiddenDocs.size ? `&hide=${enc(JSON.stringify([...state.hiddenDocs]))}` : "";
     // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
-    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}`);
+    const asTyped = state.searchAsTyped === q ? "&as_typed=true" : "";
+    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}${asTyped}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
-    const how = result.hits.some((hit) => "meaning_rank" in hit.why) ? " by keywords and meaning" : "";
-    $("#search-status").textContent = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} passages${how} · ${result.ms} ms` : "The app did not find passages.";
+    const byMeaning = result.hits.some((hit) => "meaning_rank" in hit.why);
+    const how = !byMeaning ? "" : result.hits.some((hit) => hit.why.keyword_rank) ? " by keywords and meaning" : " by meaning only";
+    const summary = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} passages${how} · ${result.ms} ms` : "The app did not find passages.";
+    const correction = result.corrected && [
+      "Showing results for ",
+      h("strong", {}, result.corrected),
+      ". ",
+      h("button", { type: "button", class: "as-typed", onclick: () => { state.searchAsTyped = q; runSearch(); } }, `Search for ${q} instead`),
+      " · ",
+    ];
+    $("#search-status").replaceChildren(...(correction || []), summary);
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
   } catch (error) {
     if (seq !== state.searchSeq) return;

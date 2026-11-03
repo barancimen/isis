@@ -24,7 +24,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
-from ..engine.search import QueryError, SearchConfig, pattern_time_limit
+from ..engine.search import QueryError, SearchConfig, correct_query, pattern_time_limit
 from .public import PATTERN_SECONDS, PublicGuard, Workspaces
 from .tasks import Conflict, TaskError, TaskStore
 
@@ -243,7 +243,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         return {"search": specs(SearchConfig), "related": specs(RelatedConfig)}
 
     @app.get("/api/search")
-    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = "", hide: str = ""):
+    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = "", hide: str = "", as_typed: bool = False):
         try:
             overrides = json.loads(params) if params else {}
             skip_folders = json.loads(skip) if skip else []
@@ -254,13 +254,14 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             raise HTTPException(400, "params must be a JSON object, skip a list of folders, and hide a list of files")
         started = time.perf_counter()
         try:
+            corrected = None if as_typed else correct_query(engine.snapshot, q)
             with time_limit():
-                hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
+                hits = engine.search(corrected or q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
                                      skip_folders=[str(f) for f in skip_folders],
                                      skip_files=[str(f) for f in hidden_files])
         except QueryError as e:
             raise HTTPException(400, str(e))
-        return {"hits": plain(hits), "ms": round((time.perf_counter() - started) * 1000, 1)}
+        return {"hits": plain(hits), "corrected": corrected, "ms": round((time.perf_counter() - started) * 1000, 1)}
 
     # ---- tasks ----
 

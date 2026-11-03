@@ -8,7 +8,8 @@ spacing ignored) or a /regex/ (Python syntax; case-insensitive unless it has a c
     +x     require: only passages matching x are found (and x counts for the ranking too).
     -x     never: passages matching x are dropped. A word is matched by its stem, so -whale also
            drops "whales" and "whaling".
-A partly typed last word is expanded to the corpus terms it starts. The + and - clauses filter
+A partly typed last word is expanded to the corpus terms it starts. correct_query fixes misspelled
+plain words before a query from the page gets here. The + and - clauses filter
 every passage before ranking, in both modes, so similarity of meaning never brings back a
 passage they exclude. The same clauses steer the Related panel (see related.py).
 """
@@ -38,6 +39,7 @@ TOKEN = re.compile(r"""([-+]?)(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(
 PREFER, REQUIRE, NEVER = "", "+", "-"
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
+MIN_TYPO_LENGTH, MIN_TWO_TYPOS_LENGTH = 4, 8  # letters a word needs for one typo, and for two
 
 KEYWORDS = Group("Keyword score", "The keyword score shows how much the words in a passage agree with your words.")
 FUSION = Group(
@@ -344,6 +346,7 @@ class Query:
     text: str  # what the meaning side embeds
     patterns: list[re.Pattern] = field(default_factory=list)  # phrases and regexes to rank by
     highlight: list[re.Pattern] = field(default_factory=list)
+    unknown: bool = False  # it has a word that no passage contains, which only meaning can look for
 
 
 def expand_prefix(snapshot: Snapshot, prefix: str, limit: int = MAX_EXPANSIONS) -> list[str]:
@@ -373,7 +376,69 @@ def parse_query(snapshot: Snapshot, query: str) -> Query:
             for t in expand_prefix(snapshot, pairs[-1][1]):  # a partly typed last word
                 weights.setdefault(snapshot.term_id(t), 1.0)
                 terms.add(t)
-    return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, steer.highlight)
+    unknown = any(snapshot.term_id(stem) is None and len(word) >= MIN_PREFIX for stem, word in steer.surfaces.items())
+    return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, steer.highlight, unknown)
+
+
+def typo_distance(a: str, b: str) -> int:
+    """How many typos turn `a` into `b`: a wrong, missing or extra letter, or two letters swapped."""
+    before, row = [], list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        before, row, last = row, [i], before
+        for j, y in enumerate(b, 1):
+            cost = min(before[j] + 1, row[j - 1] + 1, before[j - 1] + (x != y))
+            if i > 1 and j > 1 and x == b[j - 2] and a[i - 2] == y:
+                cost = min(cost, last[j - 2] + 1)
+            row.append(cost)
+    return row[-1]
+
+
+def closest_term(snapshot: Snapshot, stem: str, limit: int) -> str | None:
+    """The nearest corpus term within `limit` typos; of equally near ones, the most common."""
+    letters, df = set(stem), snapshot.bm25.doc_freq
+    best, best_key = None, None
+    for term in snapshot.sorted_terms:
+        # One typo changes the length by at most 1, and the set of letters by at most 2.
+        if abs(len(term) - len(stem)) > limit or len(letters ^ set(term)) > 2 * limit:
+            continue
+        distance = typo_distance(stem, term)
+        key = (distance, -df[snapshot.term_id(term)], term)
+        if distance <= limit and (best_key is None or key < best_key):
+            best, best_key = term, key
+    return best
+
+
+def written_form(snapshot: Snapshot, term: str, typed: str) -> str:
+    """A term as a word, since a stem can be no word at all: the form nearest to what was typed."""
+    matrix, column = snapshot.bm25.matrix, snapshot.term_id(term)
+    forms = set()
+    for row in matrix.indices[matrix.indptr[column]:matrix.indptr[column + 1]][:5]:
+        passage = snapshot.passages[row]
+        forms.update(word for t, word in tokenize_with_surface(f"{passage.heading} {passage.text}") if t == term)
+    return min(forms, key=lambda word: (typo_distance(typed, word), word), default=term)
+
+
+def correct_query(snapshot: Snapshot, query: str) -> str | None:
+    """The query with its misspelled words corrected, or None if it has none. Only a plain word that
+    no passage contains is changed: + and - clauses, phrases and regexes mean what they say."""
+    if not len(snapshot):
+        return None
+    parts, at = [], 0
+    for m in TOKEN.finditer(query):
+        written = m.group(5)
+        pairs = tokenize_with_surface(written) if written and m.group(1) == PREFER else []
+        if len(pairs) != 1 or snapshot.term_id(pairs[0][0]) is not None:
+            continue
+        stem, word = pairs[0]
+        if len(word) < MIN_TYPO_LENGTH or not word.isalpha():
+            continue
+        if m.end() == len(query) and expand_prefix(snapshot, word, 1):
+            continue  # still being typed
+        term = closest_term(snapshot, stem, 2 if len(word) >= MIN_TWO_TYPOS_LENGTH else 1)
+        if term:
+            parts += [query[at:m.start(5)], written_form(snapshot, term, word)]
+            at = m.end(5)
+    return "".join(parts) + query[at:] if parts else None
 
 
 def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns) -> np.ndarray:
@@ -425,7 +490,7 @@ def search(
     if not len(snapshot) or not query.strip():
         return []
     q = parse_query(snapshot, query)
-    if not q.term_ids and not q.patterns and not q.filters.requires:
+    if not q.term_ids and not q.patterns and not q.filters.requires and not q.unknown:
         return []  # only exclusions, or a regex still being typed: nothing to look for
     allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)
     if skip_folders:

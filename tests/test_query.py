@@ -1,6 +1,6 @@
 import pytest
 
-from isis.engine.search import QueryError, split_query, steering
+from isis.engine.search import QueryError, correct_query, split_query, steering, typo_distance
 
 
 def paths(hits):
@@ -96,3 +96,26 @@ def test_meaning_weight_zero_is_keyword_search(engine):
         off = [(h.path, h.start_line, h.score) for h in engine.search(query, mode="hybrid", config=SearchConfig(meaning_weight=0))]
         assert off == lexical, query
     assert engine.search("whale", mode="hybrid", config=SearchConfig(meaning_weight=0, keyword_weight=0)) == []
+
+
+def test_typo_distance():
+    assert typo_distance("whale", "whale") == 0
+    assert typo_distance("whle", "whale") == 1
+    assert typo_distance("whlae", "whale") == 1  # two letters swapped
+    assert typo_distance("wlhae", "whale") == 2
+
+
+def test_only_unknown_plain_words_are_corrected(engine):
+    snapshot = engine.snapshot
+    assert correct_query(snapshot, "whlae").startswith("whal")
+    assert correct_query(snapshot, "whlae  ship").endswith("  ship")
+    for query in ("whale", '"whlae"', "+whlae", "-whlae", "/whlae/", "wha", "zzzzzzzz"):
+        assert correct_query(snapshot, query) is None, query
+    assert correct_query(snapshot, "whal") is None  # still being typed
+
+
+def test_a_word_no_passage_contains_still_searches_by_meaning(engine):
+    hits = engine.search("zzzzzzzz", mode="hybrid")
+    assert hits and all(h.why["keyword_rank"] is None for h in hits)
+    assert engine.search("zzzzzzzz", mode="lexical") == []
+    assert engine.search("zz", mode="hybrid") == []  # too short to mean anything yet
