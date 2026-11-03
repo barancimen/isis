@@ -118,7 +118,7 @@ def main() -> None:
         expect(page.locator("#search-results .hit .hit-why").first).to_have_text(re.compile(r"meaning #1$"), timeout=15000)
         assert any('"keyword_weight":0' in u for u in searches), searches
         assert page.locator("#search-tune .tune-python").inner_text() == "SearchConfig(keyword_weight=0)"
-        page.locator("#search-tune button", has_text="Set all to standard").click()
+        page.locator("#search-tune button", has_text="Set all to default").click()
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
 
@@ -140,7 +140,7 @@ def main() -> None:
         expect(slider("meaning_weight")).to_have_value("1")
         expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
         expect(page.locator("#search-tune [data-name=meaning_weight] .tune-default")).to_be_hidden()
-        page.locator("#search-tune button", has_text="Set all to standard").click()
+        page.locator("#search-tune button", has_text="Set all to default").click()
         expect(slider("k1")).to_have_value("1.2")
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
         step("Meaning button and Meaning weight slider move together; default buttons restore one slider or all")
@@ -204,7 +204,7 @@ def main() -> None:
         expect(page.locator("#related-tune [data-name=query] select")).to_have_value("document")
         expect(page.locator("#related-tune [data-name=query] .tune-default")).to_be_hidden()
         set_slider(page, "#related-tune [data-name=total_slots] input", 6)  # and all of them
-        page.locator("#related-tune button", has_text="Set all to standard").click()
+        page.locator("#related-tune button", has_text="Set all to default").click()
         expect(page.locator("#related-tune .tune-count")).to_have_text("")
         refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
@@ -597,6 +597,62 @@ def main() -> None:
             }""")
             assert gap["text"].startswith("Best results") and abs(gap["gap"]) < 1, gap
         step("Refresh brings the top of Best results to the top of the panel")
+
+        def save_preset(kind, name):
+            answers.append(name)
+            page.click(f"#{kind}-presets .preset-save")
+            expect(page.locator(f"#{kind}-preset")).to_have_value(name)
+
+        page.click(".side-tabs button[data-panel=search]")
+        page.evaluate("localStorage.removeItem('isis.presets'); window.isis.state.presets = { search: [], related: [] }; window.isis.renderPresets('search'); window.isis.renderPresets('related')")
+        page.fill("#search-input", "whale +/sp.rm/")
+        page.click("#search-tune > summary")
+        set_slider(page, "#search-tune [data-name=k1] input", 2.5)
+        page.click("#search-meaning")
+        fits = page.evaluate("""() => {  // the button that moved sliders show stays inside its row
+            const row = document.querySelector('#search-tune .tune-row.changed'), button = row.querySelector('.tune-default');
+            return { text: button.textContent, inside: button.getBoundingClientRect().right <= row.getBoundingClientRect().right + 0.5, whole: button.scrollWidth <= button.clientWidth };
+        }""")
+        assert fits == {"text": "default", "inside": True, "whole": True}, fits
+        save_preset("search", "Regex by keywords")
+        page.click("#search-tune .tune-reset")
+        page.fill("#search-input", "something else")
+        expect(page.locator("#search-preset option").first).to_have_text("Regex by keywords (changed)")
+        kept = page.evaluate("window.isis.state.presets.search[0].settings")  # changes reach a preset only through Save
+        assert kept["query"] == "whale +/sp.rm/" and kept["params"]["k1"] == 2.5, kept
+        page.select_option("#search-preset", "Regex by keywords")
+        expect(page.locator("#search-input")).to_have_value("whale +/sp.rm/")
+        expect(page.locator("#search-tune [data-name=k1] input")).to_have_value("2.5")
+        expect(page.locator("#search-meaning")).to_have_attribute("aria-pressed", "false")
+        expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
+        page.click("#search-tune .tune-reset")
+        page.fill("#search-input", "")
+        page.click("#search-tune > summary")
+
+        page.click(".side-tabs button[data-panel=related]")
+        page.fill("#steer-input", "whale /sh.p/ -squid")
+        page.press("#steer-input", "Enter")
+        expect(page.locator("#steer-input")).to_have_attribute("data-saved", "whale /sh.p/ -squid", timeout=5000)
+        page.click("#related-tune > summary")
+        set_slider(page, "#related-tune [data-name=total_slots] input", 10)
+        save_preset("related", "Short list")
+        page.fill("#steer-input", "other")
+        page.press("#steer-input", "Enter")
+        expect(page.locator("#steer-input")).to_have_attribute("data-saved", "other", timeout=5000)
+        page.click("#related-tune .tune-reset")
+        page.focus("#steer-input")  # the box shows what is restored, also with the cursor in it
+        page.select_option("#related-preset", "Short list")
+        expect(page.locator("#steer-input")).to_have_value("whale /sh.p/ -squid", timeout=5000)
+        expect(page.locator("#related-tune [data-name=total_slots] input")).to_have_value("10")
+        page.reload()  # presets stay in this browser
+        expect(page.locator("#new-task")).to_be_visible()
+        page.click(".side-tabs button[data-panel=related]")
+        expect(page.locator("#related-preset option", has_text="Short list")).to_have_count(1)
+        page.click("#related-presets .preset-delete")
+        expect(page.locator("#related-preset option", has_text="Short list")).to_have_count(0)
+        expect(page.locator("#steer-input")).to_have_value("whale /sh.p/ -squid")  # deleting changes no settings
+        page.evaluate("localStorage.removeItem('isis.params')")
+        step("presets save, restore and delete the settings of Search and Related, including regexes")
         browser.close()
 
     for name in (WHALES, ISLANDS):

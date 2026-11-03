@@ -134,6 +134,7 @@ def test_only_a_saved_task_may_be_a_large_request(make_client):
     large = {"action": "dismiss", "lane": "best", "path": "whales.md", "text": "x" * 600}
     assert client.post("/api/tasks/t/feedback", json=large).status_code == 413
     assert client.put("/api/tasks/t/steer", json={"text": "x" * 600}).status_code == 413
+    assert client.put("/api/tasks/t/settings", json={"steer": "x" * 600}).status_code == 413
     assert client.post("/api/tasks", json={"name": "x" * 600}).status_code == 413
     assert client.put("/api/tasks/t", json={"content": "x" * 600}).status_code == 200
 

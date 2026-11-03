@@ -261,9 +261,9 @@ code { font-family: inherit; font-size: 0.92em; }
 .tune-body { padding: 2px 10px 10px; display: flex; flex-direction: column; gap: 2px; max-height: 46vh; overflow-y: auto; }
 .tune-group { margin-top: 8px; font-size: 13.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg); }
 .meaning-btn { flex: none; font-size: 13.5px; }
-.tune-default { padding: 0 4px; font-size: 12px; line-height: 1.5; }
+.tune-default { padding: 0 4px; font-size: 12px; line-height: 1.5; white-space: nowrap; }
 .tune-row:not(.changed) .tune-default { visibility: hidden; }
-.tune-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 34px 50px; align-items: center; gap: 8px; font-size: 13px; }
+.tune-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 34px max-content; align-items: center; gap: 8px; font-size: 13px; }
 .tune-label { white-space: normal; overflow: visible; }
 .tune-row input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
 .tune-row select { grid-column: 2 / 4; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
@@ -378,3 +378,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 .cm-panels { background: var(--panel) !important; color: var(--fg) !important; border: none !important; }
 #reader .cm-searchMatch, #task .cm-searchMatch { background: color-mix(in srgb, var(--accent) 22%, transparent); outline: none; border-radius: 2px; }
 #reader .cm-searchMatch-selected, #task .cm-searchMatch-selected { background: color-mix(in srgb, var(--accent) 55%, transparent); outline: 1px solid var(--accent); }
+
+/* Presets of a panel's settings. */
+.preset-bar { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.preset-bar label { color: var(--muted); }
+.preset-bar select { flex: 1; min-width: 0; padding: 2px 4px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+.preset-bar button { flex: none; padding: 1px 8px; font-size: 12.5px; }
+.preset-bar button:disabled { opacity: 0.5; cursor: default; }

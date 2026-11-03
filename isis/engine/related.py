@@ -164,7 +164,7 @@ class RelatedConfig:
         0.0, label="Effect of removed passages", group=FILTER, min=0.0, max=2.0, step=0.1,
         help="This slider sets how much lower a passage ranks when it is near a passage that you removed.\n"
         "With a higher value, passages near removed passages rank much lower.\n"
-        "At 0, removed passages have no effect on other passages. This is the standard value, "
+        "At 0, removed passages have no effect on other passages. This is the default value, "
         "because a passage that you remove is usually related to your task. "
         "Tests showed that this effect also moves good results down.",
     )

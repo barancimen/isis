@@ -88,6 +88,12 @@ class SteerRequest(BaseModel):
     text: str  # clauses as in a search query: x prefer, +x require, -x never show
 
 
+class SettingsRequest(BaseModel):
+    steer: str = ""
+    ignored: list[str] = []  # stems
+    excluded_docs: list[str] = []
+
+
 class FeedbackRequest(BaseModel):
     action: Literal["add", "dismiss", "avoid", "restore", "like", "unlike", "exclude_doc", "include_doc"]
     lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
@@ -290,6 +296,19 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         try:
             with time_limit(), tasks.edit_prefs(name) as prefs:
                 prefs.set_steer(body.text)
+        except QueryError as e:
+            raise HTTPException(400, str(e))
+        return prefs.summary()
+
+    @app.put("/api/tasks/{name}/settings")
+    def settings(name: str, body: SettingsRequest):
+        """A preset's settings, all or nothing: a bad regex changes none of them. What the task
+        remembers about single passages stays as it is."""
+        try:
+            with time_limit(), tasks.edit_prefs(name) as prefs:
+                prefs.set_steer(body.steer)
+                prefs.ignored = list(dict.fromkeys(body.ignored))
+                prefs.excluded_docs = list(dict.fromkeys(body.excluded_docs))
         except QueryError as e:
             raise HTTPException(400, str(e))
         return prefs.summary()

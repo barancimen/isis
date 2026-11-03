@@ -518,6 +518,11 @@ const state = {
   task: null, // active task name
   tasks: [], // [{name, mtime}]
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again, conflictMtime}
+  presets: loadPresets(), // panel -> [{name, settings}]
+  activePreset: { search: null, related: null }, // the preset last chosen or saved in each panel
+  prefs: null, // what the task remembers, as last shown
+  prefsFor: null, // the task that is about
+  folders: [],
   readerPath: null,
   readerScroll: store.json("reader-scroll", {}), // document path -> where its reader view was left
   openedHit: null, // the result last opened in the reader, which stays marked
@@ -1190,6 +1195,9 @@ async function changePrefs(method, path, body) {
 
 // What the panel remembers changed: show it now, whether or not the suggestions are refreshed.
 function showPrefs(prefs) {
+  state.prefs = prefs;
+  state.prefsFor = state.task;
+  renderPresets("related");
   renderSteer(prefs.steer);
   renderFeedback(prefs, state.relatedTerms, state.relatedLanes);
   rememberLikes(prefs);
@@ -1397,6 +1405,7 @@ function saveParams() {
 
 // A setting changed: a search runs again at once, and Related offers its Refresh.
 function settingChanged(kind) {
+  renderPresets(kind);
   if (kind === "search") runSearch();
   else requestRelated();
 }
@@ -1449,11 +1458,11 @@ function paramRow(kind, spec) {
   const toDefault = h("button", {
     class: "tune-default",
     type: "button",
-    title: `Set this slider back to the standard value, ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.`,
+    title: `Set this slider back to the default value, ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.`,
     onclick: () => setTuned(kind, spec.name, spec.default),
-  }, "standard");
+  }, "default");
   input.id = `tune-${kind}-${spec.name}`;
-  return h("div", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nThe standard value is ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.` },
+  return h("div", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nThe default value is ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.` },
     h("label", { class: "tune-label", for: input.id }, spec.label), input, spec.type === "choice" ? null : output, toDefault);
 }
 
@@ -1493,12 +1502,12 @@ function buildTuner(kind) {
       h("button", {
         class: "tune-reset",
         type: "button",
-        title: "Set all sliders in this list back to their standard values.",
+        title: "Set all sliders in this list back to their default values.",
         onclick: () => resetParams(kind),
-      }, "Set all to standard")),
+      }, "Set all to default")),
     h("div", { class: "tune-body" },
       h("p", { class: "feedback-note" },
-        `Move a slider to change the results. Put the pointer on a slider to read about it. The “standard” button sets the slider back. ${kind === "search" ? "The results change immediately." : "Then select Refresh to see the new results."} This browser keeps your adjustments.`),
+        `Move a slider to change the results. Put the pointer on a slider to read about it. The “default” button sets the slider back. ${kind === "search" ? "The results change immediately." : "Then select Refresh to see the new results."} This browser keeps your adjustments.`),
       rows,
       h("div", { class: "tune-foot" },
         h("code", { class: "tune-python", title: "These adjustments as Python code. You can use this code in notebooks/explore.ipynb." }),
@@ -1518,6 +1527,114 @@ function updateTuner(kind) {
   if (kind === "search") $("#search-meaning").setAttribute("aria-pressed", String(meaningWeight() > 0));
 }
 
+// ---------- presets ----------
+
+// A preset is a named copy of a panel's settings, kept in this browser like the settings themselves.
+// In Search: the sliders, the Meaning button (a slider underneath), the folders and the search box,
+// with any regex in it. In Related: the sliders, the folders, the word rules, the ignored keywords
+// and the hidden documents. Likes and hidden passages stay out: they belong to one task's results.
+function loadPresets() {
+  const saved = store.json("presets", {});
+  const clean = (list) => (Array.isArray(list) ? list.filter((p) => typeof p?.name === "string" && p.settings && typeof p.settings === "object") : []);
+  return { search: clean(saved?.search), related: clean(saved?.related) };
+}
+
+const savePresets = () => store.set("presets", JSON.stringify(state.presets));
+const sortedList = (list) => [...new Set(list ?? [])].sort();
+
+function currentSettings(kind, prefs = state.prefsFor === state.task ? state.prefs : null) {
+  const settings = { params: { ...state.params[kind] }, skipped: sortedList(state.skipped[kind]) };
+  if (kind === "search") return { ...settings, query: $("#search-input").value };
+  return { ...settings, steer: prefs?.steer ?? "", ignored: sortedList(prefs?.ignored), excluded_docs: sortedList(prefs?.excluded_docs) };
+}
+
+function settingsKey(settings) {
+  const params = Object.keys(settings.params ?? {}).sort().map((name) => [name, settings.params[name]]);
+  return JSON.stringify({ ...settings, params, skipped: sortedList(settings.skipped), ignored: sortedList(settings.ignored), excluded_docs: sortedList(settings.excluded_docs) });
+}
+
+function renderPresets(kind) {
+  const bar = $(`#${kind}-presets`);
+  if (!bar) return;
+  const presets = state.presets[kind];
+  const key = settingsKey(currentSettings(kind));
+  const same = (preset) => settingsKey(preset.settings) === key;
+  const active = presets.find((p) => p.name === state.activePreset[kind]);
+  const showing = active && same(active) ? active : presets.find(same);
+  if (showing) state.activePreset[kind] = showing.name;
+  const named = showing ?? active;
+  const select = h("select", {
+    id: `${kind}-preset`,
+    title: "Choose a preset to restore all of its settings.",
+    onchange: (e) => e.target.value && applyPreset(kind, e.target.value).catch(fail),
+  },
+    !showing && h("option", { value: "" }, active ? `${active.name} (changed)` : presets.length ? "Current settings" : "No presets yet"),
+    presets.map((p) => h("option", { value: p.name }, p.name)));
+  select.value = showing?.name ?? "";
+  bar.replaceChildren(
+    h("label", { for: select.id }, "Preset"),
+    select,
+    h("button", { type: "button", class: "preset-save", title: `Save ${kind === "search" ? "the sliders, folders, Meaning button and search box" : "the sliders, folders, word rules, ignored keywords and hidden documents"} under a name. This browser keeps your presets.`, onclick: () => savePreset(kind).catch(fail) }, "Save"),
+    h("button", { type: "button", class: "preset-delete", title: named ? `Delete the preset “${named.name}”. Your current settings stay as they are.` : "Choose a preset to delete it.", disabled: !named, onclick: () => deletePreset(kind, named.name) }, "Delete"),
+  );
+}
+
+async function savePreset(kind) {
+  const name = prompt("Name of this preset", state.activePreset[kind] ?? "")?.trim().slice(0, 60);
+  if (!name) return;
+  const presets = state.presets[kind];
+  const existing = presets.find((p) => p.name === name);
+  if (existing && name !== state.activePreset[kind] && !confirm(`Replace the preset “${name}”?`)) return;
+  // The task's own settings come from the server: the panel may not have shown them yet.
+  const prefs = kind === "related" && state.task ? await api("GET", `api/tasks/${enc(state.task)}/prefs`) : undefined;
+  const settings = currentSettings(kind, prefs);
+  if (existing) existing.settings = settings;
+  else presets.push({ name, settings });
+  presets.sort((a, b) => a.name.localeCompare(b.name));
+  state.activePreset[kind] = name;
+  savePresets();
+  renderPresets(kind);
+  flash(`Saved the preset “${name}”`);
+}
+
+async function applyPreset(kind, name) {
+  const preset = state.presets[kind].find((p) => p.name === name);
+  if (!preset) return;
+  const { settings } = preset;
+  const known = new Set(state.paramSpecs[kind].map((s) => s.name));
+  state.params[kind] = Object.fromEntries(Object.entries(settings.params ?? {}).filter(([param]) => known.has(param)));
+  saveParams();
+  buildTuner(kind);
+  state.skipped[kind] = new Set(settings.skipped ?? []);
+  renderFolderPicks(state.folders);
+  store.set(`skip-${kind}`, JSON.stringify([...state.skipped[kind]]));
+  state.activePreset[kind] = name;
+  if (kind === "search") {
+    $("#search-input").value = settings.query ?? "";
+    settingChanged(kind);
+    return;
+  }
+  if (!state.task) {
+    settingChanged(kind);
+    flash("Open a task to restore this preset's word rules, ignored keywords and hidden documents");
+    return;
+  }
+  try {
+    const prefs = await changePrefs("PUT", "/settings", { steer: settings.steer ?? "", ignored: settings.ignored ?? [], excluded_docs: settings.excluded_docs ?? [] });
+    if (prefs) $("#steer-input").value = prefs.steer; // also with the cursor in the box
+  } finally {
+    renderPresets(kind);
+  }
+}
+
+function deletePreset(kind, name) {
+  if (!confirm(`Delete the preset “${name}”? Your current settings stay as they are.`)) return;
+  state.presets[kind] = state.presets[kind].filter((p) => p.name !== name);
+  if (state.activePreset[kind] === name) state.activePreset[kind] = null;
+  savePresets();
+  renderPresets(kind);
+}
+
 function resetParams(kind) {
   state.params[kind] = {};
   saveParams();
@@ -1531,6 +1648,7 @@ async function loadParamSpecs() {
     const known = new Set(state.paramSpecs[kind].map((s) => s.name));
     for (const name of Object.keys(state.params[kind])) if (!known.has(name)) delete state.params[kind][name];
     buildTuner(kind);
+    renderPresets(kind);
   }
   saveParams();
 }
@@ -1559,6 +1677,7 @@ function loadSkipped(panel) {
 }
 
 function renderFolderPicks(folders) {
+  state.folders = folders;
   for (const panel of ["search", "related"]) {
     const skipped = state.skipped[panel];
     for (const name of [...skipped]) if (!folders.includes(name)) skipped.delete(name);
@@ -1704,6 +1823,7 @@ function bind() {
   window.addEventListener("pagehide", rememberReaderScroll);
   $("#search-input").addEventListener("input", runSearch);
   $("#search-meaning").addEventListener("click", toggleMeaning);
+  $("#search-input").addEventListener("input", () => renderPresets("search"));
   $("#related-refresh").addEventListener("click", () => refreshRelated().then(scrollToBestResults).catch(fail));
   $("#related-steer").addEventListener("submit", (e) => saveSteer(e).catch(fail));
   $("#steer-input").addEventListener("input", () => ($("#steer-error").hidden = true));
@@ -1769,4 +1889,4 @@ async function init() {
 init().catch(fail);
 
 // Exposed for debugging and end-to-end tests.
-window.isis = { state, reader, taskView, openFile, addToTask, refreshRelated };
+window.isis = { state, reader, taskView, openFile, addToTask, refreshRelated, renderPresets };

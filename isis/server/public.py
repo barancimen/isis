@@ -277,7 +277,7 @@ class Workspaces:
 def body_limit(limits: Limits, kind: str, method: str, path: str) -> int:
     if kind == "related":
         return limits.related_bytes
-    if method == "PUT" and path.startswith("/api/tasks/") and not path.endswith("/steer"):
+    if method == "PUT" and path.startswith("/api/tasks/") and not path.endswith(("/steer", "/settings")):
         return limits.request_bytes  # the text of a task
     return limits.small_request_bytes
 

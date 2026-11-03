@@ -430,3 +430,18 @@ def test_the_watcher_survives_an_error_and_keeps_checking(engine, corpus, monkey
             time.sleep(0.02)
         assert "fresh.md" in engine.files and len(calls) > 1
         assert c.get("/api/status").status_code == 200
+
+
+def test_settings_are_restored_together(client):
+    client.post("/api/tasks", json={"name": "t"}).raise_for_status()
+    feedback = {"action": "like", "lane": "core", "path": "whales.md", "text": "Ambergris"}
+    client.post("/api/tasks/t/feedback", json=feedback).raise_for_status()
+    wanted = {"steer": "whale /sp.rm/ -squid", "ignored": ["ship", "ship"], "excluded_docs": ["finches.md"]}
+    prefs = client.put("/api/tasks/t/settings", json=wanted).json()
+    assert prefs["steer"] == "whale /sp.rm/ -squid" and prefs["ignored"] == ["ship"] and prefs["excluded_docs"] == ["finches.md"]
+    assert len(prefs["liked"]) == 1  # what it remembers about single passages stays
+    bad = client.put("/api/tasks/t/settings", json={"steer": "/(/", "ignored": [], "excluded_docs": []})
+    assert bad.status_code == 400
+    prefs = client.get("/api/tasks/t/prefs").json()
+    assert prefs["steer"] == "whale /sp.rm/ -squid" and prefs["ignored"] == ["ship"]  # all or nothing
+    assert client.put("/api/tasks/missing/settings", json={}).status_code == 404
