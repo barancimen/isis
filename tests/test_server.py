@@ -61,7 +61,7 @@ def test_names_cannot_escape_the_tasks_folder(client, corpus):
 
 def test_related_terms_and_feedback(client):
     client.post("/api/tasks", json={"name": "t"})
-    body = client.post("/api/tasks/t/related", json={"text": "The sperm whale and ambergris.", "cursor_line": 0}).json()
+    body = client.post("/api/tasks/t/related", json={"text": "The sperm whale and ambergris."}).json()
     assert [lane["name"] for lane in body["lanes"]] == ["core", "hidden", "bridges", "gaps"]
     assert "whale" in {c["term"] for c in body["terms"]}
 
@@ -231,36 +231,6 @@ def test_saves_wait_for_each_other_and_never_bring_back_a_deleted_task(corpus):
     with pytest.raises(TaskError):
         store.write("T", "late save", None)
     assert not (corpus / "_tasks" / "T.md").exists()
-
-
-def test_renames_in_both_directions_do_not_deadlock(corpus):
-    store = TaskStore(corpus / "_tasks")
-    store.create("B")
-
-    def rename():
-        try:
-            store.rename("B", "A")
-        except TaskError:
-            pass
-
-    with store.lock("A"):  # a rename A -> B, half done, holds A
-        t = threading.Thread(target=rename, daemon=True)
-        t.start()
-        t.join(0.2)
-        assert t.is_alive()  # B -> A waits for A...
-        free = []
-
-        def check():
-            free.append(store.lock("B").acquire(timeout=1))
-            if free[-1]:
-                store.lock("B").release()
-
-        checker = threading.Thread(target=check)
-        checker.start()
-        checker.join()
-        assert free == [True]  # ...without holding B, which A -> B needs next
-    t.join(2)
-    assert not t.is_alive()
 
 
 def test_bad_preference_values_are_dropped_not_fatal(client, corpus):

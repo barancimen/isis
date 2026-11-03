@@ -11,7 +11,7 @@
                         the user ignores, plus the user's steer line: its words join the query at
                         full weight, and its phrases and regexes are scored like words.
             With query="paragraphs" each paragraph is a query of its own instead, and a passage
-            scores by its best match (optionally weighted toward the cursor).
+            scores by its best match.
 3. gate     Keep only clearly relevant passages: a strong semantic z-score, or a top lexical hit
             with some semantic support. Drop what is already collected or was dismissed, what
             the steer line rules out (+x requires x, -x excludes it), what is close to an
@@ -37,7 +37,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache, partial
+from functools import partial
 
 import numpy as np
 
@@ -48,7 +48,7 @@ from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, 
                      remembering_lines, split_query, steering, top_rows)
 from .text import tokenize, tokenize_with_surface
 
-MAX_EXCERPT_MATCHES = 50_000  # paragraphs whose excerpt check is remembered
+MAX_EXCERPT_MATCHES = 2_000  # paragraphs whose excerpt check is remembered
 MAX_THEME_SCORES = 48  # themes whose scores are remembered: two arrays of the corpus's size each
 THEME_BATCH = 32  # paragraphs scored at a time, which bounds the memory a large theme needs
 
@@ -111,8 +111,6 @@ class RelatedConfig:
         "With a higher value, the results move nearer to the passages with ↑.\n"
         "With a lower value, the results stay nearer to your task. At 0, ↑ has no effect.",
     )
-    cursor_boost: float = 1.0  # > 1 weights the paragraph at cursor_line up (1 = the whole document counts equally)
-    cursor_decay: float = 1.0  # paragraphs over which that boost fades (1/e per this many)
     bm25_k1: float = tunable(
         1.2, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
         help="This slider sets how much a word adds to the score when it occurs many times in a passage.\n"
@@ -312,12 +310,6 @@ class TaskPrefs:
                 if isinstance(v, list) and len(v) == 2 and all(map(_is_int, v))
             },
         )
-        # Saved before the steer line: pinned terms become words to prefer, exclusions become
-        # -clauses, and banned terms are what is now called ignored.
-        if "steer" not in data and (data.get("pins") or data.get("excluded")):
-            prefs.steer = " ".join([*_strings(data.get("pins")), *(f"-{e}" for e in _strings(data.get("excluded")))])
-        if "ignored" not in data and data.get("bans"):
-            prefs.ignored = _strings(data["bans"])
         return prefs
 
     def to_dict(self) -> dict:
@@ -510,20 +502,12 @@ def task_units(text: str) -> list[Unit]:
     ]
 
 
-def weight_units(units: list[Unit], cursor_line: int | None, config: RelatedConfig) -> None:
-    if cursor_line is None or not units:
-        weights = np.ones(len(units))
-    else:
-        distance_in_lines = [
-            0 if u.start_line <= cursor_line <= u.end_line else min(abs(cursor_line - u.start_line), abs(cursor_line - u.end_line))
-            for u in units
-        ]
-        at = int(np.argmin(distance_in_lines))
-        steps = np.abs(np.arange(len(units)) - at)
-        weights = 1 + (config.cursor_boost - 1) * np.exp(-steps / config.cursor_decay)
-    weights = weights * np.array([config.excerpt_weight if u.excerpt else 1.0 for u in units])
-    for u, w in zip(units, weights / max(weights.max(), 1e-9) if len(units) else weights):
-        u.weight = float(w)
+def weight_units(units: list[Unit], config: RelatedConfig) -> None:
+    """Your own paragraphs weigh 1 and collected excerpts `excerpt_weight`, scaled so the most is 1."""
+    weights = [config.excerpt_weight if u.excerpt else 1.0 for u in units]
+    top = max(max(weights, default=1.0), 1e-9)
+    for u, w in zip(units, weights):
+        u.weight = w / top
 
 
 def _closest_in_words(snapshot: Snapshot, text: str) -> np.ndarray:
@@ -568,37 +552,6 @@ def find_excerpts(snapshot: Snapshot, units: list[Unit], unit_vecs: np.ndarray |
             if row not in unit.source_rows:
                 unit.excerpt = True
                 unit.source_rows.append(row)
-
-
-class ExcerptMatcher:
-    """Whether a passage is inside a collected excerpt or holds one, without comparing it to each
-    of them: the same answer as any(e in hay or hay in e for e in excerpts), for normalised text.
-    An excerpt can start and end mid-word, but the words inside it are whole: it can only be in a
-    passage that has its longest inner word, so only those passages compare it."""
-
-    def __init__(self, excerpts: list[str]):
-        self.joined = "\0".join(excerpts)
-        self.by_word: dict[str, list[str]] = defaultdict(list)
-        self.no_inner_word: list[str] = []
-        for e in excerpts:
-            inner = e.split(" ")[1:-1]
-            if inner:
-                self.by_word[max(inner, key=len)].append(e)
-            else:
-                self.no_inner_word.append(e)
-
-    def __call__(self, hay: str) -> bool:
-        if not self.joined:
-            return False
-        if hay in self.joined:
-            return True
-        if any(e in hay for e in self.no_inner_word):
-            return True
-        for word in set(hay.split(" ")):
-            for e in self.by_word.get(word, ()):
-                if e in hay:
-                    return True
-        return False
 
 
 def same_passage(snapshot: Snapshot, rows, text: str) -> int | None:
@@ -776,11 +729,6 @@ def zscores(snapshot: Snapshot, vecs: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return cos, z
 
 
-@lru_cache(maxsize=50_000)
-def _terms_of(text: str) -> tuple:
-    return tuple(tokenize_with_surface(text))
-
-
 def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: RelatedConfig,
                steer: Steering | None = None, headings: list[str] = ()) -> list[TermChip]:
     """The task's most distinctive terms (weighted term frequency in the task x corpus IDF), minus
@@ -790,7 +738,7 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
     tf: dict[str, float] = defaultdict(float)
     surfaces: dict[str, Counter] = defaultdict(Counter)
     for u in units:
-        for term, surface in _terms_of(u.text):
+        for term, surface in tokenize_with_surface(u.text):
             tf[term] += u.weight
             surfaces[term][surface] += 1
     for heading in headings:
@@ -893,7 +841,10 @@ def gate(snapshot: Snapshot, units: list[Unit], signals: SemanticSignals, lex: n
     dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
     excluded_docs = set(prefs.excluded_docs)
     excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
-    near_excerpt = ExcerptMatcher(excerpts)
+    joined = "\0".join(excerpts)
+
+    def near_excerpt(hay: str) -> bool:  # inside a collected excerpt, or holding one
+        return hay in joined or any(e in hay for e in excerpts)
 
     gated = []
     for row in map(int, rows):
@@ -1065,7 +1016,6 @@ def related(
     task_text: str,
     *,
     embedder=None,
-    cursor_line: int | None = None,
     prefs: TaskPrefs | None = None,
     config: RelatedConfig | None = None,
     seed: int = 0,
@@ -1098,7 +1048,7 @@ def related(
         reuse = [same_passage(snapshot, u.source_rows, u.text) for u in units]
         unit_vecs = embed_reusing(snapshot, embedder, [u.embed_text for u in units], reuse)
         find_excerpts(snapshot, units, unit_vecs)
-    weight_units(units, cursor_line, config)
+    weight_units(units, config)
     themes = assign_themes(units, unit_vecs, config, snapshot)
     lap("units")
 

@@ -23,7 +23,7 @@ def test_specs_describe_every_tunable_value():
     assert by_name["total_slots"]["type"] == "int"
     assert by_name["query"]["type"] == "choice" and by_name["query"]["choices"] == ["document", "paragraphs"]
     assert by_name["mmr_lambda.hidden"]["default"] == 0.6
-    assert "lane_prior" not in by_name and "cursor_boost" not in by_name  # not tunable from the page
+    assert "lane_prior" not in by_name and "mmr_pool" not in by_name  # not tunable from the page
     assert {s["name"] for s in specs(SearchConfig)} == {"k1", "b", "rrf_k", "keyword_weight", "meaning_weight", "unembedded_weight", "candidates"}
 
 
@@ -32,12 +32,12 @@ def test_configure_applies_valid_overrides_and_ignores_the_rest():
         RelatedConfig,
         {"z_strong": "3.25", "total_slots": 10.6, "query": "paragraphs", "mmr_lambda.core": 0.2,
          "hidden_z": 99, "nonsense": 1, "mmr_lambda.nope": 0.5, "mmr_lambda": 0.5, "query.x": 1, "z_weak": "abc",
-         "cursor_boost": 5},
+         "mmr_pool": 5},
     )
     assert config.z_strong == 3.25 and config.total_slots == 11 and config.query == "paragraphs"
     assert config.mmr_lambda == {"core": 0.2, "hidden": 0.6, "bridges": 0.6, "gaps": 0.6}
     assert config.hidden_z == 5.0  # clamped to the range
-    assert config.z_weak == 1.75 and config.cursor_boost == 1.0
+    assert config.z_weak == 1.75 and config.mmr_pool == 100
     assert configure(RelatedConfig, {"query": "sideways"}).query == "document"
     assert RelatedConfig().mmr_lambda["core"] == 0.7  # the default dict is not shared or changed
 

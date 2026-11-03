@@ -1,5 +1,5 @@
 """Sentence embeddings from a small ONNX model on the CPU. The default is TaylorAI/bge-micro-v2
-(3-layer BERT, 384 dimensions, mean pooling, 17 MB quantised)."""
+(3-layer BERT, 384 dimensions, mean pooling, a 69 MB file)."""
 
 from __future__ import annotations
 

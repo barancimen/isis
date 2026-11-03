@@ -539,7 +539,6 @@ const state = {
   relatedLanes: [],
   likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
   searchSeq: 0,
-  lastRelatedKeys: null,
   indexUpdated: null,
   paramSpecs: { search: [], related: [] }, // from /api/params
   params: loadParams(), // this browser's overrides: {search: {name: value}, related: {...}}
@@ -562,7 +561,7 @@ function renderTaskTabs() {
         h("button", { class: "name", role: "tab", "aria-selected": String(active), title: name, onclick: () => switchTask(name).catch(fail) }, name),
         h("span", { class: "tab-actions" },
           h("button", { title: "Change the name of this task", "aria-label": `Change the name of ${name}`, onclick: () => renameTask(name).catch(fail) }, "✎"),
-          h("button", { title: "Remove this task. The app moves its file to the .trash folder in the tasks folder.", "aria-label": `Remove ${name}`, onclick: () => deleteTask(name).catch(fail) }, "×"),
+          h("button", { title: "Remove this task.", "aria-label": `Remove ${name}`, onclick: () => deleteTask(name).catch(fail) }, "×"),
         ),
       ),
     );
@@ -587,7 +586,6 @@ async function switchTask(name) {
     state.docs.set(name, doc);
   }
   state.task = name;
-  state.lastRelatedKeys = null;
   store.set("task", name);
   taskView.setState(doc.state);
   measureWholeDocument(taskView);
@@ -639,7 +637,7 @@ async function renameTask(name) {
 }
 
 async function deleteTask(name) {
-  if (!confirm(`Remove the task “${name}”? The app moves its file to the .trash folder in the tasks folder.`)) return;
+  if (!confirm(`Remove the task “${name}”?`)) return;
   await api("DELETE", `api/tasks/${enc(name)}`);
   state.docs.delete(name);
   await loadTasks();
@@ -981,7 +979,7 @@ function hitTitle(hit, file) {
   return hit.heading && hit.heading !== hit.title ? `${hit.title} · ${hit.heading}` : hit.title;
 }
 
-function renderHit(hit, { lane = null, isNew = false } = {}) {
+function renderHit(hit, { lane = null } = {}) {
   const file = withoutExtension(hit.path.split("/").pop());
   const key = passageKey(hit);
   const open = (event) => {
@@ -1010,7 +1008,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     lane && h("button", { class: "exclude-doc", title: `Remove all passages from this document, for this task. The document is ${hit.path}. Search can find its passages.`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
-  return h("article", { class: `hit${isNew ? " is-new" : ""}${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, onclick: open, title: describeHover(hit.why) },
+  return h("article", { class: `hit${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, onclick: open, title: describeHover(hit.why) },
     h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hitTitle(hit, file)), actions),
     h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
@@ -1134,21 +1132,14 @@ async function fetchRelated() {
   state.relatedTerms = result.terms;
   state.relatedLanes = result.lanes;
   rememberLikes(result.prefs);
-  const previous = state.lastRelatedKeys;
-  const keys = new Set();
   const lanes = result.lanes.map((lane) =>
     h("section", { class: "lane" },
       h("h3", {}, lane.title, h("span", { class: "count" }, String(lane.items.length))),
       h("p", { class: "lane-desc" }, lane.description),
       lane.note && h("p", { class: "lane-note" }, lane.note),
-      lane.items.map((hit) => {
-        const key = passageKey(hit);
-        keys.add(key);
-        return renderHit(hit, { lane: lane.name, isNew: previous !== null && !previous.has(key) });
-      }),
+      lane.items.map((hit) => renderHit(hit, { lane: lane.name })),
     ),
   );
-  state.lastRelatedKeys = keys;
   renderChips(state.relatedTerms);
   $("#related-lanes").replaceChildren(...lanes);
   showPrefs(result.prefs);
@@ -1396,7 +1387,7 @@ function renderFeedback(prefs, terms, lanes) {
         class: "tune-reset",
         type: "button",
         disabled: empty,
-        title: "Remove all of the changes in this list for this task. A copy goes to the .trash folder in the tasks folder.",
+        title: "Remove all of the changes in this list for this task.",
         onclick: () => forgetFeedback().catch(fail),
       }, "Remove all changes"), summary.length ? ` · ${summary.join(" · ")}` : ""),
     h("div", { class: "tune-body" },
@@ -1473,30 +1464,6 @@ function formatValue(spec, value) {
   return Number(value).toFixed(digits);
 }
 
-const pythonValue = (v) => (typeof v === "string" ? JSON.stringify(v) : String(v));
-
-// The same settings as Python, e.g. RelatedConfig(z_strong=2.0), for the notebook.
-function pythonSnippet(kind) {
-  const overrides = state.params[kind];
-  const specs = state.paramSpecs[kind];
-  const args = [];
-  const done = new Set();
-  for (const spec of specs) {
-    const [field, key] = spec.name.split(".");
-    if (!key) {
-      if (spec.name in overrides) args.push(`${field}=${pythonValue(overrides[spec.name])}`);
-      continue;
-    }
-    if (done.has(field)) continue;
-    done.add(field);
-    const members = specs.filter((s) => s.name.startsWith(`${field}.`));
-    if (!members.some((s) => s.name in overrides)) continue;
-    const entries = members.map((s) => `"${s.name.slice(field.length + 1)}": ${pythonValue(overrides[s.name] ?? s.default)}`);
-    args.push(`${field}={${entries.join(", ")}}`);
-  }
-  return `${kind === "search" ? "SearchConfig" : "RelatedConfig"}(${args.join(", ")})`;
-}
-
 function paramRow(kind, spec) {
   const value = state.params[kind][spec.name] ?? spec.default;
   const output = h("output", {}, formatValue(spec, value));
@@ -1566,9 +1533,6 @@ function buildTuner(kind) {
       h("p", { class: "feedback-note" },
         `Move a slider to change the results. Put the pointer on a slider to read about it. The “default” button sets the slider back. ${kind === "search" ? "The results change immediately." : "Then select Refresh to see the new results."} This browser keeps your adjustments.`),
       rows,
-      h("div", { class: "tune-foot" },
-        h("code", { class: "tune-python", title: "These adjustments as Python code. You can use this code in notebooks/explore.ipynb." }),
-      ),
     ),
   );
   updateTuner(kind);
@@ -1580,7 +1544,6 @@ function updateTuner(kind) {
   el.querySelector(".tune-count").textContent = changed ? ` · ${changed} changed` : "";
   el.querySelector(".tune-reset").disabled = !changed;
   for (const row of el.querySelectorAll(".tune-row")) row.classList.toggle("changed", row.dataset.name in state.params[kind]);
-  el.querySelector(".tune-python").textContent = pythonSnippet(kind);
   if (kind === "search") $("#search-meaning").setAttribute("aria-pressed", String(meaningWeight() > 0));
 }
 

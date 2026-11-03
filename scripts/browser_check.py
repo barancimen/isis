@@ -117,7 +117,6 @@ def main() -> None:
         expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
         expect(page.locator("#search-results .hit .hit-why").first).to_have_text(re.compile(r"meaning #1$"), timeout=15000)
         assert any('"keyword_weight":0' in u for u in searches), searches
-        assert page.locator("#search-tune .tune-python").inner_text() == "SearchConfig(keyword_weight=0)"
         page.locator("#search-tune button", has_text="Set all to default").click()
         expect(page.locator("#search-tune .tune-count")).to_have_text("")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")

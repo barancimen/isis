@@ -74,7 +74,6 @@ class RenameTask(BaseModel):
 
 class RelatedRequest(BaseModel):
     text: str
-    cursor_line: int | None = None
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
     skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
 
@@ -274,7 +273,6 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             with time_limit():
                 result = engine.related(
                     body.text,
-                    cursor_line=body.cursor_line,
                     prefs=prefs,
                     config=configure(RelatedConfig, body.params),
                     skip_folders=body.skip_folders,

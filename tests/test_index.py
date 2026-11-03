@@ -110,7 +110,6 @@ def test_a_planted_pickle_is_never_loaded(corpus, tmp_path, monkeypatch):
     e = Engine(corpus, embedder=HashEmbedder())
     e.refresh()
     assert not (tmp_path / "planted-ran").exists()
-    assert not (corpus / ".isis" / "index.pkl").exists()  # replaced by the new cache
     assert Engine(corpus, embedder=HashEmbedder()).snapshot.has_vector.all()
 
 def test_lexical_only_engine_works_without_a_model(corpus, tmp_path):

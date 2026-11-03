@@ -87,11 +87,6 @@ def test_terms_follow_the_task_the_steer_line_and_ignored_words(engine):
     assert "ocean" not in chips  # excluded words are not searched for
 
 
-def test_old_preferences_migrate_to_the_steer_line():
-    prefs = TaskPrefs.from_dict({"pins": ["harpoon"], "bans": ["whale"], "excluded": ["squid", "/Ahab/"]})
-    assert prefs.steer == "harpoon -squid -/Ahab/" and prefs.ignored == ["whale"]
-
-
 def test_chip_shortcuts_edit_the_steer_line():
     prefs = TaskPrefs(steer="+whales /beak/", ignored=["squid"])
     prefs.boost("whale")  # already required: unchanged
@@ -176,17 +171,6 @@ def test_the_whole_document_is_the_query(engine):
     task = f"{' '.join(SEA_TASK)}.\n\n{' '.join(BIRD_TASK)}.\n"
     core = items(engine.related(task), "core")
     assert core[0].path.startswith("voyage")  # passages about both topics fit the whole document best
-    keys = lambda r: [(h.path, h.start_line) for h in items(r)]
-    assert keys(engine.related(task, cursor_line=0)) == keys(engine.related(task, cursor_line=2))
-
-
-def test_paragraph_mode_can_follow_the_cursor(engine):
-    task = "Whale harpoon ship captain sail.\n\nGranite fossil volcano basalt lava.\n"
-    config = RelatedConfig(query="paragraphs", cursor_boost=3.0)
-    share = lambda line: np.mean(
-        [h.path.startswith("rocks") for h in items(engine.related(task, cursor_line=line, config=config), "core")[:8]]
-    )
-    assert share(2) > share(0)
 
 
 def test_slot_allocation_adds_up_and_learns():
@@ -214,18 +198,6 @@ def test_lexical_only_engine_still_suggests(engine, tmp_path):
 def test_task_units_are_paragraphs_with_lines():
     units = task_units("# A\none\n\ntwo\n# B\nthree")
     assert [(u.heading, u.start_line, u.text) for u in units] == [("A", 1, "one"), ("A", 3, "two"), ("B", 5, "three")]
-
-
-def test_holdout_recovers_hidden_excerpts(engine):
-    from isis.engine.evaluate import compare, holdout
-
-    rows = engine.snapshot.file_rows
-    excerpts = [engine.snapshot.passages[rows[f"sea-{i}.md"][0]].text for i in range(6)]
-    task = "# Sea\n\n" + "\n\n".join(excerpts) + "\n"
-    result = holdout(engine, task, fraction=0.5, seed=1)
-    assert result.hidden == 3 and 0 <= result.found <= 3 and result.recall == result.found / 3
-    table = compare(engine, [task], {"default": RelatedConfig(), "narrow": RelatedConfig(total_slots=8)}, seeds=[0])
-    assert [r["config"] for r in table] == ["default", "narrow"] and all(0 <= r["recall"] <= 1 for r in table)
 
 
 def test_folders_can_be_left_out_of_the_suggestions(tmp_path):
@@ -349,23 +321,6 @@ def test_heading_words_count_as_plain_text(engine):
     as_heading = weights("# Harpoon\nThe whale and the ship.\n\n# Harpoon\nThe captain and the sail.\n\n# Harpoon\n")
     as_text = weights("Harpoon\n\nThe whale and the ship.\n\nHarpoon\n\nThe captain and the sail.\n\nHarpoon\n")
     assert as_heading == as_text  # every one counts, even with nothing under it
-
-
-def test_excerpt_matcher_agrees_with_comparing_every_excerpt():
-    from isis.engine.related import ExcerptMatcher
-
-    rng = random.Random(9)
-    words = "the whale sea ship sail white captain ocean deep harpoon".split()
-    text = lambda n: " ".join(rng.choice(words) for _ in range(n))
-    excerpts = [e for e in (text(rng.randint(4, 12)) for _ in range(40)) if len(e) >= 20]
-    excerpts += [e[2:-2] for e in excerpts[:10]]  # selections that start and end mid-word
-    excerpts += ["harpoonharpoon whalewhalewhale", "onewordwithoutanyspacesatall"]  # no word inside them
-    match = ExcerptMatcher(excerpts)
-    hays = [text(rng.randint(1, 30)) for _ in range(800)] + excerpts + [e[3:15] for e in excerpts] + ["x " + e[1:] + " y" for e in excerpts] + ["ab" + e + "cd" for e in excerpts]
-    answers = [any(e in hay or hay in e for e in excerpts) for hay in hays]
-    assert [match(hay) for hay in hays] == answers
-    assert any(answers) and not all(answers)
-    assert not ExcerptMatcher([])("anything")
 
 
 def test_a_refresh_only_rescores_the_theme_that_changed(engine, monkeypatch):

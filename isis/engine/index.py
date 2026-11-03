@@ -626,7 +626,6 @@ class Engine:
         finally:  # a full disk must not also keep a copy of the index
             tmp_npz.unlink(missing_ok=True)
             tmp_json.unlink(missing_ok=True)
-        (folder / "index.pkl").unlink(missing_ok=True)  # the version 1 cache, which this one replaces
 
     def _load(self) -> None:
         for prefix in self.roots:
@@ -635,8 +634,6 @@ class Engine:
     def _load_folder(self, prefix: str) -> None:
         folder = self._cache_dir(prefix)
         json_path, npz_path = folder / "index.json", folder / "index.npz"
-        if (folder / "index.pkl").exists() and not json_path.exists():
-            log.info("ignoring the old index cache (index.pkl); the index will be rebuilt")
         if not json_path.exists() or not npz_path.exists():
             return
         try:
@@ -722,14 +719,13 @@ class Engine:
             skip_files=skip_files,
         )
 
-    def related(self, task_text: str, *, cursor_line: int | None = None, prefs=None, config=None, seed: int = 0, skip_folders=()):
+    def related(self, task_text: str, *, prefs=None, config=None, seed: int = 0, skip_folders=()):
         from .related import related
 
         return related(
             self.snapshot,
             task_text,
             embedder=self.embedder,
-            cursor_line=cursor_line,
             prefs=prefs,
             config=config,
             seed=seed,

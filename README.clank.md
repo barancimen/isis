@@ -7,7 +7,7 @@ A vibe-coded local web app for working through a corpus of markdown files:
 - **Search** the whole corpus with BM25, optionally fused with embeddings. Each hit shows its context and location, and clicking it opens the file at the match.
 - **Related** treats the task document itself as the query. It suggests passages in four lanes: core matches, hidden connections (same idea, other words), bridges between your themes, and gaps in your coverage. Embeddings come from a small CPU model, [bge-micro-v2](https://huggingface.co/TaylorAI/bge-micro-v2).
 
-The search engine is plain Python (`isis/engine`), so you can take it apart in a notebook. The server is a thin FastAPI layer, and the page is one HTML file with CodeMirror.
+The search engine is plain Python (`isis/engine`), so you can take it apart in a notebook. The server is a thin FastAPI layer, and the page is plain JavaScript with CodeMirror.
 
 ## Quick start
 
@@ -22,7 +22,7 @@ python3 -m venv .venv
 Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1 dir2`. Subfolders are scanned at any depth, and symlinked folders and files are followed, so a folder from elsewhere can join the corpus through a link (a link loop ends, and anything reachable twice is indexed once). Hidden files and folders are skipped. The terminal reports what happens: how many files are new, changed or removed, embedding progress, and links it follows or skips.
 
 - **Several folders.** They act as one corpus, and each appears under its own name in Files (two folders with the same name become `notes` and `notes-2`). Search and Related each have a box per folder; untick one to leave it out of that panel (remembered in this browser). Each keeps its own index in its `.isis/`, so it can later be served alone, or with other folders, without embedding it again. Task documents go in `_tasks` of the first folder, unless you pass `--tasks`.
-- **Folders too large to embed.** Put an empty file named `.no-embed` in a folder (`touch big/.no-embed`): it and its subfolders are then searched by keywords only. Adding the file drops embeddings already made for that folder; removing it embeds the folder. Meaning search can't find those passages. In a hybrid search their keyword rank counts in place of the meaning rank they lack, so strong keyword matches aren't buried; **Parameters › Not embedded** sets how much it counts, in both Search and Related. In Search, with it and *Keyword weight* both at 0, those passages are left out. Related shows them in Core only, and they get in on a top keyword rank alone, with no check on meaning.
+- **Folders too large to embed.** Put an empty file named `.no-embed` in a folder (`touch big/.no-embed`): it and its subfolders are then searched by keywords only. Adding the file drops embeddings already made for that folder; removing it embeds the folder. Meaning search can't find those passages. In a hybrid search their keyword rank counts in place of the meaning rank they lack, so strong keyword matches aren't buried; **Adjustments** › *Passages with no meaning data* sets how much it counts, in both Search and Related. In Search, with it and *How important keywords are* both at 0, those passages are left out. Related shows them in Core only, and they get in on a top keyword rank alone, with no check on meaning.
 
 - **First run.** It downloads the model (67 MB) and embeds every passage in the background. That runs at about 15 passages/s on one slow CPU core, and much faster on a laptop. Keyword search works while it runs.
 - **Later runs.** The index is cached in `<corpus>/.isis/`, and only changed files are re-read. The server watches the folder, so edits show up in search within seconds. A folder it can't read (changed permissions, an unmounted drive, a link whose target is away) keeps its files and embeddings in the index until it can be read again, and they just don't show up in results meanwhile. If its link is removed, they go.
@@ -59,11 +59,11 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 |---|---|
 | **Layout** | Drag the border right of the task list, the side panel or the reader to resize it (or focus it and use the arrow keys); double-click a border to reset it. Widths are kept in this browser. |
 | **Tasks** (left column) | **+** creates a task. Click a tab to switch; hover for rename ✎ and delete × (deleted tasks go to `_tasks/.trash/`). Each task keeps its own cursor and undo history while the page is open. |
-| **Refresh** | The Refresh button in Related gets new results and scrolls the panel so that "Best results" is at the top.
-| **Hiding documents** | ⊠ on a Search result hides that whole document from Search, up to 50 documents. They are listed under **Hidden documents** to bring back, and this browser remembers them. Related keeps a separate list for each task.
-| **Presets** | Above Adjustments in Search and in Related, **Save** stores the panel's settings under a name, choosing a name restores them, and **Delete** removes it. Search presets hold the sliders, the Meaning button, the folders, the hidden documents and the search box, with any regex. Related presets hold the sliders, the folders, the word rules, the ignored keywords and the hidden documents. Likes and hidden passages stay with their task. Presets are kept in this browser.
-| **Find** | Ctrl/⌘+F in the reader or the task opens a find box for that pane only. Enter and Shift+Enter step through the matches and scroll to each one, and Esc closes the box. The search ignores case, and a space also matches a line break. With the cursor elsewhere, it is the browser's own find.
-| **Results** | A result in Search or Related is headed by its document's title: `title:` in the frontmatter, or else a top-level heading near the start, or else the file name.
+| **Refresh** | The Refresh button in Related gets new results and scrolls the panel so that "Best results" is at the top. |
+| **Hiding documents** | ⊠ on a Search result hides that whole document from Search, up to 50 documents. They are listed under **Hidden documents** to bring back, and this browser remembers them. Related keeps a separate list for each task. |
+| **Presets** | Above Adjustments in Search and in Related, **Save** stores the panel's settings under a name, choosing a name restores them, and **Delete** removes it. Search presets hold the sliders, the Meaning button, the folders, the hidden documents and the search box, with any regex. Related presets hold the sliders, the folders, the word rules, the ignored keywords and the hidden documents. Likes and hidden passages stay with their task. Presets are kept in this browser. |
+| **Find** | Ctrl/⌘+F in the reader or the task opens a find box for that pane only. Enter and Shift+Enter step through the matches and scroll to each one, and Esc closes the box. The search ignores case, and a space also matches a line break. With the cursor elsewhere, it is the browser's own find. |
+| **Results** | A result in Search or Related is headed by its document's title: `title:` in the frontmatter, or else a top-level heading near the start, or else the file name. |
 | **Files** | Folders start collapsed; click one to open it. A document opens where you last left it, remembered in this browser, or at the top the first time; a search or Related result still opens at its match. Filtering shows every match with its folders open, and opening a file from anywhere reveals it here. |
 | **Search** (Ctrl/⌘+K) | A query is a list of words, `"phrases"` and `/regexes/` (a regex is case-insensitive unless it has a capital letter). Plain ones are preferred: words rank by BM25, and a phrase or regex is scored like one more word, so `whale /white/` ranks passages mentioning both first. A phrase or regex on its own finds only its matches. `+x` requires x and `-x` excludes it; `-whale` also drops "whales" and "whaling". A half-typed last word matches the terms it starts. The **Meaning** button (on by default) blends in embedding similarity, and each hit then shows its rank by keywords and by meaning; off is the same as *How important meaning is* at 0, and the two move together. The `+` and `-` clauses filter the corpus before anything is ranked, so meaning never brings back what they rule out. **Adjustments** opens sliders for BM25 and the fusion, each with a *default* button once changed, and *Set all to default* for all of them. Click a hit to open it at the match; **+** adds the passage to the task. |
 | **Reader** | Select text and press **Ctrl/⌘+Enter** (or *+ Add to task*). It goes in at the task's cursor, as its own paragraph. Hard-wrapped text flows to the width of the pane, here and in the task (the file is unchanged); the task paragraph you are editing shows its real lines. A block enveloped by `---` lines (front matter, or further down a `---` after a blank line, lines with no blank between them, and a closing `---`) shows as a card: compact with one line per key if it reads as YAML, otherwise as a normal paragraph. Standard markdown would make such text a heading. A standalone `---` shows as a thin line. Lists show real bullets that change with the level, each level clearly indented, with wrapped lines aligned under the text. On the line you are editing in a task, its real marker (`-`) takes the bullet's place, without moving anything. Enter starts the next item straight below. |
@@ -80,7 +80,7 @@ The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and
    - its *robust z-score* of embedding similarity to the document vector (the length-weighted mean of the paragraph embeddings), meaning how far it stands out from the typical passage (above 50,000 passages, "typical" is estimated from a fixed sample of 20,000);
    - BM25 for the document's ~30 most distinctive terms.
 
-   With `RelatedConfig(query="paragraphs")`, each paragraph is a query of its own instead. A passage then scores by its best match, and `cursor_boost` can weight the paragraph at the cursor. Use this when a document covers unrelated topics and you want strong matches to any one of them, not to their overlap.
+   With `RelatedConfig(query="paragraphs")`, each paragraph is a query of its own instead. A passage then scores by its best match. Use this when a document covers unrelated topics and you want strong matches to any one of them, not to their overlap.
 3. **Gate.** Only clearly relevant passages survive: a strong z-score, a top keyword hit with some semantic support, or a clear relation to two themes at once. Already-collected and dismissed passages, and every passage of an excluded document, are dropped.
 4. **Lanes.**
    - *Best results* (`core`): reciprocal-rank fusion of both signals.
@@ -95,11 +95,11 @@ The defaults were calibrated on the sample corpus with bge-micro-v2, against bli
 
 ## Playing with the algorithm
 
-**In the page:** open **Adjustments** in the Search or Related panel. Every slider re-runs the panel as you move it; hover one for what it does and its default. Your settings stay in this browser only and are sent with each request, so the server's defaults never change. The drawer also shows the same settings as Python (`SearchConfig(...)` or `RelatedConfig(...)`) to paste into the notebook.
+**In the page:** open **Adjustments** in the Search or Related panel. Every slider re-runs the panel as you move it; hover one for what it does and its default. Your settings stay in this browser only and are sent with each request, so the server's defaults never change.
 
 **Against judgments:** [`CALIBRATE.md`](CALIBRATE.md) explains how the defaults were measured against about 1,800 graded results, and how to redo it with `calibration/` (for example after changing the embedding model).
 
-**In a notebook:** [`notebooks/explore.ipynb`](notebooks/explore.ipynb) walks through it: typed search, `related()` with different configs and preferences, the z-score distributions, and a **hold-out evaluation**. That evaluation (`isis.engine.evaluate`) hides some of a task's excerpts and measures how many come back, and through which lane. `compare()` runs it over several tasks and configs.
+**In a notebook:** [`notebooks/explore.ipynb`](notebooks/explore.ipynb) walks through it: typed search, `related()` with different configs and preferences, the z-score distributions, and how to try another model.
 
 ```python
 from isis.engine.index import Engine
@@ -122,11 +122,10 @@ isis/engine/   chunker.py   markdown -> passages with line ranges
                index.py     Engine: incremental index, on-disk cache, snapshots for readers
                search.py    typed search, phrase filter, snippets with highlights
                related.py   the task-as-query pipeline
-               evaluate.py  hold-out recall, config comparison, synthetic tasks
                report.py    plain-text printing for notebooks
-isis/server/   app.py       FastAPI app and file watcher; tasks.py: task files and preferences
+isis/server/   app.py       FastAPI app and file watcher; tasks.py: task files and preferences; public.py: public mode
 isis/cli.py    `isis index` / `isis serve`
-web/           index.html, app.js, style.css, insert.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
+web/           index.html, app.js, style.css, insert.js, reflow.js, filetree.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
 scripts/       fetch_sample_corpus.py, browser_check.py
 calibration/   judged queries and tasks, and the scripts that score settings against them (see CALIBRATE.md)
 ```
@@ -142,6 +141,6 @@ sh web/vendor/build-codemirror.sh        # rebuild the CodeMirror bundle (needs 
 
 Limitations:
 - Tokenising is English-only (Snowball stemmer and stopwords).
-- The app assumes one user at a time.
+- Outside public mode, the app assumes one user at a time.
 - Passages are whole lines, so a very long single-line paragraph becomes one passage. Its embedding averages several windows.
-- The index cache (`<corpus>/.isis/index.json` and `index.npz`) is plain data, so a corpus that comes with someone else's cache can't run code. Caches from before this format (`index.pkl`) are ignored and rebuilt.
+- The index cache (`<corpus>/.isis/index.json` and `index.npz`) is plain data, so a corpus that comes with someone else's cache can't run code.

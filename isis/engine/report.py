@@ -28,11 +28,3 @@ def show_related(result, per_lane: int = 5, width: int = 110) -> None:
             print(f"  {h.path}:{h.start_line + 1}  {why}")
             print("      " + _excerpt(h.text, width))
     print(f"\n{result.stats}")
-
-
-def show_table(rows: list[dict]) -> None:
-    cols = list(dict.fromkeys(k for r in rows for k in r))
-    widths = [max(len(str(c)), *(len(str(r.get(c, ""))) for r in rows)) for c in cols]
-    print("  ".join(str(c).ljust(w) for c, w in zip(cols, widths)))
-    for r in rows:
-        print("  ".join(str(r.get(c, "")).ljust(w) for c, w in zip(cols, widths)))

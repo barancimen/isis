@@ -65,14 +65,8 @@ class TaskStore:
             self.folder.mkdir(parents=True, exist_ok=True)
         self.meta = self.folder / ".meta"
         self.trash = self.folder / ".trash"
-        self._locks: dict[str, threading.RLock] = {}
-        self._locks_lock = threading.Lock()
+        self._lock = threading.RLock()  # held while a task or its preferences are read, changed and saved
         self._unnamed: set[str] = set()
-
-    def lock(self, name: str) -> threading.RLock:
-        """One lock per task, held while its preferences are read, changed and saved."""
-        with self._locks_lock:
-            return self._locks.setdefault(self.clean(name), threading.RLock())
 
     @staticmethod
     def clean(name: str) -> str:
@@ -113,7 +107,7 @@ class TaskStore:
 
     def create(self, name: str) -> dict:
         self.folder.mkdir(parents=True, exist_ok=True)
-        with self.lock(name):
+        with self._lock:
             path = self._path(name)
             if path.exists():
                 raise TaskError(f"a task named {path.stem!r} already exists", 409)
@@ -121,7 +115,7 @@ class TaskStore:
             return self.read(path.stem)
 
     def read(self, name: str) -> dict:
-        with self.lock(name):
+        with self._lock:
             path = self._existing(name)
             try:
                 content = path.read_text(encoding="utf-8")
@@ -131,9 +125,9 @@ class TaskStore:
 
     def write(self, name: str, content: str, base_mtime: str | None = None) -> str:
         """Save, unless the file changed on disk since `base_mtime` (then raise Conflict). The
-        check and the write happen under the task's lock, so a save can't overwrite another
+        check and the write happen under the lock, so a save can't overwrite another
         save it hasn't seen, or bring back a task deleted meanwhile."""
-        with self.lock(name):
+        with self._lock:
             path = self._existing(name)
             before = _mtime(path)
             if base_mtime is not None and before != base_mtime:
@@ -146,8 +140,7 @@ class TaskStore:
             return _mtime(path)
 
     def rename(self, name: str, new_name: str) -> dict:
-        first, second = sorted([self.clean(name), self.clean(new_name)])  # one order for A->B and B->A
-        with self.lock(first), self.lock(second):
+        with self._lock:
             path, target = self._existing(name), self._path(new_name)
             if target.exists() and target != path:
                 raise TaskError(f"a task named {target.stem!r} already exists", 409)
@@ -158,7 +151,7 @@ class TaskStore:
             return self.read(target.stem)
 
     def delete(self, name: str) -> None:
-        with self.lock(name):
+        with self._lock:
             path = self._existing(name)
             stamp = _stamp()
             self._to_trash(path, f"{path.stem}.{stamp}.md")
@@ -191,7 +184,7 @@ class TaskStore:
         try:
             return TaskPrefs.from_dict(json.loads(text))
         except (ValueError, TypeError, AttributeError):  # saves are atomic, so the file itself is bad: keep it
-            with self.lock(name), suppress(OSError):
+            with self._lock, suppress(OSError):
                 kept = self._to_trash(path, f"{path.stem}.{_stamp()}.bad.json")
                 log.warning("unreadable preferences for task %r moved to %s", path.stem, kept)
             return TaskPrefs()
@@ -204,14 +197,14 @@ class TaskStore:
     @contextmanager
     def edit_prefs(self, name: str):
         """Read, change and save a task's preferences, one change at a time."""
-        with self.lock(name):
+        with self._lock:
             prefs = self.prefs(name)
             yield prefs
             self.save_prefs(name, prefs)
 
     def forget_prefs(self, name: str) -> None:
         """Start the task's preferences over. The old file goes to .trash, like a deleted task."""
-        with self.lock(name):
+        with self._lock:
             path = self._existing_meta_path(name)
             if path.exists():
                 self._to_trash(path, f"{path.stem}.{_stamp()}.prefs.json")
