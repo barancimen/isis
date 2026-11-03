@@ -29,7 +29,7 @@ from .tasks import MAX_DISMISSED, TaskError, TaskStore
 
 log = logging.getLogger(__name__)
 
-PATTERN_SECONDS = 1.0  # matching time for all the regexes of one request
+PATTERN_SECONDS = 3.0  # matching time for all the regexes of one request
 COOKIE = "isis_visitor"
 COOKIE_DAYS = 365
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
