@@ -554,6 +554,7 @@ const state = {
   likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
   searchSeq: 0,
   indexUpdated: null,
+  pageVersion: null, // of the files this page loaded
   paramSpecs: { search: [], related: [] }, // from /api/params
   params: loadParams(), // this browser's overrides: {search: {name: value}, related: {...}}
   meaningWeightBefore: null, // what the Meaning button restores
@@ -1765,10 +1766,30 @@ async function pollStatus() {
       if (state.relatedFor) requestRelated();
     }
     state.indexUpdated = s.updated;
+    const outdated = s.page_version !== state.pageVersion;
+    $("#statusbar").classList.toggle("update-ready", outdated);
+    $("#reload-page").hidden = !outdated;
   } catch {
     $("#index-status").textContent = "The app cannot connect to the server";
   }
   setTimeout(pollStatus, settled ? 10000 : 2000);
+}
+
+// Reloads only once every task is saved, so that no text is lost.
+async function reloadPage() {
+  const button = $("#reload-page");
+  button.disabled = true;
+  try {
+    await Promise.all([...state.docs.keys()].map((name) => saveTask(name)));
+    if (![...state.docs.values()].some((d) => d.dirty || d.saving)) {
+      location.reload();
+      return;
+    }
+  } catch {
+    // The text below says what to do.
+  }
+  button.textContent = "COULD NOT SAVE YOUR TASK. PRESS HERE TO TRY AGAIN.";
+  button.disabled = false;
 }
 
 // ---------- resizable panes ----------
@@ -1893,6 +1914,7 @@ function bind() {
       showPanel("search");
     }
   });
+  $("#reload-page").addEventListener("click", reloadPage);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") saveTask(state.task, { keepalive: true }).catch(() => {});
   });
@@ -1906,6 +1928,7 @@ async function init() {
   bind();
   await loadParamSpecs();
   const status = await api("GET", "api/status");
+  state.pageVersion = status.page_version;
   renderFolderPicks(status.folders);
   if (!status.model) {
     const button = $("#search-meaning");

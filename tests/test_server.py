@@ -1,11 +1,12 @@
 import json
+import os
 import threading
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from isis.server.app import create_app
+from isis.server.app import PageVersion, create_app
 from isis.server.tasks import TaskError, TaskStore
 
 
@@ -428,3 +429,17 @@ def test_search_can_hide_documents(client):
     assert paths(hide=json.dumps(["no/such/file.md"])) == {"whales.md", "ships/pequod.md"}
     assert client.get("/api/search", params={"q": "whale", "hide": "{}"}).status_code == 400
     assert client.get("/api/search", params={"q": "whale", "hide": "not json"}).status_code == 400
+
+
+def test_page_version_waits_for_the_files_to_settle(tmp_path):
+    page = tmp_path / "app.js"
+    page.write_text("one")
+    os.utime(page, (1, 1))
+    version = PageVersion(tmp_path, settle=60)
+    first = version.current()
+
+    page.write_text("two")  # just saved: more may be on the way
+    assert version.current() == first
+
+    os.utime(page, (2, 2))  # still for long enough
+    assert version.current() != first

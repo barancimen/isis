@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 WEB = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 WATCH_RETRY = 30  # seconds
+PAGE_SETTLE_SECONDS = 5
 
 
 class PageFiles(StaticFiles):
@@ -42,6 +43,25 @@ class PageFiles(StaticFiles):
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+class PageVersion:
+    """Changes when the page's files do, but only once they have been still for a few seconds:
+    an update saved file by file is not announced halfway through."""
+
+    def __init__(self, folder: Path = WEB, settle: float = PAGE_SETTLE_SECONDS):
+        self.folder, self.settle = folder, settle
+        self.value = None
+
+    def current(self) -> int | None:
+        try:
+            found = sorted((str(p), p.stat()) for p in self.folder.rglob("*") if p.suffix in (".html", ".js", ".css"))
+        except OSError:  # a file replaced just now
+            return self.value
+        newest = max((stat.st_mtime for _, stat in found), default=0)
+        if self.value is None or time.time() - newest >= self.settle:
+            self.value = zlib.crc32(repr([(name, s.st_mtime_ns, s.st_size) for name, s in found]).encode())
+        return self.value
 
 
 def plain(x):
@@ -186,6 +206,8 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 
     # ---- corpus ----
 
+    page_version = PageVersion()
+
     @app.get("/api/status")
     def status():
         state = plain(engine.status)
@@ -196,6 +218,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             "index_bytes": engine.index_bytes(),
             "folders": [name for name in engine.roots if name],  # when serving several folders
             "model": getattr(engine.embedder, "model_id", None),
+            "page_version": page_version.current(),
         }
 
     @app.get("/api/files")
