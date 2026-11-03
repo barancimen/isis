@@ -219,8 +219,8 @@ const hitSlot = decorationSlot();
 const addedSlot = decorationSlot();
 
 // Hard-wrapped paragraphs flow to the width of the pane: their line breaks show as spaces (see
-// reflow.js). In the task editor the paragraph being edited keeps its real lines while the
-// editor has focus, so pressing Enter visibly starts a new line.
+// reflow.js). In the task editor a break typed with Enter shows as a real line until the editor
+// loses focus, so pressing Enter visibly starts a new line while the rest still flows.
 class SpaceWidget extends WidgetType {
   eq() { return true; }
   toDOM() {
@@ -280,8 +280,21 @@ function continueList(view) {
 
 const setFocused = StateEffect.define();
 
+// Where the breaks typed with Enter are after this change. A pasted text flows like any other.
+function typedBreaksAfter(breaks, tr) {
+  if (!tr.docChanged) return breaks;
+  const kept = breaks.map((at) => tr.changes.mapPos(at, 1)).filter((at) => tr.newDoc.sliceString(at, at + 1) === "\n");
+  if (tr.isUserEvent("input") && !tr.isUserEvent("input.paste") && !tr.isUserEvent("input.drop")) {
+    tr.changes.iterChanges((_fromA, _toA, from, _to, text) => {
+      const at = text.toString().indexOf("\n");
+      if (at >= 0) kept.push(from + at);
+    });
+  }
+  return kept;
+}
+
 function reflow({ editable }) {
-  const build = (state, focused) => {
+  const build = (state, focused, typedBreaks) => {
     const lines = state.doc.toJSON();
     const cursorLine = editable && focused ? state.doc.lineAt(state.selection.main.head).number - 1 : -1;
     const [lo, hi] = cursorLine >= 0 ? paragraphAt(lines, cursorLine) : [-1, -1];
@@ -290,8 +303,8 @@ function reflow({ editable }) {
     const lists = listStructure(lines);
     const inList = new Set([...lists.items, ...lists.continuations].map((entry) => entry.line));
     for (const i of softBreaks(lines)) {
-      if (i >= lo && i < hi && !inList.has(i)) continue; // Enter there makes a new item, so a list stays as it is
       const end = state.doc.line(i + 1).to;
+      if (typedBreaks.includes(end) && !inList.has(i)) continue; // Enter there makes a new item, so a list stays as it is
       // The break, and the indent of a list item's next line.
       decos.push(softBreak.range(end, end + 1 + /^\s*/.exec(lines[i + 1])[0].length));
     }
@@ -331,12 +344,13 @@ function reflow({ editable }) {
   };
   // Line-break replacements must come from a state field, not a view plugin.
   const field = StateField.define({
-    create: (state) => ({ focused: false, decos: build(state, false) }),
+    create: (state) => ({ focused: false, typedBreaks: [], decos: build(state, false, []) }),
     update(value, tr) {
       let focused = value.focused;
       for (const e of tr.effects) if (e.is(setFocused)) focused = e.value;
       if (!tr.docChanged && focused === value.focused && !(editable && focused && tr.selection)) return value;
-      return { focused, decos: build(tr.state, focused) };
+      const typedBreaks = focused ? typedBreaksAfter(value.typedBreaks, tr) : [];
+      return { focused, typedBreaks, decos: build(tr.state, focused, typedBreaks) };
     },
     provide: (f) => EditorView.decorations.from(f, (value) => value.decos),
   });
