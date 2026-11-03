@@ -706,7 +706,7 @@ class Engine:
     def _named_folders(self, skip) -> set[str]:
         return {name for name in skip if name and name in self.roots}
 
-    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None, skip_folders=()):
+    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None, skip_folders=(), skip_files=()):
         from .search import search
 
         return search(
@@ -719,6 +719,7 @@ class Engine:
             read_lines=self.read_lines,
             config=config,
             skip_folders=self._named_folders(skip_folders),
+            skip_files=skip_files,
         )
 
     def related(self, task_text: str, *, cursor_line: int | None = None, prefs=None, config=None, seed: int = 0, skip_folders=()):

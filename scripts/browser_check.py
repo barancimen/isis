@@ -605,6 +605,29 @@ def main() -> None:
 
         page.click(".side-tabs button[data-panel=search]")
         page.evaluate("localStorage.removeItem('isis.presets'); window.isis.state.presets = { search: [], related: [] }; window.isis.renderPresets('search'); window.isis.renderPresets('related')")
+        page.fill("#search-input", "white whale")
+        expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
+        expect(page.locator("#search-hidden")).to_be_hidden()
+        hidden_path = page.locator("#search-results .hit").first.get_attribute("data-path")
+        page.locator("#search-results .hit").first.locator(".exclude-doc").click()
+        expect(page.locator("#search-hidden")).to_be_visible()
+        page.wait_for_timeout(800)  # the search runs again
+        expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]')).to_have_count(0)
+        expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
+        page.reload()  # this browser remembers it
+        expect(page.locator("#new-task")).to_be_visible()
+        page.click(".side-tabs button[data-panel=search]")
+        page.fill("#search-input", "white whale")
+        expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
+        expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]')).to_have_count(0)
+        page.click("#search-hidden > summary")
+        page.locator("#search-hidden button", has_text="Show again").click()
+        expect(page.locator("#search-hidden")).to_be_hidden()
+        expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]').first).to_be_visible(timeout=10000)
+        step("Search can hide a whole document, remembers it after a reload, and can bring it back")
+
+        page.locator("#search-results .hit").first.locator(".exclude-doc").click()
+        expect(page.locator("#search-hidden")).to_be_visible()
         page.fill("#search-input", "whale +/sp.rm/")
         page.click("#search-tune > summary")
         set_slider(page, "#search-tune [data-name=k1] input", 2.5)
@@ -616,15 +639,19 @@ def main() -> None:
         assert fits == {"text": "default", "inside": True, "whole": True}, fits
         save_preset("search", "Regex by keywords")
         page.click("#search-tune .tune-reset")
+        page.locator("#search-hidden .tune-reset").click()
+        expect(page.locator("#search-hidden")).to_be_hidden()
         page.fill("#search-input", "something else")
         expect(page.locator("#search-preset option").first).to_have_text("Regex by keywords (changed)")
         kept = page.evaluate("window.isis.state.presets.search[0].settings")  # changes reach a preset only through Save
         assert kept["query"] == "whale +/sp.rm/" and kept["params"]["k1"] == 2.5, kept
         page.select_option("#search-preset", "Regex by keywords")
         expect(page.locator("#search-input")).to_have_value("whale +/sp.rm/")
+        expect(page.locator("#search-hidden")).to_be_visible()  # the preset's hidden document
         expect(page.locator("#search-tune [data-name=k1] input")).to_have_value("2.5")
         expect(page.locator("#search-meaning")).to_have_attribute("aria-pressed", "false")
         expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
+        page.locator("#search-hidden .tune-reset").click()
         page.click("#search-tune .tune-reset")
         page.fill("#search-input", "")
         page.click("#search-tune > summary")

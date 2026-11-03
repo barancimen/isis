@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 
@@ -445,3 +446,15 @@ def test_settings_are_restored_together(client):
     prefs = client.get("/api/tasks/t/prefs").json()
     assert prefs["steer"] == "whale /sp.rm/ -squid" and prefs["ignored"] == ["ship"]  # all or nothing
     assert client.put("/api/tasks/missing/settings", json={}).status_code == 404
+
+
+def test_search_can_hide_documents(client):
+    def paths(**params):
+        return {hit["path"] for hit in client.get("/api/search", params={"q": "whale", **params}).json()["hits"]}
+
+    assert paths() == {"whales.md", "ships/pequod.md"}
+    assert paths(hide=json.dumps(["whales.md"])) == {"ships/pequod.md"}
+    assert paths(hide=json.dumps(["whales.md", "ships/pequod.md"])) == set()
+    assert paths(hide=json.dumps(["no/such/file.md"])) == {"whales.md", "ships/pequod.md"}
+    assert client.get("/api/search", params={"q": "whale", "hide": "{}"}).status_code == 400
+    assert client.get("/api/search", params={"q": "whale", "hide": "not json"}).status_code == 400

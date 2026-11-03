@@ -221,19 +221,21 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         return {"search": specs(SearchConfig), "related": specs(RelatedConfig)}
 
     @app.get("/api/search")
-    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = ""):
+    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = "", hide: str = ""):
         try:
             overrides = json.loads(params) if params else {}
             skip_folders = json.loads(skip) if skip else []
+            hidden_files = json.loads(hide) if hide else []
         except ValueError:
-            raise HTTPException(400, "params and skip must be JSON")
-        if not isinstance(overrides, dict) or not isinstance(skip_folders, list):
-            raise HTTPException(400, "params must be a JSON object, and skip a list of folders")
+            raise HTTPException(400, "params, skip and hide must be JSON")
+        if not isinstance(overrides, dict) or not isinstance(skip_folders, list) or not isinstance(hidden_files, list):
+            raise HTTPException(400, "params must be a JSON object, skip a list of folders, and hide a list of files")
         started = time.perf_counter()
         try:
             with time_limit():
                 hits = engine.search(q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
-                                     skip_folders=[str(f) for f in skip_folders])
+                                     skip_folders=[str(f) for f in skip_folders],
+                                     skip_files=[str(f) for f in hidden_files])
         except QueryError as e:
             raise HTTPException(400, str(e))
         return {"hits": plain(hits), "ms": round((time.perf_counter() - started) * 1000, 1)}

@@ -419,6 +419,7 @@ def search(
     read_lines: Callable[[str], list[str]],
     config: SearchConfig | None = None,
     skip_folders=(),
+    skip_files=(),
 ) -> list[Hit]:
     config = config or SearchConfig()
     if not len(snapshot) or not query.strip():
@@ -429,6 +430,9 @@ def search(
     allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)
     if skip_folders:
         allowed &= snapshot.outside_folders(skip_folders)
+    for path in skip_files:
+        if (rows := snapshot.file_rows.get(path)) is not None:
+            allowed[rows[0]:rows[1]] = False
     if mode == "hybrid" and config.keyword_weight + config.meaning_weight <= 0:
         return []  # nothing counts
     embeddings = mode == "hybrid" and config.meaning_weight > 0 and embedder is not None and snapshot.has_vector.any()

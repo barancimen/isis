@@ -514,10 +514,13 @@ measureWhenScrollbarPressed(taskView);
 
 // ---------- state ----------
 
+const MAX_HIDDEN_DOCS = 50; // the list travels in the URL, which a public server limits in length
+
 const state = {
   task: null, // active task name
   tasks: [], // [{name, mtime}]
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again, conflictMtime}
+  hiddenDocs: loadHiddenDocs(), // documents left out of Search, in this browser
   presets: loadPresets(), // panel -> [{name, settings}]
   activePreset: { search: null, related: null }, // the preset last chosen or saved in each panel
   prefs: null, // what the task remembers, as last shown
@@ -1003,6 +1006,7 @@ function renderHit(hit, { lane = null, isNew = false } = {}) {
     }, "↑"),
     lane && h("button", { title: "Remove this result. The app does not show this passage again for this task.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
     lane && h("button", { class: "avoid", title: "Remove this result and all passages near it in meaning, for this task. The slider \"How near for ⊘\" in Adjustments sets how near.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
+    !lane && h("button", { class: "exclude-doc", title: `Hide everything from ${hit.path} in Search. You can bring it back under Hidden documents. Related has its own list.`, onclick: () => hideSearchDoc(hit.path) }, "⊠"),
     lane && h("button", { class: "exclude-doc", title: `Remove all passages from this document, for this task. The document is ${hit.path}. Search can find its passages.`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
@@ -1029,8 +1033,9 @@ const runSearch = debounce(async () => {
   try {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
     const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
+    const hide = state.hiddenDocs.size ? `&hide=${enc(JSON.stringify([...state.hiddenDocs]))}` : "";
     // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
-    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}`);
+    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
     const how = result.hits.some((hit) => "meaning_rank" in hit.why) ? " by keywords and meaning" : "";
@@ -1247,6 +1252,58 @@ async function dismiss(hit, lane, element, avoid = false) {
 async function likeHit(hit, lane) {
   const id = state.likedIds.get(passageKey(hit));
   await changePrefs("POST", "/feedback", id ? { action: "unlike", id } : { action: "like", ...passageFields(hit, lane) });
+}
+
+// ---------- documents hidden from Search ----------
+
+// They are a setting of Search, kept in this browser, because a search needs no task. Related keeps
+// its own list for each task.
+function loadHiddenDocs() {
+  const saved = store.json("hidden-search", []);
+  return new Set(Array.isArray(saved) ? saved.filter((path) => typeof path === "string").slice(0, MAX_HIDDEN_DOCS) : []);
+}
+
+function setHiddenDocs(paths) {
+  state.hiddenDocs = new Set(paths);
+  store.set("hidden-search", JSON.stringify([...state.hiddenDocs]));
+  renderHiddenDocs();
+}
+
+function hideSearchDoc(path) {
+  if (state.hiddenDocs.size >= MAX_HIDDEN_DOCS) {
+    flash(`You can hide up to ${MAX_HIDDEN_DOCS} documents. Bring one back first.`);
+    return;
+  }
+  setHiddenDocs([...state.hiddenDocs, path]);
+  for (const card of document.querySelectorAll("#search-results .hit")) {
+    if (card.dataset.path === path) card.remove();
+  }
+  settingChanged("search");
+}
+
+function showSearchDoc(path) {
+  setHiddenDocs([...state.hiddenDocs].filter((p) => p !== path));
+  settingChanged("search");
+}
+
+function renderHiddenDocs() {
+  const drawer = $("#search-hidden");
+  const paths = [...state.hiddenDocs].sort();
+  drawer.hidden = !paths.length;
+  drawer.replaceChildren(
+    sectionHead("Hidden documents", "Documents you've hidden from Search. This browser remembers them.",
+      h("button", { class: "tune-reset", type: "button", title: "Bring back every hidden document.", onclick: () => {
+        setHiddenDocs([]);
+        settingChanged("search");
+      } }, "Show all"), ` · ${paths.length}`),
+    h("div", { class: "tune-body" },
+      h("ul", { class: "feedback-list" }, paths.map((path) =>
+        h("li", { class: "feedback-item" },
+          h("div", { class: "feedback-head" },
+            h("button", { class: "feedback-open", title: "Open this document", onclick: () => openFile(path).catch(fail) }, path),
+            h("button", { title: "Bring this document back into Search.", onclick: () => showSearchDoc(path) }, "Show again"),
+          ))))),
+  );
 }
 
 async function excludeDoc(path) {
@@ -1530,8 +1587,8 @@ function updateTuner(kind) {
 // ---------- presets ----------
 
 // A preset is a named copy of a panel's settings, kept in this browser like the settings themselves.
-// In Search: the sliders, the Meaning button (a slider underneath), the folders and the search box,
-// with any regex in it. In Related: the sliders, the folders, the word rules, the ignored keywords
+// In Search: the sliders, the Meaning button (a slider underneath), the folders, the hidden documents
+// and the search box, with any regex in it. In Related: the sliders, the folders, the word rules, the ignored keywords
 // and the hidden documents. Likes and hidden passages stay out: they belong to one task's results.
 function loadPresets() {
   const saved = store.json("presets", {});
@@ -1544,13 +1601,13 @@ const sortedList = (list) => [...new Set(list ?? [])].sort();
 
 function currentSettings(kind, prefs = state.prefsFor === state.task ? state.prefs : null) {
   const settings = { params: { ...state.params[kind] }, skipped: sortedList(state.skipped[kind]) };
-  if (kind === "search") return { ...settings, query: $("#search-input").value };
+  if (kind === "search") return { ...settings, query: $("#search-input").value, hidden_docs: sortedList(state.hiddenDocs) };
   return { ...settings, steer: prefs?.steer ?? "", ignored: sortedList(prefs?.ignored), excluded_docs: sortedList(prefs?.excluded_docs) };
 }
 
 function settingsKey(settings) {
   const params = Object.keys(settings.params ?? {}).sort().map((name) => [name, settings.params[name]]);
-  return JSON.stringify({ ...settings, params, skipped: sortedList(settings.skipped), ignored: sortedList(settings.ignored), excluded_docs: sortedList(settings.excluded_docs) });
+  return JSON.stringify({ ...settings, params, skipped: sortedList(settings.skipped), ignored: sortedList(settings.ignored), excluded_docs: sortedList(settings.excluded_docs), hidden_docs: sortedList(settings.hidden_docs) });
 }
 
 function renderPresets(kind) {
@@ -1574,7 +1631,7 @@ function renderPresets(kind) {
   bar.replaceChildren(
     h("label", { for: select.id }, "Preset"),
     select,
-    h("button", { type: "button", class: "preset-save", title: `Save ${kind === "search" ? "the sliders, folders, Meaning button and search box" : "the sliders, folders, word rules, ignored keywords and hidden documents"} under a name. This browser keeps your presets.`, onclick: () => savePreset(kind).catch(fail) }, "Save"),
+    h("button", { type: "button", class: "preset-save", title: `Save ${kind === "search" ? "the sliders, folders, hidden documents, Meaning button and search box" : "the sliders, folders, word rules, ignored keywords and hidden documents"} under a name. This browser keeps your presets.`, onclick: () => savePreset(kind).catch(fail) }, "Save"),
     h("button", { type: "button", class: "preset-delete", title: named ? `Delete the preset “${named.name}”. Your current settings stay as they are.` : "Choose a preset to delete it.", disabled: !named, onclick: () => deletePreset(kind, named.name) }, "Delete"),
   );
 }
@@ -1611,6 +1668,7 @@ async function applyPreset(kind, name) {
   state.activePreset[kind] = name;
   if (kind === "search") {
     $("#search-input").value = settings.query ?? "";
+    setHiddenDocs(settings.hidden_docs ?? []);
     settingChanged(kind);
     return;
   }
@@ -1651,6 +1709,7 @@ async function loadParamSpecs() {
     renderPresets(kind);
   }
   saveParams();
+  renderHiddenDocs();
 }
 
 // ---------- panels ----------
