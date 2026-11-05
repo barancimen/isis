@@ -423,7 +423,7 @@ def test_the_watcher_survives_an_error_and_keeps_checking(engine, corpus, monkey
     with TestClient(create_app(engine, TaskStore(corpus / "_tasks"), background=False)) as c:
         (corpus / "fresh.md").write_text("Stoatword arrived.\n")
         deadline = time.time() + 20
-        while "fresh.md" not in engine.files and time.time() < deadline:
+        while ("fresh.md" not in engine.files or len(calls) < 2) and time.time() < deadline:
             time.sleep(0.02)
         assert "fresh.md" in engine.files and len(calls) > 1
         assert c.get("/api/status").status_code == 200
