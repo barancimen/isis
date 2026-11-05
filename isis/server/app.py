@@ -16,7 +16,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -33,16 +33,7 @@ WEB = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 WATCH_RETRY = 30  # seconds
 PAGE_SETTLE_SECONDS = 5
-
-
-class PageFiles(StaticFiles):
-    """The page's files, which the browser must check are current before using its copy. Without
-    this a normal reload can keep running an old script long after an update."""
-
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
+PAGE_VERSION_SLOT = '<meta name="page-version" content="">'
 
 
 class PageVersion:
@@ -62,6 +53,25 @@ class PageVersion:
         if self.value is None or time.time() - newest >= self.settle:
             self.value = zlib.crc32(repr([(name, s.st_mtime_ns, s.st_size) for name, s in found]).encode())
         return self.value
+
+
+class PageFiles(StaticFiles):
+    """The page's files, which the browser may not keep. If it could, a tab reopened or reached
+    through history would run its old copy without asking, whatever else the headers say. The page
+    itself carries the version of these files, which is how a tab that stays open knows it is old."""
+
+    def __init__(self, *, version: PageVersion, **options):
+        super().__init__(**options)
+        self.version = version
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path in (".", "index.html") and response.status_code in (200, 304):
+            current = self.version.current()
+            page = (WEB / "index.html").read_text(encoding="utf-8")
+            response = HTMLResponse(page.replace(PAGE_VERSION_SLOT, f'{PAGE_VERSION_SLOT[:-2]}{"" if current is None else current}">'))
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 def plain(x):
@@ -368,7 +378,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                 prefs.record(body.lane, added=True)
         return prefs.summary()
 
-    app.mount("/", PageFiles(directory=WEB, html=True), name="web")
+    app.mount("/", PageFiles(version=page_version, directory=WEB, html=True), name="web")
     return app
 
 

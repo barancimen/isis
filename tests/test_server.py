@@ -145,7 +145,7 @@ def test_tasks_inside_the_corpus_are_not_indexed(client, engine):
 
 def test_the_browser_must_check_the_page_is_current(client):
     for path in ("/", "/app.js", "/reflow.js", "/style.css"):
-        assert client.get(path).headers["cache-control"] == "no-cache", path
+        assert client.get(path).headers["cache-control"] == "no-store", path
 
 
 def test_page_is_served(client):
@@ -454,6 +454,13 @@ def test_search_can_hide_documents(client):
     assert paths(hide=json.dumps(["no/such/file.md"])) == {"whales.md", "ships/pequod.md"}
     assert client.get("/api/search", params={"q": "whale", "hide": "{}"}).status_code == 400
     assert client.get("/api/search", params={"q": "whale", "hide": "not json"}).status_code == 400
+
+
+def test_the_page_carries_the_version_of_its_files(client):
+    version = client.get("/api/status").json()["page_version"]
+    for path, headers in (("/", {}), ("/index.html", {}), ("/", {"If-None-Match": client.get("/").headers.get("etag", "x")})):
+        response = client.get(path, headers=headers)
+        assert response.status_code == 200 and f'<meta name="page-version" content="{version}">' in response.text
 
 
 def test_page_version_waits_for_the_files_to_settle(tmp_path):

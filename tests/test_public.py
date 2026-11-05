@@ -106,7 +106,7 @@ def test_answers_about_a_visitor_are_never_kept(make_client):
     for response in (client.get("/api/tasks"), client.get("/api/search", params={"q": "whale"}),
                      client.get("/api/search", params={"q": "whale"})):  # the last is refused
         assert response.headers["cache-control"] == "no-store" and "cookie" in response.headers["vary"].lower()
-    assert client.get("/app.js").headers["cache-control"] == "no-cache"
+    assert client.get("/app.js").headers["cache-control"] == "no-store"
 
 
 def test_security_headers_are_on_every_answer(make_client):

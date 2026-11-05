@@ -2043,7 +2043,7 @@ async function pollStatus() {
       if (state.relatedFor) requestRelated();
     }
     state.indexUpdated = s.updated;
-    const outdated = s.page_version !== state.pageVersion;
+    const outdated = String(s.page_version) !== state.pageVersion;
     $("#statusbar").classList.toggle("update-ready", outdated);
     $("#reload-page").hidden = !outdated;
   } catch {
@@ -2242,7 +2242,8 @@ async function init() {
   bind();
   await loadParamSpecs();
   const status = await api("GET", "api/status");
-  state.pageVersion = status.page_version;
+  // The version these files came with. Asking the server now would make an old page look current.
+  state.pageVersion = $('meta[name="page-version"]')?.content || String(status.page_version);
   renderFolderPicks(status.folders);
   if (!status.model) {
     const button = $("#search-meaning");
