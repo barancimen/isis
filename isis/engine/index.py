@@ -656,14 +656,18 @@ class Engine:
 
     def index_bytes(self, embedder=None) -> int:
         """The size of the index on disk: the text and keywords, and this model's vectors, or every
-        model's without one."""
+        model's without one. This model's are counted as embedded so far, which is what its file
+        will hold once saved: during a long embedding run the file is only rewritten now and then."""
         total = 0
         for prefix in self.roots:
             folder = self._cache_dir(prefix)
-            vectors = [self._vectors_path(prefix, embedder.name)] if embedder is not None else (folder / "models").glob("*.npz")
+            vectors = [] if embedder is not None else (folder / "models").glob("*.npz")
             for path in [folder / "index.json", folder / "index.npz", *vectors]:
                 with suppress(OSError):  # not saved yet, or being replaced
                     total += path.stat().st_size
+        if embedder is not None:  # a float16 vector and an 8-byte text key per passage
+            embedded = sum(len(r.passages) for r in list(self.files.values()) if embedder.name in r.vectors)
+            total += embedded * (2 * embedder.dim + 8)
         return total
 
     def _vectors_path(self, prefix: str, name: str) -> Path:
