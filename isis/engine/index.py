@@ -20,13 +20,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .chunker import MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, split_lines
+from .chunker import MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, split_lines
 from .lexical import BM25, Vocabulary, term_counts
 from .text import tokenize
 
 log = logging.getLogger(__name__)
 
 INDEX_VERSION = 2
+FRONT_MATTER_CHARS = 65536  # enough to hold the frontmatter of any file
 CHUNKER_VERSION = 2  # raise it when files split differently: they are read again, and keep their embeddings
 MARKDOWN = (".md", ".markdown")
 NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
@@ -83,6 +84,7 @@ class FileRecord:
     counts: np.ndarray
     vectors: np.ndarray | None = None  # float16, one row per passage; None until embedded
     reuse: dict | None = None  # embed_text -> vector kept from before an edit; not saved
+    site: str | None = None  # the host of `url:` in the frontmatter; None if not known yet
 
 
 @dataclass
@@ -97,6 +99,7 @@ class Snapshot:
     vectors: np.ndarray  # float32 [n, dim]; zero rows where has_vector is False
     has_vector: np.ndarray  # bool [n]
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
+    file_sites: dict[str, str] = field(default_factory=dict)  # path -> host, for documents that have one
     _bm25_variants: dict = field(default_factory=dict, repr=False)
     _pattern_counts: dict = field(default_factory=dict, repr=False)
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
@@ -152,6 +155,15 @@ class Snapshot:
         for path, (start, end) in self.file_rows.items():
             if path.partition("/")[0] in skip:
                 ok[start:end] = False
+        return ok
+
+    def at_sites(self, sites) -> np.ndarray:
+        """Which passages are in documents from these hosts, or from their subdomains."""
+        ok = np.zeros(len(self.passages), bool)
+        for path, host in self.file_sites.items():
+            if any(host == site or host.endswith(f".{site}") for site in sites):
+                start, end = self.file_rows[path]
+                ok[start:end] = True
         return ok
 
     def term_id(self, term: str) -> int | None:
@@ -377,7 +389,16 @@ class Engine:
         text = self._located(path).read_text(encoding="utf-8", errors="replace")
         passages = chunk_markdown(path, text, *self.chunking)
         tokens = [tokenize(p.heading) + tokenize(p.text) for p in passages]
-        return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *term_counts(tokens, self.vocab))
+        site = document_site(split_lines(text)[:MAX_FRONT_MATTER])
+        return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *term_counts(tokens, self.vocab), site=site)
+
+    def _site_on_disk(self, path: str) -> str | None:
+        """The site of a file in a cache from before sites were kept, without reading all of it."""
+        try:
+            with self._located(path).open(encoding="utf-8", errors="replace") as f:
+                return document_site(split_lines(f.read(FRONT_MATTER_CHARS))[:MAX_FRONT_MATTER])
+        except (OSError, AttributeError):  # gone, or its folder is away: known next time
+            return None
 
     # ---- refresh ----
 
@@ -559,6 +580,7 @@ class Engine:
             vectors=np.concatenate(vectors).astype(np.float32) if vectors else np.zeros((0, self.dim), np.float32),
             has_vector=np.concatenate(has) if has else np.zeros(0, bool),
             file_rows=file_rows,
+            file_sites={path: r.site for path, r in self.files.items() if r.site},
         )
 
     # ---- cache ----
@@ -603,6 +625,7 @@ class Engine:
                     "mtime_ns": r.mtime_ns,
                     "size": r.size,
                     "embedded": r.vectors is not None,
+                    "site": r.site,
                     "passages": [[p.heading, p.start_line, p.end_line, p.text] for p in r.passages],
                 }
                 for path, r in zip(paths, records)
@@ -651,6 +674,9 @@ class Engine:
         except Exception as e:
             log.warning("ignoring unreadable index cache in %s: %s", folder, e)
             return
+        for path, record in files.items():
+            if record.site is None:
+                record.site = self._site_on_disk(path)
         self.files.update(files)
         log.info("loaded the index cache%s: %s, %s", f" of {prefix}" if prefix else "", _count(len(files), "file"),
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
@@ -691,6 +717,7 @@ class Engine:
                 arrays["term_ids"][at_nnz : at_nnz + nnz],
                 arrays["counts"][at_nnz : at_nnz + nnz],
                 vectors,
+                site=e.get("site"),
             )
             at_indptr += n + 1
             at_nnz += nnz

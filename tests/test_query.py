@@ -1,5 +1,9 @@
+import json
+
 import pytest
 
+from conftest import write_corpus
+from isis.engine.index import Engine
 from isis.engine.search import QueryError, correct_query, split_query, steering, typo_distance
 
 
@@ -119,3 +123,53 @@ def test_a_word_no_passage_contains_still_searches_by_meaning(engine):
     assert hits and all(h.why["keyword_rank"] is None for h in hits)
     assert engine.search("zzzzzzzz", mode="lexical") == []
     assert engine.search("zz", mode="hybrid") == []  # too short to mean anything yet
+
+
+SITES = {
+    "hub.md": '---\nurl: "https://github.com/a"\nfinal_url: "https://web.archive.org/b"\n---\n\nThe whale in a repository.\n',
+    "gist.md": "---\nurl: https://gist.github.com/c\n---\n\nThe whale in a gist.\n\nNo big fish here.\n",
+    "archive.md": '---\nurl: "https://web.archive.org/d"\n---\n\nThe whale in an archive.\n',
+    "plain.md": "The whale with no address.\n",
+}
+
+
+@pytest.fixture
+def site_engine(tmp_path):
+    engine = Engine(write_corpus(tmp_path / "sites", SITES), index_dir=tmp_path / "index", target_words=0)
+    engine.refresh()
+    return engine
+
+
+def test_site_filters_by_the_host_of_url(site_engine):
+    found = lambda query: sorted(set(paths(site_engine.search(query))))
+    assert found("whale") == ["archive.md", "gist.md", "hub.md", "plain.md"]
+    assert found("whale site:github.com") == ["gist.md", "hub.md"]  # with its subdomains
+    assert found("whale SITE:https://www.GitHub.com/x") == ["gist.md", "hub.md"]
+    assert found("whale site:gist.github.com") == ["gist.md"]
+    assert found("whale site:hub.com") == []  # the whole name, not its end
+    assert found("whale site:web.archive.org") == ["archive.md"]  # not final_url
+    assert found("whale site:github.com site:web.archive.org") == ["archive.md", "gist.md", "hub.md"]
+    assert found("whale -site:github.com") == ["archive.md", "plain.md"]
+    assert found("-site:github.com") == []  # only exclusions, like -word
+    assert found("whale site:") == ["archive.md", "gist.md", "hub.md", "plain.md"]  # still being typed
+
+
+def test_site_narrows_words_and_alone_lists_the_site(site_engine):
+    assert [h.text for h in site_engine.search("whale site:gist.github.com")] == ["The whale in a gist."]
+    assert [h.text for h in site_engine.search("site:gist.github.com")] == ["The whale in a gist.", "No big fish here."]
+
+
+def test_site_is_not_corrected_or_kept_as_a_word(site_engine):
+    assert correct_query(site_engine.snapshot, "whale site:githab.com") is None
+    assert [str(c) for c in split_query("+site:a.org -site:b.org")] == ["+site:a.org", "-site:b.org"]
+
+
+def test_a_cache_from_before_sites_finds_them(site_engine, tmp_path):
+    site_engine._save()
+    cache = next((tmp_path / "index").rglob("index.json"))
+    meta = json.loads(cache.read_text())
+    for entry in meta["files"]:
+        del entry["site"]
+    cache.write_text(json.dumps(meta))
+    engine = Engine(tmp_path / "sites", index_dir=tmp_path / "index", target_words=0)
+    assert sorted(set(paths(engine.search("whale site:github.com")))) == ["gist.md", "hub.md"]

@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HAS_WORD = re.compile(r"[^\W_]")
 YAML_LINE = re.compile(r"^(\s|#|-\s|[\w.-]+(?: [\w.-]+){0,3}:(\s|$))")  # a key, a list item, a comment, or indented
 FRONT_MATTER_TITLE = re.compile(r"^title:\s*(.*?)\s*$", re.IGNORECASE)
+FRONT_MATTER_URL = re.compile(r"^url:\s*(.*?)\s*$", re.IGNORECASE)
 TITLE_SEARCH_LINES = 200  # a top-level heading further down is a part of the document, not its title
 MAX_FRONT_MATTER = 200  # lines, as in the page (reflow.js)
 
@@ -50,12 +52,11 @@ def _body_start(lines: list[str]) -> int:
     return 1
 
 
-def document_title(lines: list[str]) -> str:
-    """The title of a document: `title:` in its frontmatter, or else a top-level heading near the
-    start. Empty if it has neither, and then the file name has to do."""
+def _front_matter_value(lines: list[str], key: re.Pattern) -> str:
+    """The first value of a key in the frontmatter, as text. Empty if there is none."""
     body = _body_start(lines)
     for line in lines[1:body - 1] if body > 1 else []:
-        if m := FRONT_MATTER_TITLE.match(line):
+        if m := key.match(line):
             value = m.group(1).strip()
             if len(value) >= 2 and value[0] == '"' == value[-1]:
                 try:
@@ -66,6 +67,29 @@ def document_title(lines: list[str]) -> str:
                 value = value[1:-1].replace("''", "'")
             if value:
                 return str(value)
+    return ""
+
+
+def web_host(url: str) -> str:
+    """The lowercase host of a URL, with or without its scheme and without "www.". Empty if none."""
+    try:
+        host = urlsplit(url if "://" in url else f"//{url}").hostname or ""
+    except ValueError:
+        return ""
+    return host.lower().rstrip(".").removeprefix("www.")
+
+
+def document_site(lines: list[str]) -> str:
+    """The host of `url:` in a document's frontmatter. Empty if it has none."""
+    return web_host(_front_matter_value(lines, FRONT_MATTER_URL))
+
+
+def document_title(lines: list[str]) -> str:
+    """The title of a document: `title:` in its frontmatter, or else a top-level heading near the
+    start. Empty if it has neither, and then the file name has to do."""
+    if title := _front_matter_value(lines, FRONT_MATTER_TITLE):
+        return title
+    body = _body_start(lines)
     in_fence = False
     for line in lines[body:body + TITLE_SEARCH_LINES]:
         if FENCE.match(line):

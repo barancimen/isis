@@ -1,6 +1,6 @@
 import pytest
 
-from isis.engine.chunker import chunk_markdown, document_title, split_lines
+from isis.engine.chunker import chunk_markdown, document_site, document_title, split_lines
 
 
 def spans(passages):
@@ -93,3 +93,15 @@ def test_frontmatter_of_every_usual_shape_is_still_skipped():
 ])
 def test_document_title(text, title):
     assert document_title(split_lines(text)) == title
+
+
+@pytest.mark.parametrize("text, site", [
+    ('---\nurl: "https://GitHub.com/a/b?x=1"\nfinal_url: "https://web.archive.org/x"\n---\n', "github.com"),
+    ("---\nfinal_url: https://web.archive.org/x\nurl: https://www.example.org:8080/\n---\n", "example.org"),
+    ("---\nurl: gist.github.com/a\n---\n", "gist.github.com"),
+    ("---\ntitle: No address\nsite: github.com\n---\n", ""),
+    ("url: https://github.com\n", ""),
+    ("", ""),
+])
+def test_document_site(text, site):
+    assert document_site(split_lines(text)) == site

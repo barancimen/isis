@@ -28,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-from .chunker import HEADING, document_title
+from .chunker import HEADING, document_title, web_host
 from .index import Snapshot
 from .params import Group, tunable
 from .text import term_spans, tokenize, tokenize_with_surface
@@ -37,6 +37,7 @@ from .text import term_spans, tokenize, tokenize_with_surface
 # /regex/ that ends at a space or the end, a /regex still being typed, or a plain word.
 TOKEN = re.compile(r"""([-+]?)(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))""")
 PREFER, REQUIRE, NEVER = "", "+", "-"
+SITE = re.compile(r"site:(.*)", re.IGNORECASE)
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 MIN_TYPO_LENGTH, MIN_TWO_TYPOS_LENGTH = 4, 8  # letters a word needs for one typo, and for two
@@ -210,11 +211,11 @@ def phrase_pattern(phrase: str) -> re.Pattern:
 @dataclass(frozen=True)
 class Clause:
     op: str  # PREFER, REQUIRE or NEVER
-    kind: str  # "word", "phrase", "regex", or "partial" (a regex still being typed: ignored)
+    kind: str  # "word", "phrase", "regex", "site", or "partial" (a regex still being typed: ignored)
     value: str
 
     def __str__(self) -> str:
-        return self.op + {"phrase": f'"{self.value}"', "regex": f"/{self.value}/"}.get(self.kind, self.value)
+        return self.op + {"phrase": f'"{self.value}"', "regex": f"/{self.value}/", "site": f"site:{self.value}"}.get(self.kind, self.value)
 
     def stems(self) -> list[str]:
         return tokenize(self.value) if self.kind == "word" else []
@@ -242,21 +243,30 @@ def split_query(query: str) -> list[Clause]:
         elif partial is not None:
             out.append(Clause(op, "partial", partial))
         elif word and word not in (REQUIRE, NEVER):
-            out.append(Clause(op, "word", word))
+            site = SITE.fullmatch(word)
+            if not site:
+                out.append(Clause(op, "word", word))
+            elif site.group(1):
+                out.append(Clause(op, "site", site.group(1)))
+            else:
+                out.append(Clause(op, "partial", word))  # still being typed
     return out
 
 
 @dataclass
 class Filters:
-    """Hard constraints: terms and patterns a passage must contain, and ones it must not."""
+    """Hard constraints: terms and patterns a passage must contain, and ones it must not, and the
+    websites its document must come from (any of them) or must not."""
 
     required_terms: set[str] = field(default_factory=set)  # stems
     required: list[re.Pattern] = field(default_factory=list)
     excluded_terms: set[str] = field(default_factory=set)
     excluded: list[re.Pattern] = field(default_factory=list)
+    sites: set[str] = field(default_factory=set)
+    excluded_sites: set[str] = field(default_factory=set)
 
     def __bool__(self) -> bool:
-        return bool(self.requires or self.excluded_terms or self.excluded)
+        return bool(self.requires or self.excluded_terms or self.excluded or self.sites or self.excluded_sites)
 
     @property
     def requires(self) -> bool:
@@ -282,6 +292,10 @@ class Filters:
             ok &= snapshot.pattern_counts(p)[rows] > 0
         for p in self.excluded:
             ok &= snapshot.pattern_counts(p)[rows] == 0
+        if self.sites:
+            ok &= snapshot.at_sites(self.sites)[rows]
+        if self.excluded_sites:
+            ok &= ~snapshot.at_sites(self.excluded_sites)[rows]
         return ok
 
 
@@ -306,6 +320,9 @@ def steering(clauses: list[Clause]) -> Steering:
     out, text = Steering(), []
     for c in clauses:
         if c.kind == "partial":
+            continue
+        if c.kind == "site":
+            (out.filters.excluded_sites if c.op == NEVER else out.filters.sites).add(web_host(c.value))
             continue
         stems = c.stems()
         if c.op == NEVER:
@@ -490,7 +507,7 @@ def search(
     if not len(snapshot) or not query.strip():
         return []
     q = parse_query(snapshot, query)
-    if not q.term_ids and not q.patterns and not q.filters.requires and not q.unknown:
+    if not q.term_ids and not q.patterns and not q.filters.requires and not q.filters.sites and not q.unknown:
         return []  # only exclusions, or a regex still being typed: nothing to look for
     allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)
     if skip_folders:
@@ -536,7 +553,9 @@ def search(
         def why(row: int) -> dict:
             return {"bm25": float(lexical[row])}
 
-    if q.filters.requires:  # passages that match every + clause, but none of the others
+    # Passages that match every + clause but none of the others. A site only narrows what other
+    # clauses find, and on its own lists what the site has.
+    if q.filters.requires or (q.filters.sites and not q.term_ids and not q.patterns and not q.unknown):
         seen = {r for r, _ in ranked}
         ranked += [(int(r), 0.0) for r in np.flatnonzero(allowed) if r not in seen]
 
