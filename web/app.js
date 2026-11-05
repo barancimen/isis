@@ -117,11 +117,13 @@ const theme = EditorView.theme({
     backgroundPosition: "center",
     backgroundRepeat: "no-repeat",
   },
-  // Each level is well indented, and wrapped lines align under the text, not under the bullet.
-  ".cm-line.cm-li": { paddingLeft: "calc(22px + (var(--li-depth) + 1) * 1.7em)", textIndent: "-1.4em" },
-  ".cm-line.cm-li-raw": { textIndent: "0" },
+  // Each level is well indented, and wrapped lines align under the text, not under the bullet. The
+  // indent is a border and the bullet hangs by its own margin: CodeMirror takes the left edge of a
+  // highlight or selection from the padding and text-indent of the first line it draws, so a list
+  // line there must have the same ones as any other line.
+  ".cm-line.cm-li": { borderLeft: "calc((var(--li-depth) + 1) * 1.7em) solid transparent" },
   ".cm-li-marker, .cm-li-marker *": { color: "var(--muted) !important" },
-  ".cm-li-marker": { display: "inline-block", minWidth: "1.4em", textIndent: "0" },
+  ".cm-li-marker": { display: "inline-block", minWidth: "1.4em", marginLeft: "-1.4em" },
   ".cm-li-bullet": { width: "1em", minWidth: "1em", marginRight: "0.4em", textAlign: "center" }, // a bullet and its - share a centre
   ".cm-soft-break": { whiteSpace: "normal" }, // a joined line break: no stray space at the start of a wrapped line
   ".cm-hit-match": { backgroundColor: "var(--mark)", borderRadius: "2px" },
@@ -541,11 +543,19 @@ function openFind(view) {
   view.dispatch({ effects: setSearchQuery.of(findQuery(text)) });
 }
 
+// Read-only for CodeMirror and for the browser. CodeMirror ignores changes to a read-only document,
+// but the browser can still delete what it shows, such as a list bullet in Firefox, until the line is
+// drawn again. So every edit the browser is about to make is refused.
+const readOnly = [
+  EditorState.readOnly.of(true),
+  EditorView.domEventHandlers({ beforeinput: (event) => { event.preventDefault(); return true; } }),
+];
+
 function readerState(doc) {
   return EditorState.create({
     doc,
     extensions: [
-      EditorState.readOnly.of(true),
+      readOnly,
       lineNumbers(),
       drawSelection(),
       EditorView.lineWrapping,
@@ -598,7 +608,7 @@ function taskExtensions() {
 const taskState = (doc) => EditorState.create({ doc, extensions: taskExtensions() });
 const noTaskState = () => EditorState.create({
   doc: "",
-  extensions: [theme, EditorState.readOnly.of(true), placeholder("Click + at the top left to create a task.")],
+  extensions: [theme, readOnly, placeholder("Click + at the top left to create a task.")],
 });
 
 const reader = new EditorView({ parent: $("#reader-editor"), state: readerState("") });
