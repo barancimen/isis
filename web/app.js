@@ -57,6 +57,7 @@ async function api(method, url, body, options = {}) {
 const store = {
   get(key) { try { return localStorage.getItem(`isis.${key}`); } catch { return null; } },
   set(key, value) { try { localStorage.setItem(`isis.${key}`, value); } catch {} },
+  remove(key) { try { localStorage.removeItem(`isis.${key}`); } catch {} },
   // A saved JSON value; `fallback` when there is none or it can't be read.
   json(key, fallback) { try { return JSON.parse(this.get(key)) ?? fallback; } catch { return fallback; } },
 };
@@ -541,6 +542,9 @@ const state = {
   prefsFor: null, // the task that is about
   folders: [],
   readerPath: null,
+  readerSeq: 0, // the latest document asked for: a slower answer for an earlier one is dropped
+  pendingView: null, // the task view on its way to the screen
+  viewTurn: 0,
   readerScroll: store.json("reader-scroll", {}), // document path -> where its reader view was left
   openedHit: null, // the result last opened in the reader, which stays marked
   readerLocation: null, // the passage highlighted in the reader
@@ -555,7 +559,9 @@ const state = {
   likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
   searchSeq: 0,
   searchAsTyped: null, // the query to search for without correcting its spelling
-  sideScroll: null, // where the side panel was before a reload, until its results are back
+  searchTop: 0, // where the Search panel is scrolled to, for the active task
+  searchPending: false, // the task's search results aren't back yet, and then go to searchTop
+  sideScroll: null, // where the Files or Related panel was before a reload, until its content is back
   taskPlaces: {}, // task name -> { top, cursor }
   indexUpdated: null,
   pageVersion: null, // of the files this page loaded
@@ -592,10 +598,14 @@ async function loadTasks() {
   renderTaskTabs();
 }
 
-async function switchTask(name) {
+// `view`: what to show in the reader and in Search. A first task made while no task is open has
+// none, and takes over what is on show.
+async function switchTask(name, view = loadTaskView(name)) {
   if (state.task === name) return;
+  const leaving = state.task;
   if (state.task && state.docs.has(state.task)) {
     rememberTaskPlace();
+    saveTaskView();
     state.docs.get(state.task).state = taskView.state;
     await saveTask(state.task);
   }
@@ -618,6 +628,73 @@ async function switchTask(name) {
   state.relatedStale = false;
   updateRefreshButton();
   if (state.panel === "related") refreshRelated().catch(fail); // what is on show is another task's
+  if (view || leaving) await showView(view ?? {});
+}
+
+// ---------- each task's reader and search ----------
+
+// Each task has its own document in the reader and its own search. They are kept in this browser.
+const viewKey = (name) => `task-view.${name}`;
+
+function loadTaskView(name) {
+  return store.json(viewKey(name), null);
+}
+
+function saveTaskView() {
+  if (state.task) store.set(viewKey(state.task), JSON.stringify(currentView()));
+}
+
+function currentView() {
+  if (state.pendingView) return state.pendingView;
+  rememberSearchTop();
+  return {
+    reader: state.readerPath,
+    readerLocation: state.readerLocation,
+    readerTop: state.readerPath ? topPlace(reader) : 0,
+    openedHit: state.openedHit,
+    query: $("#search-input").value,
+    asTyped: state.searchAsTyped,
+    searchTop: state.searchTop,
+  };
+}
+
+async function showView(view) {
+  const turn = ++state.viewTurn;
+  state.pendingView = view;
+  state.openedHit = view.openedHit ?? null;
+  for (const card of document.querySelectorAll(".hit")) card.classList.toggle("opened", card.dataset.key === state.openedHit);
+  showViewSearch(view);
+  try {
+    if (view.reader) await openFile(view.reader, view.readerLocation ?? null, { place: view.readerTop ?? state.readerScroll[view.reader] ?? 0 });
+    else closeReader();
+  } catch {
+    if (turn === state.viewTurn) closeReader(); // the document may be gone
+  }
+  if (turn === state.viewTurn) state.pendingView = null;
+}
+
+// The results come from the server only once the panel is on show, as in Related.
+function showViewSearch(view) {
+  runSearch.cancel();
+  state.searchSeq++;
+  state.searchAsTyped = view.asTyped ?? null;
+  state.searchTop = view.searchTop ?? 0;
+  $("#search-input").value = view.query ?? "";
+  $("#search-status").textContent = "";
+  $("#search-results").replaceChildren();
+  renderPresets("search");
+  state.searchPending = Boolean($("#search-input").value.trim());
+  if (state.panel === "search" && state.searchPending) searchNow();
+}
+
+function rememberSearchTop() {
+  if (state.panel === "search" && !state.searchPending) state.searchTop = $("#panel-search").scrollTop;
+}
+
+function searchArrived() {
+  if (!state.searchPending) return;
+  state.searchPending = false;
+  if (state.panel === "search") $("#panel-search").scrollTop = state.searchTop;
 }
 
 // Each task's place, kept through a switch and a reload. An editor keeps its cursor through a
@@ -667,6 +744,9 @@ async function renameTask(name) {
   if (doc) state.docs.set(task.name, { ...doc, mtime: task.mtime });
   if (state.taskPlaces[name]) state.taskPlaces[task.name] = state.taskPlaces[name];
   delete state.taskPlaces[name];
+  const view = store.get(viewKey(name));
+  if (view) store.set(viewKey(task.name), view);
+  store.remove(viewKey(name));
   if (state.relatedFor === name) state.relatedFor = task.name;
   if (state.task === name) {
     state.task = task.name;
@@ -681,11 +761,16 @@ async function deleteTask(name) {
   await api("DELETE", `api/tasks/${enc(name)}`);
   state.docs.delete(name);
   delete state.taskPlaces[name];
+  store.remove(viewKey(name));
   await loadTasks();
   if (state.task === name) {
     state.task = null;
-    if (state.tasks.length) await switchTask(state.tasks[0].name);
-    else showNoTask();
+    if (state.tasks.length) {
+      await switchTask(state.tasks[0].name, loadTaskView(state.tasks[0].name) ?? {});
+    } else {
+      showNoTask();
+      await showView({});
+    }
   }
 }
 
@@ -840,11 +925,27 @@ function restoreReaderScroll(path) {
   reader.dispatch({ effects: scrollToPlace(place, reader.state.doc) });
 }
 
-// `location`: the passage to highlight. It is scrolled to, unless `keepScroll`: after a reload the
-// document goes back to where it was.
-async function openFile(path, location = null, { keepScroll = false } = {}) {
+function closeReader() {
+  state.readerSeq++;
+  if (state.readerPath) {
+    rememberReaderScroll();
+    reader.setState(readerState(""));
+  }
+  state.readerPath = null;
+  state.readerLocation = null;
+  $("#reader-path").textContent = "No document open";
+  $("#reader-path").title = "";
+  $("#reader-add").hidden = true;
+  markCurrentFile();
+}
+
+// `location`: the passage to highlight. It is scrolled to, unless `place` says where the document
+// goes instead: the top of a task's reader as that task left it.
+async function openFile(path, location = null, { place = null } = {}) {
+  const seq = ++state.readerSeq;
   if (path !== state.readerPath) {
     const { content } = await api("GET", `api/file?path=${enc(path)}`);
+    if (seq !== state.readerSeq) return;
     rememberReaderScroll();
     const finding = Boolean(reader.dom.querySelector(".find-panel"));
     reader.setState(readerState(content));
@@ -855,7 +956,7 @@ async function openFile(path, location = null, { keepScroll = false } = {}) {
       reader.dispatch({ effects: setSearchQuery.of(findQuery(text)) });
     }
     measureWholeDocument(reader);
-    if (!location) restoreReaderScroll(path);
+    if (!location && place === null) restoreReaderScroll(path);
     state.readerPath = path;
     $("#reader-path").textContent = path;
     $("#reader-path").title = path;
@@ -863,11 +964,11 @@ async function openFile(path, location = null, { keepScroll = false } = {}) {
     revealCurrentFile();
   }
   state.readerLocation = location;
+  const doc = reader.state.doc;
   if (!location) {
-    reader.dispatch({ effects: hitSlot.set.of(Decoration.none) });
+    reader.dispatch({ effects: [hitSlot.set.of(Decoration.none), ...(place === null ? [] : [scrollToPlace(place, doc)])] });
     return;
   }
-  const doc = reader.state.doc;
   const line = doc.line(Math.min(location.line + 1, doc.lines));
   const from = line.from + Math.min(location.ch ?? 0, line.length);
   const decos = [];
@@ -886,9 +987,8 @@ async function openFile(path, location = null, { keepScroll = false } = {}) {
   }
   reader.dispatch({
     selection: EditorSelection.cursor(from),
-    effects: [hitSlot.set.of(Decoration.set(decos, true)), ...(keepScroll ? [] : [EditorView.scrollIntoView(from, { y: "center" })])],
+    effects: [hitSlot.set.of(Decoration.set(decos, true)), place === null ? EditorView.scrollIntoView(from, { y: "center" }) : scrollToPlace(place, doc)],
   });
-  if (keepScroll) restoreReaderScroll(path);
 }
 
 // ---------- files panel ----------
@@ -1071,12 +1171,13 @@ function renderHit(hit, { lane = null } = {}) {
 
 const SEARCH_LIMIT = 50;
 
-const runSearch = debounce(async () => {
+async function searchNow() {
   const q = $("#search-input").value;
   const seq = ++state.searchSeq;
   if (!q.trim()) {
     $("#search-status").textContent = "";
     $("#search-results").replaceChildren();
+    searchArrived();
     return;
   }
   try {
@@ -1100,14 +1201,17 @@ const runSearch = debounce(async () => {
     ];
     $("#search-status").replaceChildren(...(correction || []), summary);
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
-    restoreSideScroll("search");
+    searchArrived();
   } catch (error) {
     if (seq !== state.searchSeq) return;
     if (error.status !== 400) fail(error);
     $("#search-status").textContent = error.status === 400 ? `⚠ ${error.message}` : "";
     $("#search-results").replaceChildren();
+    searchArrived();
   }
-}, 200);
+}
+
+const runSearch = debounce(searchNow, 200);
 
 // ---------- related panel ----------
 
@@ -1741,6 +1845,7 @@ async function loadParamSpecs() {
 // ---------- panels ----------
 
 function showPanel(name) {
+  rememberSearchTop();
   state.panel = name;
   store.set("panel", name);
   for (const button of document.querySelectorAll(".side-tabs button")) {
@@ -1749,7 +1854,11 @@ function showPanel(name) {
   for (const panel of ["files", "search", "related"]) $(`#panel-${panel}`).hidden = panel !== name;
   $("#related-refresh").hidden = name !== "related";
   if (name === "related" && state.task && state.relatedFor !== state.task) refreshRelated().catch(fail);
-  if (name === "search") $("#search-input").focus();
+  if (name === "search") {
+    if (state.searchPending) searchNow();
+    else $("#panel-search").scrollTop = state.searchTop;
+    $("#search-input").focus({ preventScroll: true });
+  }
 }
 
 // ---------- corpus folders ----------
@@ -1828,18 +1937,15 @@ const RESUME_KEY = "isis.resume";
 
 function saveResume() {
   rememberTaskPlace();
+  saveTaskView();
   const resume = {
-    reader: state.readerPath,
-    readerLocation: state.readerLocation,
-    openedHit: state.openedHit,
+    ...currentView(), // for the task on show, whatever another tab has saved for it since
     task: state.task,
     taskPlaces: state.taskPlaces,
     panel: state.panel,
     openFolders: [...state.openFolders],
     fileFilter: $("#file-filter").value,
-    query: $("#search-input").value,
-    asTyped: state.searchAsTyped,
-    sideScroll: $(`#panel-${state.panel}`).scrollTop,
+    sideScroll: state.panel === "search" ? null : $(`#panel-${state.panel}`).scrollTop,
   };
   try { sessionStorage.setItem(RESUME_KEY, JSON.stringify(resume)); } catch {}
 }
@@ -1857,17 +1963,6 @@ function restoreSideScroll(panel) {
   if (state.sideScroll === null || panel !== state.panel) return;
   $(`#panel-${panel}`).scrollTop = state.sideScroll;
   state.sideScroll = null;
-}
-
-async function resumeAfterReload(resume) {
-  state.openedHit = resume.openedHit ?? null;
-  if (resume.reader) await openFile(resume.reader, resume.readerLocation, { keepScroll: true }).catch(() => {}); // it may be gone: just don't open it
-  restoreSideScroll("files");
-  if (resume.query) {
-    state.searchAsTyped = resume.asTyped;
-    $("#search-input").value = resume.query;
-    $("#search-input").dispatchEvent(new Event("input"));
-  }
 }
 
 // Reloads only once every task is saved, so that no text is lost.
@@ -2008,11 +2103,14 @@ function bind() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       showPanel("search");
+      $("#panel-search").scrollTop = 0; // back to the box
     }
   });
   $("#reload-page").addEventListener("click", reloadPage);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") saveTask(state.task, { keepalive: true }).catch(() => {});
+    if (document.visibilityState !== "hidden") return;
+    saveTaskView();
+    saveTask(state.task, { keepalive: true }).catch(() => {});
   });
   window.addEventListener("beforeunload", (e) => {
     // A save still on its way counts as unsaved: closing the page could cancel it.
@@ -2043,13 +2141,17 @@ async function init() {
   await Promise.all([loadTasks(), loadFiles()]);
   const last = resume?.task ?? store.get("task");
   const name = state.tasks.find((t) => t.name === last)?.name ?? state.tasks[0]?.name;
-  if (name) await switchTask(name);
-  else showNoTask();
-  if (resume) await resumeAfterReload(resume);
+  if (name) {
+    await switchTask(name, resume?.task === name ? resume : undefined);
+  } else {
+    showNoTask();
+    if (resume) await showView(resume);
+  }
+  restoreSideScroll("files"); // opening a document scrolls the list to it
   pollStatus();
 }
 
 init().catch(fail);
 
 // Exposed for debugging and end-to-end tests.
-window.isis = { state, reader, taskView, openFile, addToTask, refreshRelated, renderPresets };
+window.isis = { state, reader, taskView, openFile, switchTask, addToTask, refreshRelated, renderPresets };
