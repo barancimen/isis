@@ -320,7 +320,7 @@ def test_the_site_can_live_under_a_path(engine, tmp_path):
         redirect = client.get("/isis", params={"a": "1"})
         assert redirect.status_code == 308 and redirect.headers["location"] == "/isis/?a=1"
         page = client.get("/isis/")
-        assert page.status_code == 200 and "<title>Tasks</title>" in page.text
+        assert page.status_code == 200 and "<title>isis</title>" in page.text
         assert "Path=/isis;" in page.headers["set-cookie"]
         assert client.get("/isis/app.js").status_code == 200
         assert client.get("/isis/api/search", params={"q": "ambergris"}).json()["hits"]
