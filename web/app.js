@@ -543,11 +543,12 @@ function openFind(view) {
   view.dispatch({ effects: setSearchQuery.of(findQuery(text)) });
 }
 
-// Read-only for CodeMirror and for the browser. CodeMirror ignores changes to a read-only document,
-// but the browser can still delete what it shows, such as a list bullet in Firefox, until the line is
-// drawn again. So every edit the browser is about to make is refused.
+// Read-only, whatever tries to change it. Not every command checks EditorState.readOnly (the markdown
+// mode's Backspace took a list marker away), so a filter refuses every change, and the browser is not
+// let to edit what it shows either. A new document comes with a new state, not as a change.
 const readOnly = [
   EditorState.readOnly.of(true),
+  EditorState.changeFilter.of(() => false),
   EditorView.domEventHandlers({ beforeinput: (event) => { event.preventDefault(); return true; } }),
 ];
 
@@ -559,7 +560,7 @@ function readerState(doc) {
       lineNumbers(),
       drawSelection(),
       EditorView.lineWrapping,
-      markdown({ extensions: envelopedBlocks }),
+      markdown({ extensions: envelopedBlocks, addKeymap: false }), // its keys edit list markup
       syntaxHighlighting(markdownStyle),
       theme,
       reflow({ editable: false }),
