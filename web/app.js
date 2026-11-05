@@ -226,8 +226,21 @@ const addedSlot = decorationSlot();
 // each line would still be rounded apart at some zoom levels. So each paragraph of the passage is
 // one element, cut to the shape of its lines: it has no inner edges to show.
 class HitBlock {
+  // The editor can give several rectangles for one row, such as either side of a joined line break.
+  // A row must be one span, or the outline crosses itself and leaves holes.
   constructor(rects) {
-    this.rects = rects.map(({ left, top, width, height }) => ({ left, top, right: left + width, bottom: top + height })).sort((a, b) => a.top - b.top);
+    this.rects = [];
+    const sorted = rects.map(({ left, top, width, height }) => ({ left, top, right: left + width, bottom: top + height })).sort((a, b) => a.top - b.top);
+    for (const rect of sorted) {
+      const row = this.rects[this.rects.length - 1];
+      if (row && rect.top < row.bottom - 1) {
+        row.left = Math.min(row.left, rect.left);
+        row.right = Math.max(row.right, rect.right);
+        row.bottom = Math.max(row.bottom, rect.bottom);
+      } else {
+        this.rects.push(rect);
+      }
+    }
   }
   eq(other) {
     return JSON.stringify(this.rects) === JSON.stringify(other.rects);
