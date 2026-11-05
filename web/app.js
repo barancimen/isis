@@ -529,13 +529,14 @@ measureWhenScrollbarPressed(taskView);
 
 // ---------- state ----------
 
+const SHARED_HIDDEN_KEY = "hidden-search";
 const MAX_HIDDEN_DOCS = 50; // the list travels in the URL, which a public server limits in length
 
 const state = {
   task: null, // active task name
   tasks: [], // [{name, mtime}]
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again, conflictMtime}
-  hiddenDocs: loadHiddenDocs(), // documents left out of Search, in this browser
+  hiddenDocs: cleanHiddenDocs(store.json(SHARED_HIDDEN_KEY, [])), // documents left out of the active task's Search
   presets: loadPresets(), // panel -> [{name, settings}]
   activePreset: { search: null, related: null }, // the preset last chosen or saved in each panel
   prefs: null, // what the task remembers, as last shown
@@ -655,6 +656,7 @@ function currentView() {
     query: $("#search-input").value,
     asTyped: state.searchAsTyped,
     searchTop: state.searchTop,
+    hiddenDocs: [...state.hiddenDocs],
   };
 }
 
@@ -679,6 +681,8 @@ function showViewSearch(view) {
   state.searchSeq++;
   state.searchAsTyped = view.asTyped ?? null;
   state.searchTop = view.searchTop ?? 0;
+  state.hiddenDocs = cleanHiddenDocs(view.hiddenDocs);
+  renderHiddenDocs();
   $("#search-input").value = view.query ?? "";
   $("#search-status").textContent = "";
   $("#search-results").replaceChildren();
@@ -1155,7 +1159,7 @@ function renderHit(hit, { lane = null } = {}) {
     }, "↑"),
     lane && h("button", { title: "Remove this result. The app does not show this passage again for this task.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
     lane && h("button", { class: "avoid", title: "Remove this result and all passages near it in meaning, for this task. The slider \"How near for ⊘\" in Adjustments sets how near.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
-    !lane && h("button", { class: "exclude-doc", title: `Hide everything from ${hit.path} in Search. You can bring it back under Hidden documents. Related has its own list.`, onclick: () => hideSearchDoc(hit.path) }, "⊠"),
+    !lane && h("button", { class: "exclude-doc", title: `Hide everything from ${hit.path} in Search, for this task. You can bring it back under Hidden documents.`, onclick: () => hideSearchDoc(hit.path) }, "⊠"),
     lane && h("button", { class: "exclude-doc", title: `Remove all passages from this document, for this task. The document is ${hit.path}. Search can find its passages.`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
@@ -1416,15 +1420,25 @@ async function likeHit(hit, lane) {
 
 // They are a setting of Search, kept in this browser, because a search needs no task. Related keeps
 // its own list for each task.
-function loadHiddenDocs() {
-  const saved = store.json("hidden-search", []);
-  return new Set(Array.isArray(saved) ? saved.filter((path) => typeof path === "string").slice(0, MAX_HIDDEN_DOCS) : []);
+function cleanHiddenDocs(paths) {
+  return new Set(Array.isArray(paths) ? paths.filter((path) => typeof path === "string").slice(0, MAX_HIDDEN_DOCS) : []);
 }
 
 function setHiddenDocs(paths) {
   state.hiddenDocs = new Set(paths);
-  store.set("hidden-search", JSON.stringify([...state.hiddenDocs]));
+  saveTaskView();
   renderHiddenDocs();
+}
+
+// The list used to be one for all tasks: every task that exists then keeps it as its own.
+function shareOutHiddenDocs() {
+  const shared = store.json(SHARED_HIDDEN_KEY, null);
+  if (!shared || !state.tasks.length) return;
+  for (const { name } of state.tasks) {
+    const view = loadTaskView(name) ?? {};
+    if (!view.hiddenDocs) store.set(viewKey(name), JSON.stringify({ ...view, hiddenDocs: shared }));
+  }
+  store.remove(SHARED_HIDDEN_KEY);
 }
 
 function hideSearchDoc(path) {
@@ -1449,7 +1463,7 @@ function renderHiddenDocs() {
   const paths = [...state.hiddenDocs].sort();
   drawer.hidden = !paths.length;
   drawer.replaceChildren(
-    sectionHead("Hidden documents", "Documents you've hidden from Search. This browser remembers them.",
+    sectionHead("Hidden documents", "Documents you've hidden from Search for this task. This browser remembers them.",
       h("button", { class: "tune-reset", type: "button", title: "Bring back every hidden document.", onclick: () => {
         setHiddenDocs([]);
         settingChanged("search");
@@ -2139,10 +2153,11 @@ async function init() {
   }
   showPanel(resume?.panel || store.get("panel") || "search");
   await Promise.all([loadTasks(), loadFiles()]);
+  shareOutHiddenDocs();
   const last = resume?.task ?? store.get("task");
   const name = state.tasks.find((t) => t.name === last)?.name ?? state.tasks[0]?.name;
   if (name) {
-    await switchTask(name, resume?.task === name ? resume : undefined);
+    await switchTask(name, resume?.task === name ? { ...loadTaskView(name), ...resume } : undefined);
   } else {
     showNoTask();
     if (resume) await showView(resume);
