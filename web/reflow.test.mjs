@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { enterInList, envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
 
 test("hard-wrapped paragraphs flow", () => {
   const lines = ["What the white whale was to Ahab, has been", "hinted; what, at times, he", "was to me.", "", "Next paragraph."];
@@ -120,4 +120,9 @@ test("numbers below a new item move up, at that level only", () => {
   assert.equal(prefix, "2. ");
   assert.deepEqual(renumber.map((r) => [r.line, r.text]), [[1, "3."], [3, "4."]]);
   assert.equal(enterInList(["1) a", "2) b"], 1, 4).prefix, "3) ");
+});
+
+test("code, headings and table rows are not prose", () => {
+  const lines = ["# Title", "Some text", "```", "code", "```", "    indented", "| a | b |", "- item", "    more of the item", "End"];
+  assert.deepEqual(linesNotProse(lines, new Set([7, 8])), [0, 2, 3, 4, 5, 6]);
 });

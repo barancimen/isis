@@ -218,7 +218,7 @@ code { font-family: inherit; font-size: 0.92em; }
 .hit-actions .like[aria-pressed="true"] { background: var(--panel-2); border-color: var(--fg); font-weight: 700; }
 .hit-loc { color: var(--faint); font-size: 12.5px; }
 .hit-body { margin-top: 4px; font-size: 14px; }
-.hit-body p { margin: 0 0 4px; overflow-wrap: anywhere; }
+.hit-body p { margin: 0 0 4px; overflow-wrap: anywhere; text-align: justify; }
 .hit-body .line.ctx { color: var(--faint); }
 .hit-body mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .hit-why { color: var(--faint); font-size: 12px; margin-top: 4px; }

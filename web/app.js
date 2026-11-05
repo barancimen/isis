@@ -7,7 +7,7 @@ import {
 } from "./vendor/codemirror.js";
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { planInsertion } from "./insert.js";
-import { enterInList, envelopeAt, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
 
 // ---------- helpers ----------
 
@@ -94,7 +94,8 @@ const theme = EditorView.theme({
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "var(--font)", lineHeight: "1.65", overflowY: "scroll" },
   ".cm-content": { padding: "18px 0 50vh", maxWidth: "44em", caretColor: "var(--fg)" },
-  ".cm-line": { padding: "0 22px" },
+  ".cm-line": { padding: "0 22px", textAlign: "justify" },
+  ".cm-line.cm-not-prose, .cm-line.cm-env-meta": { textAlign: "left" },
   ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--faint)", border: "none", fontSize: "12px" },
   ".cm-cursor": { borderLeftColor: "var(--fg)", borderLeftWidth: "2px" },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selection) !important" },
@@ -356,6 +357,8 @@ function typedBreaksAfter(breaks, tr) {
   return kept;
 }
 
+const notProse = Decoration.line({ class: "cm-not-prose" });
+
 function reflow({ editable }) {
   const build = (state, focused, typedBreaks) => {
     const lines = state.doc.toJSON();
@@ -390,6 +393,7 @@ function reflow({ editable }) {
       decos.push(Decoration.line({ class: "cm-li cm-li-raw", attributes: { style: `--li-depth: ${depth}` } }).range(line.from));
       if (indent) decos.push(hidden.range(line.from, line.from + indent));
     }
+    for (const i of linesNotProse(lines, inList)) decos.push(notProse.range(state.doc.line(i + 1).from));
     const { envelopes, rules } = structure(lines);
     for (const { open, close, meta } of envelopes) {
       for (let i = open; i <= close; i++) {
@@ -1160,10 +1164,40 @@ const LIKE_TITLE = "Show more passages like this one, in meaning and in words. T
 
 // Snippet lines flow as prose (hard-wrapped text would otherwise wrap twice in a narrow
 // panel); blank lines start a new paragraph. Context lines around the passage are dimmed.
+// The dimmed text around a passage, at most this long on each side. It is counted in characters
+// because a line can be a whole paragraph, in a document with no line breaks of its own.
+const CONTEXT_CHARS = 90;
+
+// What is left of the lines on one side of a passage, nearest first. `cut` keeps the part of a line
+// nearest the passage. A line with a highlight, such as a heading that holds the match, stays whole.
+function trimContext(lines, cut) {
+  let room = CONTEXT_CHARS;
+  const kept = [];
+  for (const line of lines) {
+    if (line.marks.length || !line.text.trim()) {
+      kept.push(line);
+    } else if (room > 0) {
+      const fits = line.text.length <= room;
+      kept.push(fits ? line : { ...line, text: cut(line.text, room) });
+      room = fits ? room - line.text.length : 0;
+    }
+  }
+  return kept;
+}
+
+function shortenedSnippet(snippet) {
+  const first = snippet.findIndex((line) => line.in_passage);
+  if (first < 0) return snippet;
+  const last = snippet.findLastIndex((line) => line.in_passage);
+  const before = trimContext(snippet.slice(0, first).reverse(), (text, room) => `…${text.slice(-room).replace(/^\S*\s+/, " ")}`);
+  const after = trimContext(snippet.slice(last + 1), (text, room) => `${text.slice(0, room).replace(/\s+\S*$/, " ")}…`);
+  return [...before.reverse(), ...snippet.slice(first, last + 1), ...after];
+}
+
 function renderSnippet(hit) {
   const body = h("div", { class: "hit-body" });
   let para = null;
-  for (const line of hit.snippet) {
+  for (const line of shortenedSnippet(hit.snippet)) {
     if (!line.text.trim()) {
       para = null;
       continue;
@@ -1293,7 +1327,7 @@ async function searchNow() {
     const n = result.hits.length;
     const byMeaning = result.hits.some((hit) => "meaning_rank" in hit.why);
     const how = !byMeaning ? "" : result.hits.some((hit) => hit.why.keyword_rank) ? " by keywords and meaning" : " by meaning only";
-    const summary = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} passages${how} · ${result.ms} ms` : "No passages found.";
+    const summary = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} ${n === 1 ? "passage" : "passages"}${how} · ${result.ms} ms` : "No passages found.";
     const correction = result.corrected && [
       "Showing results for ",
       h("strong", {}, result.corrected),

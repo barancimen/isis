@@ -33,6 +33,19 @@ export function envelopeAt(lines, i) {
 }
 
 // The enveloped blocks of a document, and the other lines that are horizontal rules.
+// The lines that aren't running text: fenced or indented code, headings and table rows. `inList` says
+// which lines belong to a list, where an indent is only the level of the item.
+export function linesNotProse(lines, inList = new Set()) {
+  const found = [];
+  let fence = false;
+  lines.forEach((line, i) => {
+    const isFence = FENCE.test(line);
+    if (isFence) fence = !fence;
+    if (isFence || fence || /^(#{1,6}(\s|$)|\|)/.test(line) || (/^( {4}|\t)/.test(line) && !inList.has(i))) found.push(i);
+  });
+  return found;
+}
+
 export function structure(lines) {
   const envelopes = [];
   const rules = [];
