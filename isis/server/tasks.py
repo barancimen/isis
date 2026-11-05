@@ -1,6 +1,6 @@
 """Task documents: one markdown file each in the tasks folder, plus a small JSON file of
 preferences (the steer line, ignored keywords, dismissed passages, feedback per lane) in `.meta/`.
-Deleted tasks are moved to `.trash/`, not removed."""
+Deleted tasks are moved to `.trash/`, not removed. `.order.json` keeps the order of the list."""
 
 from __future__ import annotations
 
@@ -65,6 +65,7 @@ class TaskStore:
             self.folder.mkdir(parents=True, exist_ok=True)
         self.meta = self.folder / ".meta"
         self.trash = self.folder / ".trash"
+        self.order = self.folder / ".order.json"
         self._lock = threading.RLock()  # held while a task or its preferences are read, changed and saved
         self._unnamed: set[str] = set()
 
@@ -91,9 +92,30 @@ class TaskStore:
         except TaskError:
             return False
 
+    def _saved_order(self) -> list[str]:
+        try:
+            names = json.loads(self.order.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+
+    def _save_order(self, names: list[str]) -> None:
+        try:
+            if names:
+                _replace(self.order, json.dumps(names, ensure_ascii=False))
+            else:
+                self.order.unlink(missing_ok=True)
+        except OSError as e:  # the task itself is fine: only its place in the list is lost
+            log.warning("cannot save the order of the tasks: %s", e)
+
+    def _names(self) -> list[str]:
+        return [task["name"] for task in self.list()]
+
     def list(self) -> list[dict]:
+        """In the saved order. Files that it doesn't name, such as ones made by hand, follow by name."""
+        place = {name: n for n, name in enumerate(self._saved_order())}
         out = []
-        for p in sorted(self.folder.glob("*.md"), key=lambda p: p.stem.lower()):
+        for p in sorted(self.folder.glob("*.md"), key=lambda p: (place.get(p.stem, len(place)), p.stem.lower())):
             try:
                 if not self._addressable(p.stem):
                     if p.name not in self._unnamed:
@@ -111,7 +133,9 @@ class TaskStore:
             path = self._path(name)
             if path.exists():
                 raise TaskError(f"a task named {path.stem!r} already exists", 409)
+            names = self._names()
             path.write_text("", encoding="utf-8")
+            self._save_order([*names, path.stem])
             return self.read(path.stem)
 
     def read(self, name: str) -> dict:
@@ -144,7 +168,9 @@ class TaskStore:
             path, target = self._existing(name), self._path(new_name)
             if target.exists() and target != path:
                 raise TaskError(f"a task named {target.stem!r} already exists", 409)
+            names = self._names()
             path.rename(target)
+            self._save_order([target.stem if n == path.stem else n for n in names])
             meta = self._meta_path(path.stem)
             if meta.exists():
                 meta.rename(self._meta_path(target.stem))
@@ -158,6 +184,7 @@ class TaskStore:
             meta = self._meta_path(path.stem)
             if meta.exists():
                 self._to_trash(meta, f"{path.stem}.{stamp}.json")
+            self._save_order(self._names())
 
     def _to_trash(self, path: Path, name: str) -> Path:
         self.trash.mkdir(exist_ok=True)

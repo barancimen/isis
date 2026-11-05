@@ -137,7 +137,8 @@ class VisitorStore(TaskStore):
         self.limits = workspaces.limits
 
     def used(self) -> int:
-        return sum(p.stat().st_size for p in self.folder.rglob("*") if p.is_file())
+        # The order of the list is bookkeeping, and small: it shouldn't cost anyone a save.
+        return sum(p.stat().st_size for p in self.folder.rglob("*") if p.is_file() and p != self.order)
 
     def create(self, name: str) -> dict:
         self.clean(name)

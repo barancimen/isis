@@ -55,6 +55,31 @@ def test_task_lifecycle(client, corpus):
     assert len(list((corpus / "_tasks" / ".trash").glob("Cetology.*.md"))) == 1
 
 
+def test_new_tasks_go_at_the_end_of_the_list(client, corpus):
+    names = lambda: [t["name"] for t in client.get("/api/tasks").json()]
+    (corpus / "_tasks").mkdir(exist_ok=True)
+    for name in ("b", "a"):
+        (corpus / "_tasks" / f"{name}.md").write_text("")
+    assert names() == ["a", "b"]  # files with no saved order go by name
+
+    for name in ("z", "c"):
+        client.post("/api/tasks", json={"name": name})
+    assert names() == ["a", "b", "z", "c"]
+
+    client.post("/api/tasks/b/rename", json={"new_name": "y"})
+    assert names() == ["a", "y", "z", "c"]
+
+    client.delete("/api/tasks/y")
+    (corpus / "_tasks" / "by hand.md").write_text("")
+    assert names() == ["a", "z", "c", "by hand"]
+
+    client.post("/api/tasks", json={"name": "y"})  # a new task, not the old one back in its place
+    assert names() == ["a", "z", "c", "by hand", "y"]
+
+    (corpus / "_tasks" / ".order.json").write_text("not json")
+    assert names() == sorted(names(), key=str.lower)
+
+
 def test_names_cannot_escape_the_tasks_folder(client, corpus):
     name = client.post("/api/tasks", json={"name": "../../evil"}).json()["name"]
     assert (corpus / "_tasks" / f"{name}.md").exists() and "/" not in name
