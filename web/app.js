@@ -1,6 +1,6 @@
 import {
   EditorState, EditorSelection, StateField, StateEffect, Prec,
-  EditorView, Decoration, WidgetType, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers,
+  EditorView, Decoration, WidgetType, keymap, placeholder, drawSelection, highlightActiveLine, lineNumbers, layer, RectangleMarker,
   history, defaultKeymap, historyKeymap, indentWithTab,
   syntaxHighlighting, HighlightStyle, markdown, tags,
   search, SearchQuery, setSearchQuery, findNext, findPrevious, openSearchPanel, closeSearchPanel,
@@ -100,7 +100,8 @@ const theme = EditorView.theme({
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selection) !important" },
   ".cm-activeLine": { backgroundColor: "var(--active-line)" },
   ".cm-placeholder": { color: "var(--faint)", fontStyle: "italic" },
-  ".cm-hit-range": { backgroundColor: "var(--hit-line)" },
+  ".cm-hit-layer": { zIndex: -1 },
+  ".cm-hit-fill": { backgroundColor: "var(--hit-line)" },
   ".cm-env": { backgroundColor: "var(--panel)", boxShadow: "inset 3px 0 0 var(--border)" },
   // The selection is drawn under the lines, so this background would hide it. Here the browser's own
   // highlight shows instead, which the editor otherwise turns off.
@@ -218,6 +219,67 @@ function measureWhenScrollbarPressed(view) {
 
 const hitSlot = decorationSlot();
 const addedSlot = decorationSlot();
+
+// The color behind a highlighted passage. A color set on the text itself covers only the height of
+// the font, whatever that is on this computer, so lines would have gaps or overlap. Rectangles for
+// each line would still be rounded apart at some zoom levels. So each paragraph of the passage is
+// one element, cut to the shape of its lines: it has no inner edges to show.
+class HitBlock {
+  constructor(rects) {
+    this.rects = rects.map(({ left, top, width, height }) => ({ left, top, right: left + width, bottom: top + height })).sort((a, b) => a.top - b.top);
+  }
+  eq(other) {
+    return JSON.stringify(this.rects) === JSON.stringify(other.rects);
+  }
+  draw() {
+    const element = document.createElement("div");
+    element.className = "cm-hit-fill";
+    this.place(element);
+    return element;
+  }
+  update(element) {
+    this.place(element);
+    return true;
+  }
+  place(element) {
+    const left = Math.min(...this.rects.map((r) => r.left)), right = Math.max(...this.rects.map((r) => r.right));
+    const top = this.rects[0].top, bottom = Math.max(...this.rects.map((r) => r.bottom));
+    const point = (x, y) => `${x - left}px ${y - top}px`;
+    const rightEdge = this.rects.flatMap((r) => [point(r.right, r.top), point(r.right, r.bottom)]);
+    const leftEdge = [...this.rects].reverse().flatMap((r) => [point(r.left, r.bottom), point(r.left, r.top)]);
+    Object.assign(element.style, { left: `${left}px`, top: `${top}px`, width: `${right - left}px`, height: `${bottom - top}px`, clipPath: `polygon(${[...rightEdge, ...leftEdge].join(",")})` });
+  }
+}
+
+const hitFill = layer({
+  above: false,
+  class: "cm-hit-layer",
+  update: (u) => u.docChanged || u.viewportChanged || u.geometryChanged || u.startState.field(hitSlot.field) !== u.state.field(hitSlot.field),
+  markers(view) {
+    const { doc } = view.state;
+    const found = view.state.field(hitSlot.field).iter();
+    while (found.value && found.value.spec.class !== "cm-hit-range") found.next();
+    if (!found.value) return [];
+    const markers = [];
+    const draw = (from, to) => {
+      const rects = RectangleMarker.forRange(view, "cm-hit-fill", EditorSelection.range(from, to));
+      if (rects.length) markers.push(new HitBlock(rects));
+    };
+    let start = null, end = null;
+    for (let n = doc.lineAt(found.from).number; n <= doc.lineAt(found.to).number; n++) {
+      const line = doc.line(n);
+      if (line.text.trim()) {
+        start ??= Math.max(line.from, found.from);
+        end = Math.min(line.to, found.to);
+      } else if (start !== null) {
+        draw(start, end);
+        start = null;
+      }
+    }
+    if (start !== null) draw(start, end);
+    return markers;
+  },
+});
 
 // Hard-wrapped paragraphs flow to the width of the pane: their line breaks show as spaces (see
 // reflow.js). In the task editor a break typed with Enter shows as a real line until the editor
@@ -476,6 +538,7 @@ function readerState(doc) {
       reflow({ editable: false }),
       findInPane("Find in this document"),
       hitSlot.field,
+      hitFill,
       placeholder("Open a document from Files or click a search result."),
       keymap.of([{
         key: "Mod-Enter",
