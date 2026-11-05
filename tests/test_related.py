@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from isis.engine.index import Engine
-from isis.engine.related import LANES, RelatedConfig, TaskPrefs, allocate_slots, passage_id, task_units
+from isis.engine.related import EMPTY_NOTE, LANES, RelatedConfig, TaskPrefs, allocate_slots, passage_id, task_units
 from isis.engine.semantic import HashEmbedder
 
 TOPICS = {
@@ -164,7 +164,7 @@ def test_bridges_link_two_themes(engine):
 
 def test_single_theme_tasks_explain_missing_lanes(engine):
     lanes = {l.name: l for l in engine.related("Whale harpoon ship captain sail.").lanes}
-    assert "two or more topics" in lanes["bridges"].note and not lanes["bridges"].items
+    assert lanes["bridges"].note and lanes["bridges"].note != EMPTY_NOTE["bridges"] and not lanes["bridges"].items
 
 
 def test_the_whole_document_is_the_query(engine):

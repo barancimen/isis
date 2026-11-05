@@ -54,198 +54,198 @@ THEME_BATCH = 32  # paragraphs scored at a time, which bounds the memory a large
 
 LANES = ("core", "hidden", "bridges", "gaps")
 LANE_INFO = {
-    "core": ("Best results", "These passages agree with your task in words and in meaning."),
-    "hidden": ("Same meaning, different words", "These passages are near your task in meaning, but they use a small number of its keywords."),
-    "bridges": ("Connections between topics", "These passages are related to two topics in your task. These two topics do not usually occur together."),
-    "gaps": ("Small topics", "These passages are related to topics in your task that have a small number of collected passages."),
+    "core": ("Best results", "These passages match your task in both words and meaning."),
+    "hidden": ("Same meaning, different words", "These passages are close to your task in meaning but use few of its keywords."),
+    "bridges": ("Connections between topics", "These passages touch on two topics in your task that don't usually appear together."),
+    "gaps": ("Small topics", "These passages relate to topics in your task where you've collected little so far."),
 }
 EMPTY_NOTE = {
-    "core": "The app did not find passages that are clearly related to your task.",
-    "hidden": "The app did not find passages that are near your task in meaning and use different words.",
-    "bridges": "The app did not find passages that are clearly related to two topics in your task.",
-    "gaps": "The app did not find passages for the small topics in your task.",
+    "core": "No passages are clearly related to your task.",
+    "hidden": "No passages are close to your task in meaning while using different words.",
+    "bridges": "No passages are clearly related to two topics in your task.",
+    "gaps": "No passages found for the small topics in your task.",
 }
 
-QUERY = Group("How the app reads your task", "The app reads your task. Then it finds passages that are near your task in words and in meaning.")
-KEYWORDS = Group("Keyword score", "The keyword score shows how much the words in a passage agree with the keywords of your task.")
+QUERY = Group("How your task is read", "Related reads your task, then finds passages close to it in words and in meaning.")
+KEYWORDS = Group("Keyword score", "How well the words in a passage match your task's keywords.")
 FILTER = Group(
-    "Which passages can show",
-    "The app shows a passage only if the passage goes through this filter. " + "The meaning score shows how near a passage is to your task in meaning. A typical passage in your documents has a score of 0. A score of 3 is far above the typical passage.",
+    "Which passages can appear",
+    "A passage appears only if it passes this filter. " + "The meaning score shows how close a passage is to your task in meaning. A typical passage in your documents scores 0. A score of 3 is far above typical.",
 )
 LANES_GROUP = Group(
     "Result groups",
-    "The app divides the results into four groups. Each group shows a different type of relation to your task. "
-    "A topic is a group of paragraphs in your task that are near each other in meaning.",
+    "Results are sorted into four groups, each related to your task in a different way. "
+    "A topic is a set of paragraphs in your task that are close in meaning.",
 )
-SELECTION = Group("Result list", "These sliders set how many results you see, and how different the results are from each other.")
+SELECTION = Group("Result list", "How many results you see and how much they differ from each other.")
 
 
 @dataclass
 class RelatedConfig:
     query: str = tunable(
         "document", label="Compare passages with", group=QUERY, choices={"document": "All of the task", "paragraphs": "Each paragraph"},
-        help="This list sets how the app compares passages with your task.\n"
-        "With \"All of the task\", the app uses the task as one text. A passage must agree with all of the task.\n"
-        "With \"Each paragraph\", the app compares a passage with each paragraph and uses the nearest paragraph. "
-        "It is sufficient if a passage is near one paragraph.",
+        help="How passages are compared with your task.\n"
+        "\"All of the task\" treats the task as one text, so a passage has to fit all of it.\n"
+        "\"Each paragraph\" compares a passage with every paragraph and uses the closest. "
+        "A passage only has to be close to one paragraph.",
     )
     n_query_terms: int = tunable(
         30, label="Keywords to use", group=QUERY, min=1, max=60, step=1,
-        help="This slider sets how many keywords the app gets from your task. "
-        "The app uses the words that occur frequently in your task and not frequently in your other documents.\n"
-        "With a higher value, the app uses more words. The results can be about more topics.\n"
-        "With a lower value, the app uses only the most unusual words.",
+        help="How many keywords are taken from your task. "
+        "These are words common in your task but not in your other documents.\n"
+        "Raise it to use more words, so results can cover more topics.\n"
+        "Lower it to use only the most distinctive words.",
     )
     excerpt_weight: float = tunable(
         0.5, label="How important collected passages are", group=QUERY, min=0.0, max=3.0, step=0.1,
-        help="This slider sets how much the passages that you added to your task count, when compared with your notes.\n"
+        help="How much the passages you've added to your task count, compared with your notes.\n"
         "At 1, they count the same as your notes.\n"
-        "With a higher value, results are nearer to the passages that you collected.\n"
-        "With a lower value, results are nearer to your notes. At 0, the app does not use the collected passages.",
+        "Raise it to move results closer to the passages you've collected.\n"
+        "Lower it to move results closer to your notes. At 0, collected passages aren't used.",
     )
     like_weight: float = tunable(
         1.0, label="How strong ↑ is", group=QUERY, min=0.0, max=3.0, step=0.1,
-        help="When you select ↑ on a result, the app looks for more passages near that result. "
-        "This slider sets how strong that effect is, in meaning and in keywords.\n"
+        help="When you click ↑ on a result, Related looks for more passages like it. "
+        "This sets how strong that pull is, in meaning and in keywords.\n"
         "At 1, each passage with ↑ counts the same as all of your task.\n"
-        "With a higher value, the results move nearer to the passages with ↑.\n"
-        "With a lower value, the results stay nearer to your task. At 0, ↑ has no effect.",
+        "Raise it to move results closer to the passages with ↑.\n"
+        "Lower it to keep results closer to your task. At 0, ↑ has no effect.",
     )
     bm25_k1: float = tunable(
         1.2, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
-        help="This slider sets how much a word adds to the score when it occurs many times in a passage.\n"
-        "With a higher value, passages that use a keyword many times rank higher.\n"
-        "With a lower value, more uses of a word add less to the score. At 0, a word that occurs one time counts the same as a word that occurs many times.",
+        help="How much a word adds to the score when it appears many times in a passage.\n"
+        "Raise it to rank passages that repeat a keyword higher.\n"
+        "Lower it and repeats count for less. At 0, one use counts the same as many.",
     )
     bm25_b: float = tunable(
         0.35, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
-        help="Long passages contain more words. Thus they can get a high score only because of their length. "
-        "This slider sets how much the score of a long passage decreases.\n"
-        "With a higher value, short passages rank higher. At 1, the app makes the full correction for length.\n"
-        "With a lower value, long passages rank higher. At 0, length has no effect.",
+        help="Long passages contain more words, so they can score well just because of their length. "
+        "This sets how much a long passage's score is reduced.\n"
+        "Raise it to rank short passages higher. At 1, length is fully corrected for.\n"
+        "Lower it to rank long passages higher. At 0, length has no effect.",
     )
     candidates: int = tunable(
         300, label="Passages to examine", group=FILTER, min=20, max=2000, step=10,
-        help="The app makes one list by keywords and one list by meaning. "
-        "This slider sets how many top passages from each list go to the filter.\n"
-        "With a higher value, the app can find more passages, but it can operate more slowly.\n"
-        "With a lower value, the app operates more quickly, but it can find a smaller number of passages.",
+        help="Related makes one list by keywords and one by meaning. "
+        "This sets how many top passages from each list reach the filter.\n"
+        "Raise it to find more passages, at the cost of speed.\n"
+        "Lower it for faster results but fewer passages found.",
     )
     z_strong: float = tunable(
-        3.25, label="Meaning score only", group=FILTER, min=0.0, max=5.0, step=0.1,
-        help="A passage with this meaning score or more goes through the filter. It does not have to be a top keyword result.\n"
-        "With a higher value, you get a smaller number of results, and they are more clearly related.\n"
-        "With a lower value, you get more results, but some are less clearly related.",
+        3.25, label="Meaning score alone", group=FILTER, min=0.0, max=5.0, step=0.1,
+        help="A passage with this meaning score or higher passes the filter, even if it isn't a top keyword result.\n"
+        "Raise it for fewer results that are more clearly related.\n"
+        "Lower it for more results, though some are less clearly related.",
     )
     z_weak: float = tunable(
         1.75, label="Meaning score with keywords", group=FILTER, min=-1.0, max=4.0, step=0.1,
-        help="A top keyword result with this meaning score or more goes through the filter. "
-        "The slider \"Top keyword ranks\" sets which passages are top keyword results.\n"
-        "With a higher value, a keyword result must also be nearer in meaning. You get a smaller number of results.\n"
-        "With a lower value, more keyword results go through, also if their meaning is less near to your task.",
+        help="A top keyword result with this meaning score or higher passes the filter. "
+        "\"Top keyword ranks\" sets which passages count as top keyword results.\n"
+        "Raise it so keyword results must also be closer in meaning, which gives fewer results.\n"
+        "Lower it to let more keyword results through, even if they're less close in meaning.",
     )
     lexical_top: int = tunable(
         50, label="Top keyword ranks", group=FILTER, min=0, max=300, step=1,
-        help="This slider sets how many of the best keyword results are top keyword results. "
-        "A top keyword result goes through the filter with the lower meaning score. A passage with no meaning data goes through if it is a top keyword result.\n"
-        "With a higher value, more passages get the lower limit. You can get more results.\n"
-        "With a lower value, a smaller number of passages get the lower limit. At 0, no passage gets it.",
+        help="How many of the best keyword results count as top keyword results. "
+        "These pass the filter with the lower meaning score. A passage with no meaning data passes only if it's one of them.\n"
+        "Raise it to give more passages the lower limit, which can mean more results.\n"
+        "Lower it to give fewer passages the lower limit. At 0, none get it.",
     )
     duplicate_cos: float = tunable(
-        0.95, label="Same text limit", group=FILTER, min=0.7, max=1.0, step=0.01,
-        help="If a passage is this near to a paragraph in your task, the app does not show it. "
-        "The app thinks that your task contains this text.\n"
-        "With a higher value, the app removes only passages that are almost the same as your text. At 1, they must be equal in meaning.\n"
-        "With a lower value, the app also removes passages that are less near to your text.",
+        0.95, label="Duplicate limit", group=FILTER, min=0.7, max=1.0, step=0.01,
+        help="A passage this close to a paragraph in your task is hidden, "
+        "because your task probably already contains that text.\n"
+        "Raise it to hide only near-identical passages. At 1, they must match exactly in meaning.\n"
+        "Lower it to also hide passages that are less close to your text.",
     )
     negative_weight: float = tunable(
         0.0, label="Effect of removed passages", group=FILTER, min=0.0, max=2.0, step=0.1,
-        help="This slider sets how much lower a passage ranks when it is near a passage that you removed.\n"
-        "With a higher value, passages near removed passages rank much lower.\n"
-        "At 0, removed passages have no effect on other passages. This is the default value, "
-        "because a passage that you remove is usually related to your task. "
-        "Tests showed that this effect also moves good results down.",
+        help="How much lower a passage ranks when it's close to one you removed.\n"
+        "Raise it to push those passages much lower.\n"
+        "At 0, removed passages don't affect others. That's the default, "
+        "because a passage you remove is usually still related to your task. "
+        "In tests, this also pushed good results down.",
     )
     avoid_z: float = tunable(
         3.5, label="How near for ⊘", group=FILTER, min=0.5, max=6.0, step=0.1,
-        help="When you select ⊘ on a result, the app removes that result and the passages near it in meaning. "
-        "This slider sets how near a passage must be. The value is a meaning score, measured from the removed passage.\n"
-        "With a higher value, the app removes only the nearest passages.\n"
-        "With a lower value, the app removes more passages.",
+        help="When you click ⊘ on a result, it's removed along with passages close to it in meaning. "
+        "This sets how close they must be, as a meaning score measured from the removed passage.\n"
+        "Raise it to remove only the closest passages.\n"
+        "Lower it to remove more passages.",
     )
     rrf_k: int = tunable(
-        30, label="Good rank in the two lists (Best results)", group=LANES_GROUP, min=1, max=100, step=1,
-        help="The group \"Best results\" mixes the keyword rank and the meaning rank of each passage.\n"
-        "With a higher value, passages with a good rank in the two lists come first.\n"
-        "With a lower value, the top passages of each list come first, also if they have a bad rank in the other list.",
+        30, label="Good rank in both lists (Best results)", group=LANES_GROUP, min=1, max=100, step=1,
+        help="\"Best results\" mixes each passage's keyword rank and meaning rank.\n"
+        "Raise it to put passages that rank well in both lists first.\n"
+        "Lower it to put the top passages of each list first, even if they rank badly in the other.",
     )
     unembedded_weight: float = tunable(
         1.0, label="No meaning data (Best results)", group=LANES_GROUP, min=0.0, max=3.0, step=0.1,
-        help="The app can have no meaning data for some passages. These passages have no meaning rank. "
-        "The app uses their keyword rank value as their meaning rank, multiplied by this number.\n"
-        "With a higher value, these passages rank higher.\n"
-        "With a lower value, these passages rank lower. At 0, only their keyword rank counts.",
+        help="Some passages may have no meaning data, so they have no meaning rank. "
+        "Their keyword rank stands in for it, multiplied by this number.\n"
+        "Raise it to rank these passages higher.\n"
+        "Lower it to rank them lower. At 0, only their keyword rank counts.",
     )
     hidden_z: float = tunable(
         2.5, label="Meaning score (Same meaning, different words)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
-        help="A passage must have this meaning score or more to go into the group \"Same meaning, different words\".\n"
-        "With a higher value, this group contains a smaller number of passages, and they are nearer in meaning.\n"
-        "With a lower value, this group can contain more passages.",
+        help="The meaning score a passage needs to join \"Same meaning, different words\".\n"
+        "Raise it for fewer passages that are closer in meaning.\n"
+        "Lower it to let more passages in.",
     )
     hidden_max_obviousness: float = tunable(
         0.3, label="Keyword limit (Same meaning, different words)", group=LANES_GROUP, min=0.0, max=1.0, step=0.05,
-        help="This slider sets the maximum keyword score for the group \"Same meaning, different words\". "
-        "The value is a part of the score of the best keyword result. For example, 0.3 is 30% of that score.\n"
-        "With a higher value, passages in this group can contain more words from your task.\n"
-        "With a lower value, passages in this group must use more different words.",
+        help="The highest keyword score a passage can have and still join \"Same meaning, different words\". "
+        "It's a share of the best keyword result's score, so 0.3 means 30%.\n"
+        "Raise it to allow more words from your task in this group.\n"
+        "Lower it to require more different wording.",
     )
     bridge_z: float = tunable(
         1.5, label="Meaning score (Connections between topics)", group=LANES_GROUP, min=0.0, max=4.0, step=0.1,
-        help="A passage must have this meaning score or more for two topics to go into the group \"Connections between topics\". "
-        "A passage with this score also goes through the filter.\n"
-        "With a higher value, a smaller number of passages go into this group, and they are more clearly related to the two topics.\n"
-        "With a lower value, more passages go into this group, and you can also see more results in other groups.",
+        help="The meaning score a passage needs for two topics to join \"Connections between topics\". "
+        "A passage with this score also passes the filter.\n"
+        "Raise it for fewer passages that are more clearly related to both topics.\n"
+        "Lower it to let more passages in, which can also add results to other groups.",
     )
     gap_z: float = tunable(
         2.5, label="Meaning score (Small topics)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
-        help="A passage must have this meaning score or more for a topic to go into the group \"Small topics\".\n"
-        "With a higher value, this group contains a smaller number of passages, and they are nearer to the topic.\n"
-        "With a lower value, this group can contain more passages.",
+        help="The meaning score a passage needs to join a topic in \"Small topics\".\n"
+        "Raise it for fewer passages that are closer to the topic.\n"
+        "Lower it to let more passages in.",
     )
     theme_distance: float = tunable(
         0.15, label="Number of topics", group=LANES_GROUP, min=0.05, max=1.0, step=0.05,
-        help="This slider sets how different two paragraphs must be to go into different topics. "
-        "The app uses topics for the groups \"Connections between topics\" and \"Small topics\".\n"
-        "With a higher value, the app makes a smaller number of large topics.\n"
-        "With a lower value, the app makes more small topics. The app sets a maximum number of topics for each task.",
+        help="How different two paragraphs must be to count as separate topics. "
+        "Topics are used by \"Connections between topics\" and \"Small topics\".\n"
+        "Raise it for fewer, larger topics.\n"
+        "Lower it for more, smaller topics, up to a maximum for each task.",
     )
     total_slots: int = tunable(
         24, label="Number of results", group=SELECTION, min=4, max=80, step=1,
-        help="This slider sets the maximum number of results in all of the groups together.\n"
-        "With a higher value, you see more results, but the last results can be less related.\n"
-        "With a lower value, you see only the top results.",
+        help="The most results to show across all groups.\n"
+        "Raise it to see more results, though the last ones may be less related.\n"
+        "Lower it to see only the top results.",
     )
     min_slots: int = tunable(
         2, label="Minimum for each group", group=SELECTION, min=0, max=10, step=1,
-        help="Each group that has results gets this number of positions first. "
-        "The app divides the other positions between the groups. Groups from which you add more passages usually get more.\n"
-        "With a higher value, all of the groups show more equal numbers of results.\n"
-        "With a lower value, the groups that you use most get more of the results.",
+        help="Each group with results is guaranteed this many places. "
+        "The remaining places are shared out and groups you add more passages from usually get more.\n"
+        "Raise it to even out the groups.\n"
+        "Lower it to give the groups you use most more of the results.",
     )
     max_per_file: int = tunable(
         2, label="Maximum from one document", group=SELECTION, min=1, max=20, step=1,
-        help="This slider sets the maximum number of results from one document in each group.\n"
-        "With a higher value, one document can fill more of a group.\n"
-        "With a lower value, the results come from more different documents.",
+        help="The most results one document can have in each group.\n"
+        "Raise it to let one document fill more of a group.\n"
+        "Lower it to draw results from more documents.",
     )
     mmr_lambda: dict = tunable(
-        label="Near or different", group=SELECTION, min=0.0, max=1.0, step=0.05,
+        label="Closer or more varied", group=SELECTION, min=0.0, max=1.0, step=0.05,
         keys={lane: LANE_INFO[lane][0] for lane in LANES},
         default_factory=lambda: {"core": 0.7, "hidden": 0.6, "bridges": 0.6, "gaps": 0.6},
-        help="This slider sets how the app selects the results of this group.\n"
-        "With a higher value, the app selects the passages that are most related to your task. At 1, only the relation to your task counts.\n"
-        "With a lower value, the app selects passages that are more different from the results that it selected before. "
-        "These passages are also more different from the passages that you collected.",
+        help="How the results for this group are chosen.\n"
+        "Raise it to choose the passages most related to your task. At 1, nothing else counts.\n"
+        "Lower it to choose passages that differ more from the results already chosen, "
+        "and from the passages you've collected.",
     )
     mmr_pool: int = 100
     lane_prior: dict = field(
@@ -1037,7 +1037,7 @@ def related(
     units = task_units(task_text)
     n = len(snapshot)
     if not units or not n:
-        note = "Write or collect text in your task to see results." if n else "The app did not find documents."
+        note = "Write or collect text in your task to see results." if n else "No documents found."
         return RelatedResult([Lane(lane, *LANE_INFO[lane], [], note) for lane in LANES], [], [], {"passages": n})
 
     # 1: units and themes
@@ -1086,11 +1086,11 @@ def related(
     score_core(snapshot, gated, scored, lex_rank, sem_rank, config, semantic)
     if not semantic:
         for lane in ("hidden", "bridges", "gaps"):
-            scored.notes[lane] = "This group uses meaning data. The app does not have this data at this time. Wait until the app prepares this data, or start the app with a meaning model."
+            scored.notes[lane] = "This group needs meaning data, which isn't available yet. Wait until it's ready or start the app with a meaning model."
     else:
         score_hidden(gated, scored, signals, lex, config)
         if signals.theme_z is None:
-            scored.notes["bridges"] = scored.notes["gaps"] = "This group must have two or more topics. Write about more than one topic in your task."
+            scored.notes["bridges"] = scored.notes["gaps"] = "This group needs at least two topics. Write about more than one topic in your task."
         else:
             score_bridges_and_gaps(gated, scored, signals.theme_z, themes, config)
     lap("lanes")

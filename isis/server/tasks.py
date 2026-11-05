@@ -144,7 +144,7 @@ class TaskStore:
             try:
                 content = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
-                raise TaskError(f"{path.name} is not UTF-8 text; convert it to UTF-8 to open it here", 422)
+                raise TaskError(f"{path.name} is not UTF-8 text. Convert it to UTF-8 to open it here", 422)
             return {"name": path.stem, "content": content, "mtime": _mtime(path)}
 
     def write(self, name: str, content: str, base_mtime: str | None = None) -> str:

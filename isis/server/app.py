@@ -228,13 +228,13 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
     @app.get("/api/file")
     def file(path: str):
         if public and path not in engine.snapshot.file_rows:
-            raise HTTPException(404, f"no such file: {path}")  # only what search can show
+            raise HTTPException(404, f"there is no file named {path}")  # only what search can show
         try:
             content = engine.resolve(path).read_text(encoding="utf-8", errors="replace")
         except ValueError as e:
             raise HTTPException(400, str(e))
         except OSError:
-            raise HTTPException(404, f"no such file: {path}")
+            raise HTTPException(404, f"there is no file named {path}")
         return {"path": path, "content": content}
 
     @app.get("/api/params")
@@ -251,7 +251,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         except ValueError:
             raise HTTPException(400, "params, skip and hide must be JSON")
         if not isinstance(overrides, dict) or not isinstance(skip_folders, list) or not isinstance(hidden_files, list):
-            raise HTTPException(400, "params must be a JSON object, skip a list of folders, and hide a list of files")
+            raise HTTPException(400, "params must be a JSON object, skip a list of folders and hide a list of files")
         started = time.perf_counter()
         try:
             corrected = None if as_typed else correct_query(engine.snapshot, q)

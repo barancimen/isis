@@ -42,11 +42,11 @@ MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 MIN_TYPO_LENGTH, MIN_TWO_TYPOS_LENGTH = 4, 8  # letters a word needs for one typo, and for two
 
-KEYWORDS = Group("Keyword score", "The keyword score shows how much the words in a passage agree with your words.")
+KEYWORDS = Group("Keyword score", "How well the words in a passage match yours.")
 FUSION = Group(
-    "Mixture of keywords and meaning",
-    "The app makes two ranked lists of passages. One list uses keywords and the other list uses meaning. "
-    "Then the app mixes the two lists into one list of results.",
+    "Mixing keywords and meaning",
+    "Search makes two ranked lists of passages, one by keywords and one by meaning, "
+    "then mixes them into one list of results.",
 )
 
 
@@ -54,51 +54,51 @@ FUSION = Group(
 class SearchConfig:
     k1: float = tunable(
         1.2, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
-        help="This slider sets how much a word adds to the score when it occurs many times in a passage.\n"
-        "With a higher value, passages that use your words many times rank higher.\n"
-        "With a lower value, more uses of a word add less to the score. At 0, a word that occurs one time counts the same as a word that occurs many times.",
+        help="How much a word adds to the score when it appears many times in a passage.\n"
+        "Raise it to rank passages that repeat your words higher.\n"
+        "Lower it and repeats count for less. At 0, one use counts the same as many.",
     )
     b: float = tunable(
         0.35, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
-        help="Long passages contain more words. Thus they can get a high score only because of their length. "
-        "This slider sets how much the score of a long passage decreases.\n"
-        "With a higher value, short passages rank higher. At 1, the app makes the full correction for length.\n"
-        "With a lower value, long passages rank higher. At 0, length has no effect.",
+        help="Long passages contain more words, so they can score well just because of their length. "
+        "This sets how much a long passage's score is reduced.\n"
+        "Raise it to rank short passages higher. At 1, length is fully corrected for.\n"
+        "Lower it to rank long passages higher. At 0, length has no effect.",
     )
     rrf_k: int = tunable(
-        20, label="Good rank in the two lists", group=FUSION, min=1, max=100, step=1,
-        help="This slider sets which passages come first when the app mixes the keyword list and the meaning list.\n"
-        "With a higher value, passages with a good rank in the two lists come first.\n"
-        "With a lower value, the top passages of each list come first, also if they have a bad rank in the other list.",
+        20, label="Good rank in both lists", group=FUSION, min=1, max=100, step=1,
+        help="Which passages come first when the keyword and meaning lists are mixed.\n"
+        "Raise it to put passages that rank well in both lists first.\n"
+        "Lower it to put the top passages of each list first, even if they rank badly in the other.",
     )
     keyword_weight: float = tunable(
         1.0, label="How important keywords are", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="This slider sets how much the keyword list counts in the mix.\n"
-        "With a higher value, results that contain your words rank higher.\n"
-        "With a lower value, the meaning list counts more. At 0, the app ranks passages only by meaning. "
-        "Passages with no meaning data then count only through the slider \"Passages with no meaning data\".",
+        help="How much the keyword list counts in the mix.\n"
+        "Raise it to rank results containing your words higher.\n"
+        "Lower it and the meaning list counts for more. At 0, passages are ranked by meaning alone. "
+        "Passages with no meaning data then count only through \"Passages with no meaning data\".",
     )
     meaning_weight: float = tunable(
         1.0, label="How important meaning is", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="This slider sets how much the meaning list counts in the mix.\n"
-        "With a higher value, results that are near your words in meaning rank higher, also if they use different words.\n"
-        "With a lower value, the keyword list counts more. At 0, the app ranks passages only by keywords. "
-        "This is the same as when the Meaning button is off.",
+        help="How much the meaning list counts in the mix.\n"
+        "Raise it to rank results close to your words in meaning higher, even if they use different words.\n"
+        "Lower it and the keyword list counts for more. At 0, passages are ranked by keywords alone. "
+        "That's the same as turning the Meaning button off.",
     )
     unembedded_weight: float = tunable(
         1.0, label="Passages with no meaning data", group=FUSION, min=0.0, max=3.0, step=0.1,
-        help="The app can have no meaning data for some passages. These passages are not in the meaning list. "
-        "The app uses their keyword rank value as their meaning rank, multiplied by this number.\n"
-        "With a higher value, these passages rank higher.\n"
-        "With a lower value, these passages rank lower. At 0, they count only through \"How important keywords are\". "
-        "If that slider is also at 0, the app does not show these passages.",
+        help="Some passages may have no meaning data, so they aren't in the meaning list. "
+        "Their keyword rank stands in for a meaning rank, multiplied by this number.\n"
+        "Raise it to rank these passages higher.\n"
+        "Lower it to rank them lower. At 0, they count only through \"How important keywords are\". "
+        "If that's also at 0, they won't appear.",
     )
     candidates: int = tunable(
         300, label="Length of each list", group=FUSION, min=20, max=2000, step=10,
-        help="This slider sets how many passages go into each list before the mix. "
-        "The app cannot show a passage that is not in one of the two lists.\n"
-        "With a higher value, the app can find more passages, but it can operate more slowly.\n"
-        "With a lower value, the app operates more quickly, but it can find a smaller number of passages.",
+        help="How many passages go into each list before mixing. "
+        "A passage that's in neither list can't be shown.\n"
+        "Raise it to find more passages, at the cost of speed.\n"
+        "Lower it for faster results but fewer passages found.",
     )
 
 
@@ -173,7 +173,7 @@ class TimedPattern:
             # concurrent: other requests keep running while this one matches.
             yield from self.compiled.finditer(text, timeout=left, concurrent=True)
         except TimeoutError:
-            raise QueryError(f"this pattern took too long: /{self.pattern}/") from None
+            raise QueryError(f"this pattern took too long /{self.pattern}/") from None
 
 
 def timed_pattern(pattern: str, flags: int) -> TimedPattern:
@@ -182,7 +182,7 @@ def timed_pattern(pattern: str, flags: int) -> TimedPattern:
     if len(pattern) > MAX_PATTERN_LENGTH:
         raise QueryError(f"this pattern is too long (the limit is {MAX_PATTERN_LENGTH} characters)")
     if FUZZY.search(pattern):
-        raise QueryError(f"invalid pattern /{pattern}/: fuzzy matching is not available")
+        raise QueryError(f"invalid pattern /{pattern}/ because fuzzy matching isn't available")
     repeats = 1
     for low, high in COUNTED_REPEAT.findall(pattern):
         repeats *= max(int(low or 1), int(high or 1), 1)  # as if nested, the worst case
@@ -191,7 +191,7 @@ def timed_pattern(pattern: str, flags: int) -> TimedPattern:
     try:
         return TimedPattern(regex.compile(pattern, regex.IGNORECASE if flags & re.IGNORECASE else 0))
     except regex.error as e:
-        raise QueryError(f"invalid pattern /{pattern}/: {e}") from None
+        raise QueryError(f"invalid pattern /{pattern}/ ({e})") from None
 
 
 def compile_pattern(pattern: str) -> re.Pattern | TimedPattern:
@@ -200,7 +200,7 @@ def compile_pattern(pattern: str) -> re.Pattern | TimedPattern:
     try:
         compiled = re.compile(pattern, smart)  # also when timed: the same syntax is valid everywhere
     except (re.error, OverflowError, RecursionError) as e:
-        raise QueryError(f"invalid pattern /{pattern}/: {e}") from None
+        raise QueryError(f"invalid pattern /{pattern}/ ({e})") from None
     return compiled if _pattern_deadline.get() is None else timed_pattern(pattern, smart)
 
 

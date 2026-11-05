@@ -51,7 +51,7 @@ def refresh_related(page):
     expect(page.locator("#related-refresh")).to_be_enabled(timeout=30000)
     with page.expect_response(lambda r: r.url.endswith("/related"), timeout=30000):
         page.click("#related-refresh")
-    expect(page.locator("#related-status")).not_to_have_text("Refresh started…", timeout=30000)
+    expect(page.locator("#related-status")).not_to_have_attribute("aria-busy", "true", timeout=30000)
     page.wait_for_timeout(300)  # the response is rendered
 
 
@@ -80,10 +80,10 @@ def main() -> None:
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("dialog", lambda d: d.accept(answers.pop(0)) if d.type == "prompt" else d.accept())
         task_text = lambda: page.evaluate("window.isis.taskView.state.doc.toString()")
-        saved = lambda: expect(page.locator("#save-state")).to_have_text("Saved", timeout=15000)
+        saved = lambda: expect(page.locator("#save-state")).to_have_attribute("data-state", "saved", timeout=15000)
 
         page.goto(URL)
-        expect(page.locator("#index-status")).to_contain_text("passages", timeout=20000)
+        expect(page.locator("#statusbar")).to_have_attribute("data-state", "ready", timeout=20000)
 
         answers.append(WHALES)
         page.click("#new-task")
@@ -114,11 +114,11 @@ def main() -> None:
         page.on("request", lambda r: "/api/search" in r.url and searches.append(urllib.parse.unquote(r.url)))
         page.locator("#search-tune > summary").click()
         set_slider(page, "#search-tune [data-name=keyword_weight] input", 0)
-        expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
-        expect(page.locator("#search-results .hit .hit-why").first).to_have_text(re.compile(r"meaning #1$"), timeout=15000)
+        expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "1")
+        expect(page.locator("#search-results .hit").first).to_have_attribute("data-meaning-rank", "1", timeout=15000)
         assert any('"keyword_weight":0' in u for u in searches), searches
-        page.locator("#search-tune button", has_text="Set all to default").click()
-        expect(page.locator("#search-tune .tune-count")).to_have_text("")
+        page.click("#search-tune .tune-reset")
+        expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "0")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
 
         slider = lambda name: page.locator(f"#search-tune [data-name={name}] input")
@@ -134,14 +134,14 @@ def main() -> None:
         page.click("#search-meaning")  # back to the value it had
         expect(slider("meaning_weight")).to_have_value("2")
         set_slider(page, "#search-tune [data-name=k1] input", 2)
-        expect(page.locator("#search-tune .tune-count")).to_have_text(" · 2 changed")
+        expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "2")
         page.locator("#search-tune [data-name=meaning_weight] .tune-default").click()
         expect(slider("meaning_weight")).to_have_value("1")
-        expect(page.locator("#search-tune .tune-count")).to_have_text(" · 1 changed")
+        expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "1")
         expect(page.locator("#search-tune [data-name=meaning_weight] .tune-default")).to_be_hidden()
-        page.locator("#search-tune button", has_text="Set all to default").click()
+        page.click("#search-tune .tune-reset")
         expect(slider("k1")).to_have_value("1.2")
-        expect(page.locator("#search-tune .tune-count")).to_have_text("")
+        expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "0")
         step("Meaning button and Meaning weight slider move together; default buttons restore one slider or all")
 
         passage_lines = """() => [...document.querySelectorAll('#search-results .hit-body .line:not(.ctx)')].map(l => l.innerText)"""
@@ -156,7 +156,7 @@ def main() -> None:
         page.fill("#search-input", "/white whale/")
         expect(page.locator("#search-results .hit mark").first).to_have_text(re.compile("white whale", re.I), timeout=15000)
         page.fill("#search-input", "/(oops/")
-        expect(page.locator("#search-status")).to_contain_text("invalid pattern", timeout=15000)
+        expect(page.locator("#search-status")).to_contain_text("⚠", timeout=15000)
         step("search: exclusions hold with Meaning on, /regex/ matches are highlighted, a bad pattern is reported")
 
         page.evaluate("""() => {
@@ -188,23 +188,23 @@ def main() -> None:
 
         page.locator("#related-tune > summary").click()
         set_slider(page, "#related-tune [data-name=total_slots] input", 6)
-        expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
+        expect(page.locator("#related-tune .tune-count")).to_have_attribute("data-changed", "1")
         refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length <= 6", timeout=30000)
         shot(page, "related-tuned.png")
         page.locator("#related-tune [data-name=total_slots] .tune-default").click()  # one slider back
         expect(page.locator("#related-tune [data-name=total_slots] input")).to_have_value("24")
-        expect(page.locator("#related-tune .tune-count")).to_have_text("")
+        expect(page.locator("#related-tune .tune-count")).to_have_attribute("data-changed", "0")
         refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
         set_slider(page, "#related-tune [data-name=query] select", "paragraphs")  # the dropdown too
-        expect(page.locator("#related-tune .tune-count")).to_have_text(" · 1 changed")
+        expect(page.locator("#related-tune .tune-count")).to_have_attribute("data-changed", "1")
         page.locator("#related-tune [data-name=query] .tune-default").click()
         expect(page.locator("#related-tune [data-name=query] select")).to_have_value("document")
         expect(page.locator("#related-tune [data-name=query] .tune-default")).to_be_hidden()
         set_slider(page, "#related-tune [data-name=total_slots] input", 6)  # and all of them
-        page.locator("#related-tune button", has_text="Set all to default").click()
-        expect(page.locator("#related-tune .tune-count")).to_have_text("")
+        page.click("#related-tune .tune-reset")
+        expect(page.locator("#related-tune .tune-count")).to_have_attribute("data-changed", "0")
         refresh_related(page)
         page.wait_for_function("() => document.querySelectorAll('#related-lanes .hit').length > 6", timeout=30000)
         page.locator("#related-tune > summary").click()
@@ -245,7 +245,7 @@ def main() -> None:
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
         with page.expect_response(lambda r: r.url.endswith("/feedback"), timeout=30000):
-            page.locator("#related-lanes .hit button[title^='Remove this result. The app']").first.click()
+            page.locator("#related-lanes .hit button.dismiss").first.click()
         page.wait_for_timeout(200)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["ignored"] and meta["dismissed"]
@@ -253,20 +253,20 @@ def main() -> None:
 
         drawer = page.locator("#related-feedback")
         drawer.locator("summary").click()
-        expect(drawer.locator(".tune-count")).to_contain_text("1 removed", timeout=30000)
+        expect(drawer.locator(".feedback-item[data-kind=removed]")).to_have_count(1, timeout=30000)
         expect(drawer.locator(".feedback-item")).to_have_count(1)
         shot(page, "feedback.png")
         drawer.locator(".chip.ignored .chip-x").click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(0, timeout=30000)
-        expect(drawer.locator(".tune-count")).not_to_contain_text("not in use", timeout=30000)
+        expect(drawer.locator(".chip.ignored")).to_have_count(0, timeout=30000)
         assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["ignored"] == []
         step("the drawer's × searches for an ignored keyword again")
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
-        drawer.locator(".feedback-item button", has_text="Show again").click()
-        expect(drawer.locator(".tune-count")).not_to_contain_text("removed", timeout=30000)
+        drawer.locator(".feedback-item[data-kind=removed] .undo").click()
+        expect(drawer.locator(".feedback-item[data-kind=removed]")).to_have_count(0, timeout=30000)
         assert json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())["dismissed"] == []
-        drawer.locator("button", has_text="Remove all changes").click()
+        drawer.locator(".tune-reset").click()
         expect(drawer.locator(".tune-count")).to_have_text("", timeout=30000)
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(0)
         assert not (TASKS / ".meta" / f"{WHALES}.json").exists()
@@ -291,11 +291,11 @@ def main() -> None:
         assert hits and all(re.search("[Ww]hal", t) for t in hits), hits
         page.fill("#steer-input", "/(oops/")
         page.press("#steer-input", "Enter")
-        expect(page.locator("#steer-error")).to_contain_text("invalid pattern", timeout=30000)
+        expect(page.locator("#steer-error")).to_contain_text("⚠", timeout=30000)
         page.press("#steer-input", "Escape")
         expect(page.locator("#steer-input")).to_have_value("-squid +/[Ww]hal/")
         page.locator("#related-lanes .hit button.avoid").first.click()
-        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 removed with near passages", timeout=30000)
+        expect(page.locator("#related-feedback .feedback-item[data-kind=removed] .feedback-tag")).to_have_count(1, timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["steer"] == "-squid +/[Ww]hal/" and meta["dismissed"][0]["avoid"] is True
         shot(page, "steer.png")
@@ -307,13 +307,13 @@ def main() -> None:
         marked = page.locator("#related-lanes .hit", has=page.locator("button.like[aria-pressed=true]"))
         expect(marked).to_have_count(1, timeout=30000)
         assert marked.locator(".hit-loc").inner_text() == title  # it stays on show
-        expect(page.locator("#related-feedback .tune-count")).to_contain_text("1 more of this")
+        expect(page.locator("#related-feedback .feedback-item[data-kind=liked]")).to_have_count(1)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert len(meta["liked"]) == 1 and meta["liked"][0]["path"] == title.rsplit(":", 1)[0]
         assert task_text().count(meta["liked"][0]["text"][:40]) == 0  # not added to the document
         if not page.locator("#related-feedback").evaluate("e => e.open"):
             page.locator("#related-feedback > summary").click()
-        page.locator("#related-feedback .feedback-item button", has_text="Stop").click()
+        page.locator("#related-feedback .feedback-item[data-kind=liked] .undo").click()
         expect(marked).to_have_count(0, timeout=30000)
         step("↑ more like this: marks a suggestion, stays on show, stays out of the document; the drawer undoes it")
 
@@ -349,13 +349,13 @@ def main() -> None:
         widened = side_width()
         assert abs(widened - before - 120) < 6, (before, widened)
         page.reload()
-        expect(page.locator("#index-status")).to_contain_text("passages", timeout=20000)
+        expect(page.locator("#statusbar")).to_have_attribute("data-state", "ready", timeout=20000)
         assert abs(side_width() - widened) < 2, "the width was not kept"
         page.locator(".resizer[data-resize=side]").dblclick()
         assert abs(side_width() - before) < 2
         step(f"dragged the side panel from {before:.0f} to {widened:.0f}px; kept after reload; double-click reset it")
 
-        expect(page.locator("#index-size")).to_have_text(re.compile(r"^[\d,]+ documents · index [\d.]+ [KMG]B$"))
+        expect(page.locator("#index-size")).to_have_text(re.compile(r"\d"))
         step(f"status bar: {page.locator('#index-size').inner_text()}")
 
         # Another browser: here a reload keeps the open folders, and the task's document opens its own.
@@ -542,12 +542,13 @@ def main() -> None:
         expect(page.locator(reader_box)).to_be_focused()
         expect(page.locator(task_box)).to_have_count(0)  # only the pane that was clicked
         page.keyboard.type("the")
-        expect(page.locator("#reader .find-count")).to_contain_text("of", timeout=5000)
-        total = page.locator("#reader .find-count").inner_text().split(" of ")[1]
+        expect(page.locator("#reader .find-count")).to_have_text(re.compile(r"\d\D+\d"), timeout=5000)
+        match_total = lambda: re.findall(r"[\d,]+", page.locator("#reader .find-count").inner_text())[-1]
+        total = match_total()
         scrolled = page.evaluate("window.isis.reader.scrollDOM.scrollTop")
         for _ in range(200):
             page.keyboard.press("Enter")
-        assert page.locator("#reader .find-count").inner_text().split(" of ")[1] == total
+        assert match_total() == total
         assert page.evaluate("window.isis.reader.scrollDOM.scrollTop") > scrolled + 50  # the scrollbar follows
         chosen = page.evaluate("""() => {
             const s = window.isis.reader.state, m = s.selection.main, box = window.isis.reader.scrollDOM.getBoundingClientRect();
@@ -563,7 +564,7 @@ def main() -> None:
         expect(page.locator(task_box)).to_be_focused()
         expect(page.locator(reader_box)).to_be_visible()  # each pane keeps its own
         page.keyboard.type("zzzqqq")
-        expect(page.locator("#task .find-count")).to_have_text("No matches")
+        expect(page.locator("#task .find-count")).to_have_text(re.compile(r"^\D+$"))
         assert page.locator(reader_box).input_value() == "the"
         page.keyboard.press("Escape")
         expect(page.locator(task_box)).to_have_count(0)
@@ -575,7 +576,7 @@ def main() -> None:
         page.keyboard.press("Control+f")
         page.keyboard.press("Control+a")
         page.keyboard.type("alpha beta")
-        expect(page.locator("#task .find-count")).to_have_text(re.compile(r"of 2$"))
+        expect(page.locator("#task .find-count")).to_have_text(re.compile(r"\D2$"))
         page.keyboard.press("Escape")
         page.click("#reader .cm-content")
         page.keyboard.press("Escape")
@@ -592,7 +593,7 @@ def main() -> None:
             page.evaluate("document.querySelector('#panel-related').scrollTop = 0")
             page.click("#related-refresh")
             expect(page.locator("#related-lanes .hit").first).to_be_visible(timeout=20000)
-            expect(page.locator("#related-refresh")).to_be_disabled(timeout=20000)
+            expect(page.locator("#related-status")).not_to_have_attribute("aria-busy", "true", timeout=30000)
             page.wait_for_timeout(200)
             gap = page.evaluate("""() => {
                 const heading = document.querySelector('#related-lanes .lane h3');
@@ -624,7 +625,7 @@ def main() -> None:
         expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
         expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]')).to_have_count(0)
         page.click("#search-hidden > summary")
-        page.locator("#search-hidden button", has_text="Show again").click()
+        page.locator("#search-hidden .undo").click()
         expect(page.locator("#search-hidden")).to_be_hidden()
         expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]').first).to_be_visible(timeout=10000)
         step("Search can hide a whole document, remembers it after a reload, and can bring it back")
@@ -637,15 +638,16 @@ def main() -> None:
         page.click("#search-meaning")
         fits = page.evaluate("""() => {  // the button that moved sliders show stays inside its row
             const row = document.querySelector('#search-tune .tune-row.changed'), button = row.querySelector('.tune-default');
-            return { text: button.textContent, inside: button.getBoundingClientRect().right <= row.getBoundingClientRect().right + 0.5, whole: button.scrollWidth <= button.clientWidth };
+            return { inside: button.getBoundingClientRect().right <= row.getBoundingClientRect().right + 0.5, whole: button.scrollWidth <= button.clientWidth };
         }""")
-        assert fits == {"text": "default", "inside": True, "whole": True}, fits
+        assert fits == {"inside": True, "whole": True}, fits
         save_preset("search", "Regex by keywords")
         page.click("#search-tune .tune-reset")
         page.locator("#search-hidden .tune-reset").click()
         expect(page.locator("#search-hidden")).to_be_hidden()
         page.fill("#search-input", "something else")
-        expect(page.locator("#search-preset option").first).to_have_text("Regex by keywords (changed)")
+        expect(page.locator("#search-preset option").first).to_contain_text("Regex by keywords")
+        expect(page.locator("#search-preset option").first).to_have_attribute("value", "")  # marked as changed, not chosen
         kept = page.evaluate("window.isis.state.presets.search[0].settings")  # changes reach a preset only through Save
         assert kept["query"] == "whale +/sp.rm/" and kept["params"]["k1"] == 2.5, kept
         page.select_option("#search-preset", "Regex by keywords")

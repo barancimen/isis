@@ -146,7 +146,7 @@ class VisitorStore(TaskStore):
         if not self.folder.exists():
             self.workspaces.admit()
         elif sum(1 for _ in self.folder.glob("*.md")) >= self.limits.max_tasks:
-            raise TaskError(f"you can have at most {self.limits.max_tasks} tasks here; delete one first", 403)
+            raise TaskError(f"you can have at most {self.limits.max_tasks} tasks here. Delete one first", 403)
         return super().create(name)
 
     def write(self, name: str, content: str, base_mtime: str | None = None) -> str:
@@ -162,7 +162,7 @@ class VisitorStore(TaskStore):
     def save_prefs(self, name: str, prefs) -> None:
         self.workspaces.check_room()
         if len(prefs.liked) > self.limits.max_liked:
-            raise TaskError(f"you can ask for more like at most {self.limits.max_liked} passages per task", 403)
+            raise TaskError(f"you can use ↑ on at most {self.limits.max_liked} passages per task", 403)
         prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
         path = self._existing_meta_path(name)
         before = path.stat().st_size if path.exists() else 0
@@ -172,7 +172,7 @@ class VisitorStore(TaskStore):
         super().save_prefs(name, prefs)
 
     def _full(self) -> str:
-        return f"your tasks are using all their space ({self.limits.max_workspace_bytes // (1024 * 1024)} MB); delete one first"
+        return f"your tasks are using all their space ({self.limits.max_workspace_bytes // (1024 * 1024)} MB). Delete one first"
 
     def _to_trash(self, path: Path, name: str) -> Path:
         path.unlink()
@@ -239,7 +239,7 @@ class Workspaces:
 
     def check_room(self) -> None:
         if self.totals()[0] >= self.limits.max_total_bytes:
-            raise TaskError("this site has no space left for new work; your tasks are safe, but this change was not saved", 507)
+            raise TaskError("this site has no space left for new work. Your tasks are safe but this change wasn't saved", 507)
 
     def admit(self) -> None:
         """A first task, which makes a new workspace."""
@@ -248,7 +248,7 @@ class Workspaces:
         per_hour = self.limits.new_workspaces_per_hour
         wait = self.limiter.retry_after(f"new:{_visitor_address.get()}", per_hour, per_hour / 3600)
         if wait:
-            raise TaskError("too many new workspaces from this address; try again later", 429)
+            raise TaskError("too many new workspaces from this address. Try again later", 429)
 
     def remove_idle(self, now: float | None = None) -> int:
         """Delete the workspaces not used for `idle_days`. Returns how many went."""
@@ -356,7 +356,7 @@ class PublicGuard:
         if not wait and expensive:
             wait = limiter.retry_after(f"work:{address}", *limits.work, cost=0)
         if wait:
-            return await refuse(429, "too many requests from this address; wait a moment and try again", wait)
+            return await refuse(429, "too many requests from this address. Wait a moment and try again", wait)
 
         token = cookie_parser(headers.get("cookie", "")).get(COOKIE, "")
         renew = scope["path"] == "/"  # a visit to the page starts the cookie's time again
@@ -378,7 +378,7 @@ class PublicGuard:
         if not expensive:
             return await self.app(scope, receive_some, send_with_headers)
         if not await self._take_slot():
-            return await refuse(503, "the server is busy; try again in a moment", 2)
+            return await refuse(503, "the server is busy. Try again in a moment", 2)
         started = time.monotonic()
         try:
             await self.app(scope, receive_some, send_with_headers)
