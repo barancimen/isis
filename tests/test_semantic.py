@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
-from isis.engine.semantic import DEFAULT_MODEL, HashEmbedder
+from isis.engine.semantic import HashEmbedder
+
+MICRO = "TaylorAI/bge-micro-v2"
 
 
 def test_hash_embedder_is_normalised_and_follows_vocabulary():
@@ -16,7 +18,7 @@ def _model_cached() -> bool:
     try:
         from huggingface_hub import hf_hub_download
 
-        hf_hub_download(DEFAULT_MODEL, "onnx/model.onnx", local_files_only=True)
+        hf_hub_download(MICRO, "onnx/model.onnx", local_files_only=True)
         return True
     except Exception:
         return False
@@ -26,7 +28,7 @@ def _model_cached() -> bool:
 def test_bge_micro_ranks_paraphrase_above_unrelated_and_handles_long_text():
     from isis.engine.semantic import Embedder
 
-    e = Embedder(max_tokens=32)
+    e = Embedder(MICRO, max_tokens=32)
     a, b, c = e.embed(
         ["The whale swam through the cold ocean.", "A huge sea mammal swam in icy water.", "Stock prices fell today."]
     )

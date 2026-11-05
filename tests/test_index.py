@@ -103,6 +103,19 @@ def test_switching_back_to_a_model_reuses_its_kept_embeddings(corpus, tmp_path):
     assert Engine(corpus, embedder=HashEmbedder(dim=32), index_dir=index).refresh()["embedded"] == 0
 
 
+def test_several_models_each_have_their_own_vectors(corpus, tmp_path):
+    index = tmp_path / "index"
+    e = Engine(corpus, embedder=[HashEmbedder(), HashEmbedder(dim=32)], index_dir=index)
+    assert e.refresh()["embedded"] == 2 * e.status.passages
+    assert e.view(e.embedder) is e.snapshot and e.snapshot.vectors.shape[1] == 64
+    assert e.view(e.embedder_for("hash:32")).vectors.shape[1] == 32
+    assert e.embedder_for("no/such-model") is e.embedder
+    for model in ("hash:64", "hash:32", None):
+        assert e.search("ambergris", mode="hybrid", model=model)
+    again = Engine(corpus, embedder=[HashEmbedder(dim=32), HashEmbedder()], index_dir=index)  # the other default
+    assert again.refresh()["embedded"] == 0 and again.snapshot.vectors.shape[1] == 32
+
+
 
 def test_a_run_without_a_model_keeps_the_embeddings(corpus, tmp_path):
     index = tmp_path / "index"
@@ -275,7 +288,7 @@ def test_the_index_says_what_it_did(tmp_path, caplog):
     first = said(e.refresh)
     assert any(m.startswith("following link link -> ") for m in first)
     assert "2 markdown files: 2 new files (link/sub/deeper/there.md, real/here.md)" in first
-    assert "embedding 2 passages" in first
+    assert "embedding 2 passages with hash:64" in first
     assert any("link broken skipped" in m for m in first)
     assert any(m.startswith("index ready: 2 files, 2 passages") for m in first)
     assert said(e.refresh) == []  # nothing changed: nothing to say
@@ -284,7 +297,7 @@ def test_the_index_says_what_it_did(tmp_path, caplog):
     (corpus / "real" / "here.md").write_text("Heronword changed, in other words.\n")
     third = said(e.refresh)
     assert "1 new file (real/more.md), 1 changed (real/here.md)" in third
-    assert "embedding 2 passages" in third
+    assert "embedding 2 passages with hash:64" in third
 
     again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
     fourth = said(again.refresh)

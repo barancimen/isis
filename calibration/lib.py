@@ -2,7 +2,7 @@
 
 Environment:
     ISIS_CORPUS   the corpus (default: sample_corpus/, which the judgments in data/ were made on)
-    ISIS_MODEL    a Hugging Face model with ONNX weights (default: bge-micro-v2). Another model gets its
+    ISIS_MODEL    a Hugging Face model with ONNX weights (default: the app's default model). Another model gets its
                   own index in calibration/.cache/, so the app's index in <corpus>/.isis is left alone.
 
 Overrides are written as on the page and in the notebook: `--set z_strong=3 --set mmr_lambda.core=0.8`

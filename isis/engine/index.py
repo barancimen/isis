@@ -1,8 +1,13 @@
 """The corpus index: passages, BM25 and embeddings for every markdown file, kept up to date
 incrementally and cached on disk.
 
-The cache is plain data, JSON for the text and an .npz of arrays read with allow_pickle=False, so
-a cache that came with someone else's corpus can't run code when it is loaded."""
+Several embedding models can be in use at once: each passage has a vector from each, and a search
+names the model it wants. The first model is the default.
+
+The cache is plain data, JSON for the text and .npz files of arrays read with allow_pickle=False, so
+a cache that came with someone else's corpus can't run code when it is loaded. Each model's vectors
+have a file of their own in .isis/models/, found again by each passage's text: a model left out of
+a run keeps them, and an edit made meanwhile only costs the passages it changed."""
 
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +85,11 @@ def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
     return ", ".join(parts)
 
 
+def _model_id(embedder) -> str:
+    """How a request names a model, such as "MongoDB/mdbr-leaf-ir"."""
+    return getattr(embedder, "model_id", embedder.name)
+
+
 @dataclass
 class FileRecord:
     mtime_ns: int
@@ -88,9 +98,16 @@ class FileRecord:
     indptr: np.ndarray  # this file's rows of the BM25 matrix, as CSR pieces
     term_ids: np.ndarray
     counts: np.ndarray
-    vectors: np.ndarray | None = None  # float16, one row per passage; None until embedded
-    reuse: dict | None = None  # embed_text -> vector kept from before an edit; not saved
+    vectors: dict[str, np.ndarray] = field(default_factory=dict)  # model name -> float16, one row per passage
+    reuse: dict[str, dict[str, np.ndarray]] | None = None  # model name -> embed_text -> vector kept from before; not saved
     site: str | None = None  # the host of `url:` in the frontmatter; None if not known yet
+    _keys: np.ndarray | None = field(default=None, repr=False)
+
+    def keys(self) -> np.ndarray:
+        """Each passage's text as a number: how the vectors of every model are saved."""
+        if self._keys is None:
+            self._keys = np.fromiter((_text_key(p.embed_text) for p in self.passages), np.uint64, len(self.passages))
+        return self._keys
 
 
 @dataclass
@@ -102,7 +119,7 @@ class Snapshot:
     bm25: BM25
     vocab: Vocabulary  # shared with the engine and only ever grows: look terms up with term_id()
     sorted_terms: list[str]  # terms that occur in the corpus, for prefix expansion
-    vectors: np.ndarray  # float32 [n, dim]; zero rows where has_vector is False
+    vectors: np.ndarray  # float32 [n, dim] from one model; zero rows where has_vector is False
     has_vector: np.ndarray  # bool [n]
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
     file_sites: dict[str, str] = field(default_factory=dict)  # path -> host, for documents that have one
@@ -112,6 +129,9 @@ class Snapshot:
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
     _typical: dict = field(default_factory=dict, repr=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # requests share snapshots
+    # The same index seen through each model, by model id. They share everything but the vectors
+    # and what is worked out from them.
+    views: dict = field(default_factory=dict, repr=False)
 
     def __len__(self) -> int:
         return len(self.passages)
@@ -198,7 +218,7 @@ class Engine:
         self,
         corpus_dir: str | Path | list[str | Path],
         *,
-        embedder=None,
+        embedder=None,  # an embedder, or a list of them; the first is the default
         index_dir: str | Path | None = None,
         exclude: tuple[str | Path, ...] = (),
         target_words: int = TARGET_WORDS,
@@ -208,16 +228,13 @@ class Engine:
         self.root = dirs[0]
         self.roots: dict[str, Path] = {"": dirs[0]} if len(dirs) == 1 else self._named(dirs)  # path prefix -> folder
         self.index_dir = Path(index_dir).resolve() if index_dir else None
-        self.embedder = embedder
+        self.embedders = [] if embedder is None else list(embedder) if isinstance(embedder, (list, tuple)) else [embedder]
         self.exclude = {Path(p).resolve() for p in exclude}
         self.chunking = (target_words, max_words)
         self.vocab = Vocabulary()
         self.files: dict[str, FileRecord] = {}
         self.status = IndexStatus()
         self._lock = threading.Lock()
-        # The model the cached vectors came from. Without a model they are kept as they are, so a
-        # keyword-only run never throws away embeddings that took hours to compute.
-        self._vectors_from = {prefix: getattr(embedder, "name", None) for prefix in self.roots}
         self._chunker_from: dict[str, int] = {}  # folders whose cache still has files split the old way
         self._unread: list[str] = []
         self.no_embed: set[str] = set()  # corpus-relative folders with a .no-embed file ("" is the whole corpus)
@@ -240,8 +257,13 @@ class Engine:
         return named
 
     @property
-    def dim(self) -> int:
-        return self.embedder.dim if self.embedder is not None else 0
+    def embedder(self):
+        """The default model; None when searching by keywords only."""
+        return self.embedders[0] if self.embedders else None
+
+    def embedder_for(self, model: str | None):
+        """The embedder with this model id, or the default one for None or an id it doesn't know."""
+        return next((e for e in self.embedders if _model_id(e) == model), self.embedder)
 
     # ---- files ----
 
@@ -450,11 +472,11 @@ class Engine:
                 self.files.pop(path, None)
                 continue
             old = self.files.get(path)
-            if old is not None and old.vectors is not None and old.vectors.shape[1:] == (self.dim,) and self.dim:
-                # An edit changes a few passages: the others keep their vectors.
-                record.reuse = {p.embed_text: v for p, v in zip(old.passages, old.vectors)}
-            elif old is not None and old.reuse:  # vectors kept for this model, not yet taken back
-                record.reuse = old.reuse
+            if old is not None:  # an edit changes a few passages: the others keep their vectors, for every model
+                reuse = {name: dict(zip((p.embed_text for p in old.passages), vectors)) for name, vectors in old.vectors.items()}
+                for name, kept in (old.reuse or {}).items():  # vectors loaded for it, not yet taken up
+                    reuse[name] = {**kept, **reuse.get(name, {})}
+                record.reuse = reuse or None
             self.files[path] = record
         for folder in sorted(self.no_embed):
             where = folder or "the corpus"
@@ -463,8 +485,8 @@ class Engine:
         for path, record in self.files.items():
             if not self._embeds(path):
                 record.reuse = None
-                if record.vectors is not None:  # the folder got its .no-embed file after it was embedded
-                    record.vectors = None
+                if record.vectors:  # the folder got its .no-embed file after it was embedded
+                    record.vectors = {}
                     dropped += 1
         touched = bool(removed or changed or dropped)
         if touched:
@@ -490,59 +512,66 @@ class Engine:
         }
 
     def _embed_missing(self, on_progress) -> tuple[int, int]:
-        """Embeds the passages that have no vectors yet. Returns how many passages it embedded,
-        and how many files got their vectors (some may have taken them all from kept ones)."""
-        if self.embedder is None:
-            return 0, 0
-        pending = [
-            r
-            for path, r in self.files.items()
-            if self._embeds(path) and not self._is_unread(path) and (r.vectors is None or r.vectors.shape[1:] != (self.dim,))
-        ]
-        todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {})] for r in pending}
-        self.status.embedded, self.status.to_embed = 0, sum(map(len, todo.values()))
+        """Embeds, with each model in turn, the passages that have no vector from it yet. Returns
+        how many passages it embedded, and how many files got vectors (some may have taken all of
+        theirs from the ones kept for that model)."""
+        work = []
+        for embedder in self.embedders:
+            name = embedder.name
+            pending = [r for path, r in self.files.items()
+                       if self._embeds(path) and not self._is_unread(path) and name not in r.vectors]
+            todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {}).get(name, {})]
+                    for r in pending}
+            work.append((embedder, pending, todo))
+        self.status.embedded = 0
+        self.status.to_embed = sum(len(texts) for _, _, todo in work for texts in todo.values())
         if self.status.to_embed:
             self._set_state("embedding", on_progress)
-            kept = sum(len(r.passages) for r in pending) - self.status.to_embed
-            log.info("embedding %s%s", _count(self.status.to_embed, "passage"),
-                     f" ({kept:,} unchanged kept their embeddings)" if kept else "")
-
         begun = last_report = last_publish = last_save = time.monotonic()
-        group: list[FileRecord] = []
 
-        def flush():
-            texts = [t for r in group for t in todo[id(r)]]
-            fresh = iter(self.embedder.embed(texts) if texts else np.zeros((0, self.dim), np.float32))
-            for r in group:
-                rows = [r.reuse[p.embed_text] if p.embed_text in (r.reuse or {}) else next(fresh) for p in r.passages]
-                r.vectors = np.array(rows, np.float16).reshape(len(r.passages), self.dim)
-                r.reuse = None
-            self.status.embedded += len(texts)
-            group.clear()
+        for embedder, pending, todo in work:
+            name, dim = embedder.name, embedder.dim
+            n = sum(map(len, todo.values()))
+            if n:
+                kept = sum(len(r.passages) for r in pending) - n
+                log.info("embedding %s with %s%s", _count(n, "passage"), _model_id(embedder),
+                         f" ({kept:,} unchanged kept their embeddings)" if kept else "")
+            group: list[FileRecord] = []
 
-        for record in pending:
-            group.append(record)
-            if sum(len(todo[id(r)]) for r in group) < EMBED_GROUP:
-                continue
-            flush()
-            if on_progress:
-                on_progress(self.status)
-            now = time.monotonic()
-            if now - last_report > REPORT_EVERY and self.status.embedded:
-                last_report = now
-                done, total = self.status.embedded, self.status.to_embed
-                left = (now - begun) / done * (total - done)
-                log.info("embedded %s / %s passages (%d%%), about %s left", f"{done:,}", f"{total:,}", 100 * done / total,
-                         _duration(left))
-            if now - last_publish > PUBLISH_EVERY:  # let searches use what is embedded so far
-                self._publish()
-                last_publish = now
-            if now - last_save > SAVE_EVERY:
-                self._save()
-                last_save = now
-        if group:
-            flush()
-        return self.status.to_embed, len(pending)
+            def flush():
+                texts = [t for r in group for t in todo[id(r)]]
+                fresh = iter(embedder.embed(texts) if texts else np.zeros((0, dim), np.float32))
+                for r in group:
+                    kept = (r.reuse or {}).pop(name, {})
+                    rows = [kept[p.embed_text] if p.embed_text in kept else next(fresh) for p in r.passages]
+                    r.vectors[name] = np.array(rows, np.float16).reshape(len(r.passages), dim)
+                    r.reuse = r.reuse or None
+                self.status.embedded += len(texts)
+                group.clear()
+
+            for record in pending:
+                group.append(record)
+                if sum(len(todo[id(r)]) for r in group) < EMBED_GROUP:
+                    continue
+                flush()
+                if on_progress:
+                    on_progress(self.status)
+                now = time.monotonic()
+                if now - last_report > REPORT_EVERY and self.status.embedded:
+                    last_report = now
+                    done, total = self.status.embedded, self.status.to_embed
+                    left = (now - begun) / done * (total - done)
+                    log.info("embedded %s / %s passages (%d%%), about %s left", f"{done:,}", f"{total:,}", 100 * done / total,
+                             _duration(left))
+                if now - last_publish > PUBLISH_EVERY:  # let searches use what is embedded so far
+                    self._publish()
+                    last_publish = now
+                if now - last_save > SAVE_EVERY:
+                    self._save()
+                    last_save = now
+            if group:
+                flush()
+        return self.status.to_embed, sum(len(pending) for _, pending, _ in work)
 
     def _set_state(self, state: str, on_progress) -> None:
         self.status.state = state
@@ -561,7 +590,8 @@ class Engine:
     def _compile(self) -> Snapshot:
         passages: list[Passage] = []
         file_rows = {}
-        indptrs, term_ids, counts, vectors, has = [np.zeros(1, np.int64)], [], [], [], []
+        indptrs, term_ids, counts = [np.zeros(1, np.int64)], [], []
+        vectors = {e.name: ([], []) for e in self.embedders}  # model name -> (arrays, has)
         nnz = 0
         for path in sorted(self.files):
             r = self.files[path]
@@ -572,9 +602,18 @@ class Engine:
             nnz += int(r.indptr[-1])
             term_ids.append(r.term_ids)
             counts.append(r.counts)
-            ok = r.vectors is not None and r.vectors.shape == (n, self.dim)
-            vectors.append(r.vectors if ok else np.zeros((n, self.dim), np.float16))
-            has.append(np.full(n, ok))
+            for e in self.embedders:
+                v = r.vectors.get(e.name)
+                ok = v is not None and v.shape == (n, e.dim)
+                vectors[e.name][0].append(v if ok else np.zeros((n, e.dim), np.float16))
+                vectors[e.name][1].append(np.full(n, ok))
+
+        def of(e) -> tuple[np.ndarray, np.ndarray]:
+            if e is None:
+                return np.zeros((len(passages), 0), np.float32), np.zeros(len(passages), bool)
+            arrays, has = vectors[e.name]
+            return (np.concatenate(arrays).astype(np.float32) if arrays else np.zeros((0, e.dim), np.float32),
+                    np.concatenate(has) if has else np.zeros(0, bool))
 
         bm25 = BM25(
             np.concatenate(indptrs),
@@ -582,16 +621,30 @@ class Engine:
             np.concatenate(counts) if counts else np.zeros(0, np.float32),
             n_terms=len(self.vocab),
         )
-        return Snapshot(
+        default_vectors, default_has = of(self.embedder)
+        snapshot = Snapshot(
             passages=passages,
             bm25=bm25,
             vocab=self.vocab,
             sorted_terms=sorted(self.vocab.terms[i] for i in np.flatnonzero(bm25.doc_freq)),
-            vectors=np.concatenate(vectors).astype(np.float32) if vectors else np.zeros((0, self.dim), np.float32),
-            has_vector=np.concatenate(has) if has else np.zeros(0, bool),
+            vectors=default_vectors,
+            has_vector=default_has,
             file_rows=file_rows,
             file_sites={path: r.site for path, r in self.files.items() if r.site},
         )
+        for e in self.embedders:
+            if e is self.embedder:
+                snapshot.views[_model_id(e)] = snapshot
+            else:  # its own vectors, and its own caches of what depends on them
+                v, has = of(e)
+                snapshot.views[_model_id(e)] = replace(snapshot, vectors=v, has_vector=has, excerpt_matches={},
+                                                       theme_scores={}, _typical={})
+        return snapshot
+
+    def view(self, embedder) -> Snapshot:
+        """The current snapshot as this model sees it."""
+        snapshot = self.snapshot
+        return snapshot.views.get(_model_id(embedder), snapshot) if embedder is not None else snapshot
 
     # ---- cache ----
 
@@ -601,53 +654,73 @@ class Engine:
             return self.index_dir / prefix if prefix else self.index_dir
         return self.roots[prefix] / ".isis"
 
-    def index_bytes(self) -> int:
-        """The size of the index on disk."""
+    def index_bytes(self, embedder=None) -> int:
+        """The size of the index on disk: the text and keywords, and this model's vectors, or every
+        model's without one."""
         total = 0
         for prefix in self.roots:
             folder = self._cache_dir(prefix)
-            for path in [folder / "index.json", folder / "index.npz", *(folder / "models").glob("*.npz")]:
+            vectors = [self._vectors_path(prefix, embedder.name)] if embedder is not None else (folder / "models").glob("*.npz")
+            for path in [folder / "index.json", folder / "index.npz", *vectors]:
                 with suppress(OSError):  # not saved yet, or being replaced
                     total += path.stat().st_size
         return total
 
-    def _kept_path(self, prefix: str, name: str) -> Path:
-        """Where the vectors of a model not in use are kept, one file per model."""
+    def _vectors_path(self, prefix: str, name: str) -> Path:
+        """Where a model's vectors are saved, one file per model."""
         slug = re.sub(r"[^\w.-]+", "_", name)[:150]
         return self._cache_dir(prefix) / "models" / f"{slug}.npz"
 
-    def _keep_aside(self, prefix: str, name: str | None, files: dict[str, FileRecord]) -> None:
-        """Keeps the vectors of the model being switched away from, so that switching back
-        doesn't embed everything again. They are found again by each passage's text."""
-        embedded = [r for r in files.values() if r.vectors is not None]
-        if not name or not embedded:
-            return
-        path = self._kept_path(prefix, name)
+    def _write_vectors(self, prefix: str, name: str, keys: np.ndarray, vectors: np.ndarray) -> None:
+        path = self._vectors_path(prefix, name)
         tmp = path.with_name(f"{path.stem}.{os.getpid()}-{threading.get_ident()}.tmp.npz")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(tmp, name=np.array(name),
-                     keys=np.fromiter((_text_key(p.embed_text) for r in embedded for p in r.passages), np.uint64),
-                     vectors=np.concatenate([r.vectors for r in embedded]))
+            np.savez(tmp, name=np.array(name), keys=keys, vectors=vectors)
             os.replace(tmp, path)
         except OSError as e:
-            log.warning("could not keep the embeddings of %s: %s", name, e)
-        finally:
+            log.warning("could not save the embeddings of %s: %s", name, e)
+        finally:  # a full disk must not also keep a copy
             tmp.unlink(missing_ok=True)
 
-    def _kept_vectors(self, prefix: str, name: str) -> dict[int, np.ndarray]:
-        """The vectors kept for this model from an earlier run, by passage text."""
-        path = self._kept_path(prefix, name)
+    def _save_vectors(self, prefix: str, embedder, records: list[FileRecord]) -> None:
+        """Saves one model's vectors for these files, with those loaded for it but not yet taken up."""
+        keys, vectors = [], []
+        for r in records:
+            if (v := r.vectors.get(embedder.name)) is not None:
+                keys.append(r.keys())
+                vectors.append(v)
+            elif kept := (r.reuse or {}).get(embedder.name):
+                rows = [i for i, p in enumerate(r.passages) if p.embed_text in kept]
+                if rows:
+                    keys.append(r.keys()[rows])
+                    vectors.append(np.stack([kept[r.passages[i].embed_text] for i in rows]).astype(np.float16))
+        if keys:
+            self._write_vectors(prefix, embedder.name, np.concatenate(keys), np.concatenate(vectors))
+        elif self._vectors_path(prefix, embedder.name).exists():  # none left, as when a .no-embed file came
+            self._write_vectors(prefix, embedder.name, np.zeros(0, np.uint64), np.zeros((0, embedder.dim), np.float16))
+
+    def _load_vectors(self, prefix: str, embedder, files: dict[str, FileRecord]) -> None:
+        """Gives each file its vectors from this model's saved ones. A file with some passages
+        missing (changed while the model was not in use) keeps the ones found, to embed only the rest."""
+        path = self._vectors_path(prefix, embedder.name)
         if not path.exists():
-            return {}
+            return
         try:
             with np.load(path, allow_pickle=False) as data:
-                if str(data["name"]) != name or data["vectors"].shape[1:] != (self.dim,):
-                    return {}
-                return dict(zip(data["keys"].tolist(), data["vectors"]))
+                if str(data["name"]) != embedder.name or data["vectors"].shape[1:] != (embedder.dim,):
+                    return
+                keys, vectors = data["keys"], data["vectors"]
         except Exception as e:
-            log.warning("ignoring unreadable kept embeddings in %s: %s", path, e)
-            return {}
+            log.warning("ignoring unreadable embeddings in %s: %s", path, e)
+            return
+        row_of = dict(zip(keys.tolist(), range(len(keys))))
+        for r in files.values():
+            rows = [row_of.get(k) for k in r.keys().tolist()]
+            if None not in rows:
+                r.vectors[embedder.name] = vectors[rows]
+            elif found := {p.embed_text: vectors[i] for p, i in zip(r.passages, rows) if i is not None}:
+                r.reuse = {**(r.reuse or {}), embedder.name: found}
 
     def _save(self) -> None:
         for prefix in self.roots:
@@ -659,33 +732,29 @@ class Engine:
         lead = f"{prefix}/" if prefix else ""
         paths = sorted(p for p in self.files if p.startswith(lead))
         records = [self.files[p] for p in paths]
-        embedded = [r for r in records if r.vectors is not None]
         term_ids = np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32)
         used, local_ids = np.unique(term_ids, return_inverse=True)  # the cache names only its own terms
         meta = {
             "version": INDEX_VERSION,
             "chunking": list(self.chunking),
             "chunker": self._chunker_from.get(prefix, CHUNKER_VERSION),
-            "embedder": self._vectors_from[prefix],
             "vocab": [self.vocab.terms[i] for i in used],
             "files": [
                 {
                     "path": path[len(lead):],
                     "mtime_ns": r.mtime_ns,
                     "size": r.size,
-                    "embedded": r.vectors is not None,
                     "site": r.site,
                     "passages": [[p.heading, p.start_line, p.end_line, p.text] for p in r.passages],
                 }
                 for path, r in zip(paths, records)
             ],
         }
-        dim = embedded[0].vectors.shape[1] if embedded else 0
         arrays = {
             "indptr": np.concatenate([r.indptr for r in records]) if records else np.zeros(0, np.int64),
             "term_ids": local_ids.astype(np.int32),
             "counts": np.concatenate([r.counts for r in records]) if records else np.zeros(0, np.float32),
-            "vectors": np.concatenate([r.vectors for r in embedded]) if embedded else np.zeros((0, dim), np.float16),
+            "vectors": np.zeros((0, 0), np.float16),  # each model's are in a file of their own
         }
         # The arrays go first: a cache is only used when its JSON matches them (see _load).
         unique = f"{os.getpid()}-{threading.get_ident()}"  # another process may share the folder
@@ -698,6 +767,8 @@ class Engine:
         finally:  # a full disk must not also keep a copy of the index
             tmp_npz.unlink(missing_ok=True)
             tmp_json.unlink(missing_ok=True)
+        for embedder in self.embedders:
+            self._save_vectors(prefix, embedder, records)
 
     def _load(self) -> None:
         for prefix in self.roots:
@@ -715,11 +786,11 @@ class Engine:
             with np.load(npz_path, allow_pickle=False) as data:
                 arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
             terms = list(meta["vocab"])
-            saved = meta.get("embedder")
+            legacy = meta.get("embedder")  # a cache from before each model had a file of its own
             lead = f"{prefix}/" if prefix else ""
             ids = np.fromiter((self.vocab.add(t) for t in terms), np.int32, len(terms))  # into the shared vocabulary
             arrays["term_ids"] = ids[arrays["term_ids"]] if len(ids) else arrays["term_ids"]
-            files = self._records(meta["files"], arrays, lead)
+            files, legacy_vectors = self._records(meta["files"], arrays, lead)
         except Exception as e:
             log.warning("ignoring unreadable index cache in %s: %s", folder, e)
             return
@@ -729,20 +800,14 @@ class Engine:
         self.files.update(files)
         log.info("loaded the index cache%s: %s, %s", f" of {prefix}" if prefix else "", _count(len(files), "file"),
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
-        if self.embedder is None:
-            self._vectors_from[prefix] = saved
-        elif saved != self.embedder.name:  # a different model: keep its vectors aside, and take back this one's
-            self._keep_aside(prefix, saved, files)
-            kept = self._kept_vectors(prefix, self.embedder.name)
-            for record in files.values():
-                record.vectors = None
-                if kept:
-                    record.reuse = {p.embed_text: v for p in record.passages if (v := kept.get(_text_key(p.embed_text))) is not None}
-            log.info("the embedding model changed%s: %s", f" from {saved.split(':')[0]}" if saved else "",
-                     "embeddings kept from its last run are used again" if kept else "every passage will be embedded again")
+        if legacy and legacy_vectors and not self._vectors_path(prefix, legacy).exists():
+            self._write_vectors(prefix, legacy, np.concatenate([files[path].keys() for path in legacy_vectors]),
+                                np.concatenate(list(legacy_vectors.values())))
+        for embedder in self.embedders:
+            self._load_vectors(prefix, embedder, files)
         chunker = meta.get("chunker", 1)
         if chunker != CHUNKER_VERSION:
-            if self.embedder is None and any(r.vectors is not None for r in files.values()):
+            if not self.embedders and (folder / "models").is_dir():
                 self._chunker_from[prefix] = chunker  # reading them again now would lose their embeddings: next run
             else:
                 log.info("files are split differently now: reading them again (unchanged passages keep their embeddings)")
@@ -750,18 +815,18 @@ class Engine:
                     record.mtime_ns = 0  # looks changed to the next refresh
 
     @staticmethod
-    def _records(entries: list[dict], arrays: dict, lead: str = "") -> dict[str, FileRecord]:
-        """FileRecords from a cache's JSON entries and the arrays they index into, in order."""
-        files = {}
+    def _records(entries: list[dict], arrays: dict, lead: str = "") -> tuple[dict[str, FileRecord], dict[str, np.ndarray]]:
+        """FileRecords from a cache's JSON entries and the arrays they index into, in order, and the
+        vectors an older cache kept in the same arrays, by path."""
+        files, legacy = {}, {}
         at_indptr = at_nnz = at_vec = 0
         for e in entries:
             n = len(e["passages"])
             path = lead + e["path"]
             indptr = arrays["indptr"][at_indptr : at_indptr + n + 1]
             nnz = int(indptr[-1])
-            vectors = None
-            if e["embedded"]:
-                vectors = arrays["vectors"][at_vec : at_vec + n]
+            if e.get("embedded"):
+                legacy[path] = arrays["vectors"][at_vec : at_vec + n]
                 at_vec += n
             files[path] = FileRecord(
                 e["mtime_ns"],
@@ -770,29 +835,30 @@ class Engine:
                 indptr.astype(np.int64),
                 arrays["term_ids"][at_nnz : at_nnz + nnz],
                 arrays["counts"][at_nnz : at_nnz + nnz],
-                vectors,
                 site=e.get("site"),
             )
             at_indptr += n + 1
             at_nnz += nnz
         if (at_indptr, at_nnz, at_vec) != (len(arrays["indptr"]), len(arrays["term_ids"]), len(arrays["vectors"])):
             raise ValueError("the index arrays don't match the file list")
-        return files
+        return files, legacy
 
     # ---- queries ----
 
     def _named_folders(self, skip) -> set[str]:
         return {name for name in skip if name and name in self.roots}
 
-    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None, skip_folders=(), skip_files=()):
+    def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None,
+               skip_folders=(), skip_files=(), model: str | None = None):
         from .search import search
 
+        embedder = self.embedder_for(model)
         return search(
-            self.snapshot,
+            self.view(embedder),
             query,
             limit=limit,
             mode=mode,
-            embedder=self.embedder,
+            embedder=embedder,
             context_lines=context_lines,
             read_lines=self.read_lines,
             config=config,
@@ -800,13 +866,14 @@ class Engine:
             skip_files=skip_files,
         )
 
-    def related(self, task_text: str, *, prefs=None, config=None, seed: int = 0, skip_folders=()):
+    def related(self, task_text: str, *, prefs=None, config=None, seed: int = 0, skip_folders=(), model: str | None = None):
         from .related import related
 
+        embedder = self.embedder_for(model)
         return related(
-            self.snapshot,
+            self.view(embedder),
             task_text,
-            embedder=self.embedder,
+            embedder=embedder,
             prefs=prefs,
             config=config,
             seed=seed,

@@ -613,6 +613,8 @@ const SHARED_HIDDEN_KEY = "hidden-search";
 const MAX_HIDDEN_DOCS = 50; // the list travels in the URL, which a public server limits in length
 
 const state = {
+  model: null, // the meaning model this browser uses, by id; null with keywords only
+  indexStatus: null, // the last answer of api/status
   task: null, // active task name
   tasks: [], // [{name, mtime}]
   docs: new Map(), // task name -> {state, mtime, dirty, saving, again, conflictMtime}
@@ -1335,7 +1337,8 @@ async function searchNow() {
     const hide = state.hiddenDocs.size ? `&hide=${enc(JSON.stringify([...state.hiddenDocs]))}` : "";
     // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
     const asTyped = state.searchAsTyped === q ? "&as_typed=true" : "";
-    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}${asTyped}`);
+    const model = state.model ? `&model=${enc(state.model)}` : "";
+    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}${asTyped}${model}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
     const byMeaning = result.hits.some((hit) => "meaning_rank" in hit.why);
@@ -1443,6 +1446,7 @@ async function fetchRelated() {
     text: taskView.state.doc.toString(),
     params: state.params.related,
     skip_folders: [...state.skipped.related],
+    model: state.model ?? "",
   });
   if (name !== state.task) return;
 
@@ -2071,19 +2075,53 @@ function statusText(s) {
   if (s.state === "embedding") return `Preparing meaning search. ${s.embedded.toLocaleString()} of ${s.to_embed.toLocaleString()} passages done. You can still use Search.`;
   if (s.state === "error") return `Can't read your documents. ${s.error}. See the server log. This is tried again when a file changes.`;
   if (s.state !== "ready") return "Reading your documents…";
-  const model = s.model ? s.model.split("/").pop() : "keywords only";
-  const keywordsOnly = s.model && s.unembedded ? ` (${s.unembedded.toLocaleString()} keywords only)` : "";
-  return `${s.passages.toLocaleString()} passages${keywordsOnly} · ${model}`;
+  if (s.models?.length) return ""; // the menu shows the model
+  return s.model ? s.model.split("/").pop() : "Keywords only";
+}
+
+// Documents, passages and the size of the index, with the chosen model's vectors.
+function countsText(s) {
+  const model = s.models?.find((m) => m.id === state.model) ?? s.models?.[0];
+  const unembedded = s.state === "ready" ? model?.unembedded ?? (s.model ? s.unembedded : 0) : 0;
+  const bytes = model?.index_bytes ?? s.index_bytes;
+  return [
+    `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`,
+    `${s.passages.toLocaleString()} passage${s.passages === 1 ? "" : "s"}${unembedded ? ` (${unembedded.toLocaleString()} keywords only)` : ""}`,
+    bytes ? `index ${formatBytes(bytes)}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function renderIndexStatus(s) {
+  $("#index-status").textContent = statusText(s);
+  $("#index-size").textContent = countsText(s);
+}
+
+// The meaning model this browser uses, from the models the server offers. The first is the default.
+function renderModelPick(models) {
+  const ids = models.map((m) => m.id);
+  const saved = store.get("model");
+  state.model = ids.includes(saved) ? saved : ids[0] ?? null;
+  const pick = $("#model-pick");
+  pick.replaceChildren(...models.map((m) => h("option", { value: m.id }, m.label)));
+  pick.value = state.model ?? "";
+  pick.hidden = !models.length;
+}
+
+function pickModel(id) {
+  state.model = id;
+  store.set("model", id);
+  if (state.indexStatus) renderIndexStatus(state.indexStatus);
+  runSearch();
+  if (state.relatedFor) requestRelated();
 }
 
 async function pollStatus() {
   let settled = false; // nothing to wait for: poll slowly
   try {
     const s = await api("GET", "api/status");
+    state.indexStatus = s;
     settled = s.state === "ready" || s.state === "error";
-    const documents = `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`;
-    $("#index-size").textContent = s.index_bytes ? `${documents} · index ${formatBytes(s.index_bytes)}` : documents;
-    $("#index-status").textContent = statusText(s);
+    renderIndexStatus(s);
     $("#statusbar").dataset.state = s.state;
     if (state.indexUpdated !== null && s.updated !== state.indexUpdated) {
       loadFiles().catch(fail);
@@ -2292,6 +2330,8 @@ async function init() {
   // The version these files came with. Asking the server now would make an old page look current.
   state.pageVersion = $('meta[name="page-version"]')?.content || String(status.page_version);
   renderFolderPicks(status.folders);
+  renderModelPick(status.models ?? []);
+  $("#model-pick").addEventListener("change", (e) => pickModel(e.target.value));
   if (!status.model) {
     const button = $("#search-meaning");
     button.disabled = true;

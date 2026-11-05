@@ -106,6 +106,7 @@ class RelatedRequest(BaseModel):
     text: str
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
     skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
+    model: str = ""  # the embedding model, as named in /api/status; the default if empty or unknown
 
 
 class TermRequest(BaseModel):
@@ -227,7 +228,12 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             **state,
             "index_bytes": engine.index_bytes(),
             "folders": [name for name in engine.roots if name],  # when serving several folders
-            "model": getattr(engine.embedder, "model_id", None),
+            "model": getattr(engine.embedder, "model_id", None),  # the default
+            "models": [
+                {"id": e.model_id, "label": e.model_id.split("/")[-1],
+                 "unembedded": int((~engine.view(e).has_vector).sum()), "index_bytes": engine.index_bytes(e)}
+                for e in engine.embedders
+            ],
             "page_version": page_version.current(),
         }
 
@@ -253,7 +259,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         return {"search": specs(SearchConfig), "related": specs(RelatedConfig)}
 
     @app.get("/api/search")
-    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = "", hide: str = "", as_typed: bool = False):
+    def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = "", hide: str = "", as_typed: bool = False, model: str = ""):
         try:
             overrides = json.loads(params) if params else {}
             skip_folders = json.loads(skip) if skip else []
@@ -268,7 +274,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             with time_limit():
                 hits = engine.search(corrected or q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
                                      skip_folders=[str(f) for f in skip_folders],
-                                     skip_files=[str(f) for f in hidden_files])
+                                     skip_files=[str(f) for f in hidden_files], model=model or None)
         except QueryError as e:
             raise HTTPException(400, str(e))
         return {"hits": plain(hits), "corrected": corrected, "ms": round((time.perf_counter() - started) * 1000, 1)}
@@ -311,6 +317,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                     config=configure(RelatedConfig, body.params),
                     skip_folders=body.skip_folders,
                     seed=zlib.crc32(name.encode()),
+                    model=body.model or None,
                 )
         except QueryError as e:  # a regex that ran out of time
             raise HTTPException(400, str(e))
@@ -384,7 +391,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 
 def app_from_env() -> FastAPI:
     """The app `isis serve` runs, configured through ISIS_CORPUS (folders separated like PATH),
-    ISIS_TASKS, ISIS_MODEL, ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
+    ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
     this machine only), ISIS_PUBLIC ("1": serve the public, see public.py) and ISIS_BASE_PATH (with
     ISIS_PUBLIC: where the site lives on its domain, such as /isis)."""
     from ..engine.semantic import Embedder
@@ -392,8 +399,8 @@ def app_from_env() -> FastAPI:
     configure_logging()
     folders = [Path(d) for d in os.environ["ISIS_CORPUS"].split(os.pathsep)]
     tasks_dir = Path(os.environ.get("ISIS_TASKS") or folders[0] / "_tasks")
-    model = os.environ.get("ISIS_MODEL", "")
-    engine = Engine(folders, embedder=Embedder(model) if model else None, exclude=corpus_exclude(folders, tasks_dir))
+    models = [m for m in os.environ.get("ISIS_MODELS", "").split(",") if m]
+    engine = Engine(folders, embedder=[Embedder(m) for m in models], exclude=corpus_exclude(folders, tasks_dir))
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
     store = (Workspaces(tasks_dir, base_path=os.environ.get("ISIS_BASE_PATH", ""))
              if os.environ.get("ISIS_PUBLIC") == "1" else TaskStore(tasks_dir))

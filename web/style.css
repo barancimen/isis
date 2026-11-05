@@ -341,6 +341,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   border-top: 1px solid var(--border);
 }
 #flash { margin-left: auto; color: var(--accent); }
+#statusbar { gap: 8px; }
+#model-pick { height: 19px; padding: 0 2px; font: inherit; font-size: 12px; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+#statusbar.update-ready #model-pick { color: var(--fg); }
 #statusbar { position: relative; }
 #statusbar.update-ready { background: #e00000; border-top-color: #e00000; color: #fff; }
 #statusbar.update-ready #flash { color: #fff; }

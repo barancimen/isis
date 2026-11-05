@@ -1,5 +1,7 @@
-"""Sentence embeddings from a small ONNX model on the CPU. The default is TaylorAI/bge-micro-v2
-(3-layer BERT, 384 dimensions, mean pooling, a 69 MB file)."""
+"""Sentence embeddings from small ONNX models on the CPU. The app offers the models in MODELS:
+MongoDB/mdbr-leaf-ir (6-layer BERT, 384 dimensions, 23M parameters), the default, and
+TaylorAI/bge-micro-v2 (3 layers, 17M parameters), which is about 1.4 times faster to embed with
+but finds less by meaning."""
 
 from __future__ import annotations
 
@@ -18,7 +20,10 @@ from .text import tokenize
 log = logging.getLogger(__name__)
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")  # read when huggingface_hub is imported
 
-DEFAULT_MODEL = "TaylorAI/bge-micro-v2"
+# The models the app offers, each by its Hugging Face repo; the first is the default. Any repo with
+# ONNX weights and a tokenizer.json can join the list.
+MODELS = ("MongoDB/mdbr-leaf-ir", "TaylorAI/bge-micro-v2")
+DEFAULT_MODEL = MODELS[0]
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
@@ -171,7 +176,7 @@ class HashEmbedder:
 
     def __init__(self, dim: int = 64):
         self.dim = dim
-        self.name = f"hash:{dim}"
+        self.name = self.model_id = f"hash:{dim}"
 
     def embed(self, texts: list[str], cache: bool = False, query: bool = False) -> np.ndarray:
         out = np.zeros((len(texts), self.dim), np.float32)

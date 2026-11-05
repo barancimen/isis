@@ -227,6 +227,22 @@ Measured by removing the embeddings of the Beagle book (1,647 of 4,951 passages)
 
 Higher values favour keyword queries at the cost of paraphrases. Keyword-only search scores 0.659 on the same queries, and with everything embedded hybrid search scores 0.708 and nothing changes. Related hardly moved (utility 4.71 to 4.84, against 8.21 with everything embedded), but about a quarter of its suggestions in this setup were never judged and count as zero, so its numbers are only rough.
 
+### mdbr-leaf-ir (2026-11)
+
+MongoDB/mdbr-leaf-ir became the default model, with bge-micro-v2 still offered. On the sample
+corpus it embedded 4,951 passages in 459 s on one idle core (about 11 passages/s, against 15 for
+bge-micro-v2). With the defaults calibrated for bge-micro-v2:
+
+- **Search:** nDCG@10 0.742 against 0.708 (keyword queries 0.845, questions 0.794, paraphrases
+  0.601). 7% of its top 10 had never been judged and counts as irrelevant. `rrf_k` from 10 to 60
+  scored 0.739 to 0.744. Meaning alone scored 0.701 against 0.586.
+- **The query prefix matters.** Without "Represent this sentence for searching relevant
+  passages: " in front of queries it scored 0.587, and 0.241 by meaning alone.
+- **Related:** 80% of judged suggestions were relevant, against 75%, and every lane was more
+  precise (Best results 78%, Same meaning 94%). But 32% of its suggestions had never been judged,
+  so its utility (6.92 against 7.87, long tasks 6.70 against 11.40) counts a third of them as zero.
+  `z_strong` and `z_weak` hardly moved it (6.47 to 7.16). Judge a new pool before tuning it.
+
 Known limits of this calibration:
 
 - One person judged everything, on one small corpus.

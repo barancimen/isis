@@ -86,7 +86,7 @@
     <div id="task-editor" class="editor"></div>
   </section>
 </div>
-<footer id="statusbar"><span id="index-status" title="How many passages can be searched and which meaning model is in use."></span><span id="flash" aria-live="polite"></span><span id="index-size" title="How many documents are available and how much disk space the search index uses."></span><button id="reload-page" type="button" hidden>NEW VERSION AVAILABLE. PRESS HERE TO RELOAD.</button></footer>
+<footer id="statusbar"><select id="model-pick" hidden aria-label="Meaning model" title="The meaning model that Search and Related use. This browser keeps your choice."></select><span id="index-status" title="What the search index is doing."></span><span id="flash" aria-live="polite"></span><span id="index-size" title="How many documents and passages can be searched and how much disk space the search index for the chosen model uses."></span><button id="reload-page" type="button" hidden>NEW VERSION AVAILABLE. PRESS HERE TO RELOAD.</button></footer>
 <script type="module" src="app.js"></script>
 </body>
 </html>
