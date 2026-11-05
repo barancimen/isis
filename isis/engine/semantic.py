@@ -28,7 +28,9 @@ def _normalize(x: np.ndarray) -> np.ndarray:
 
 class Embedder:
     """L2-normalised embeddings from any Hugging Face repo that ships ONNX weights and a
-    tokenizer.json. Pooling (mean or CLS) is read from the repo's sentence-transformers config."""
+    tokenizer.json. Pooling (mean or CLS) is read from the repo's sentence-transformers config, and
+    so are the texts some models want in front of a query or a passage (MongoDB/mdbr-leaf-ir wants
+    "Represent this sentence for searching relevant passages: " before a query)."""
 
     def __init__(
         self,
@@ -44,7 +46,9 @@ class Embedder:
 
         log.info("loading the embedding model %s", model_id)
         self.model_id = model_id
-        self.name = f"{model_id}:{onnx_file}:{max_tokens}"  # identifies vectors in the index cache
+        self.query_prompt, self.document_prompt = self._prompts()
+        # Identifies vectors in the index cache. A passage prompt changes every vector, so it is part of the name.
+        self.name = f"{model_id}:{onnx_file}:{max_tokens}" + (f":{self.document_prompt}" if self.document_prompt else "")
         self.batch_size = batch_size
 
         self.tokenizer = Tokenizer.from_file(self._fetch("tokenizer.json"))
@@ -62,7 +66,12 @@ class Embedder:
         options = ort.SessionOptions()
         if threads:
             options.intra_op_num_threads = threads
-        self.session = ort.InferenceSession(self._fetch(onnx_file), options, providers=["CPUExecutionProvider"])
+        model_path = self._fetch(onnx_file)
+        try:  # a large model keeps its weights in a second file beside it, which onnxruntime opens itself
+            self._fetch(f"{onnx_file}_data")
+        except Exception:
+            pass  # most models have none
+        self.session = ort.InferenceSession(model_path, options, providers=["CPUExecutionProvider"])
         self.input_names = {i.name for i in self.session.get_inputs()}
         self.dim = self.session.get_outputs()[0].shape[-1]
 
@@ -84,9 +93,24 @@ class Embedder:
         log.info("downloading %s of %s (only the first time)", filename, self.model_id)
         return hf_hub_download(self.model_id, filename)
 
-    def embed(self, texts: list[str], cache: bool = False) -> np.ndarray:
-        """One normalised row per text. `cache=True` remembers results (for task paragraphs,
-        which are re-embedded on every refresh of the related panel)."""
+    def _prompts(self) -> tuple[str, str]:
+        """What goes before a query and before a passage, from the "prompts" of the repo's
+        sentence-transformers config. Most models want nothing."""
+        try:
+            with open(self._fetch("config_sentence_transformers.json")) as f:
+                prompts = json.load(f).get("prompts") or {}
+        except Exception:
+            return "", ""
+        return prompts.get("query") or "", prompts.get("document") or prompts.get("passage") or ""
+
+    def embed(self, texts: list[str], cache: bool = False, query: bool = False) -> np.ndarray:
+        """One normalised row per text. `query=True` embeds search queries, which some models want
+        marked; everything else, task paragraphs included, is embedded like a passage of the corpus.
+        `cache=True` remembers results (for task paragraphs, which are re-embedded on every
+        refresh of the related panel)."""
+        prompt = self.query_prompt if query else self.document_prompt
+        if prompt:
+            texts = [prompt + t for t in texts]
         if not cache:
             return self._embed(texts)
         with self._cache_lock:
@@ -149,7 +173,7 @@ class HashEmbedder:
         self.dim = dim
         self.name = f"hash:{dim}"
 
-    def embed(self, texts: list[str], cache: bool = False) -> np.ndarray:
+    def embed(self, texts: list[str], cache: bool = False, query: bool = False) -> np.ndarray:
         out = np.zeros((len(texts), self.dim), np.float32)
         for i, text in enumerate(texts):
             for term in tokenize(text):

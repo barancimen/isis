@@ -525,7 +525,7 @@ def search(
     lexical = np.where(allowed, lexical_scores(snapshot, bm25, q.term_ids, q.weights, q.patterns), 0.0)
 
     if embeddings and q.text.strip():
-        semantic = snapshot.vectors @ embedder.embed([q.text], cache=True)[0]
+        semantic = snapshot.vectors @ embedder.embed([q.text], cache=True, query=True)[0]
         semantic[~(snapshot.has_vector & allowed)] = -np.inf
         lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, config.candidates, positive=True))}
         sem_rank = {int(row): rank for rank, row in enumerate(top_rows(semantic, config.candidates))}

@@ -29,7 +29,7 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
 - **Options:**
   - `--tasks DIR`: where task documents live (default `_tasks` in the first folder). Task folders are never indexed.
   - `--no-model`: keyword search only.
-  - `--model REPO`: another Hugging Face model with ONNX weights, such as `BAAI/bge-small-en-v1.5`.
+  - `--model REPO`: another Hugging Face model with ONNX weights, such as `MongoDB/mdbr-leaf-ir` (23M parameters, stronger at retrieval than the default but about 1.5 times slower to embed). Text a model wants in front of queries or passages comes from the `prompts` of its `config_sentence_transformers.json`, so mdbr-leaf-ir gets its query prefix without any setting; task paragraphs in Related are embedded like passages. Switching keeps the other model's embeddings in `<corpus>/.isis/models/`, so switching back only embeds passages that changed meanwhile. The Related thresholds were calibrated with bge-micro-v2, so another model may need them redone (see CALIBRATE.md).
   - `--port`, `--host`.
   - `--allow-host NAME`: also answer requests addressed to this name (repeatable; see below).
   - `--public`: serve the public behind a proxy (see Public mode below).

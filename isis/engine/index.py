@@ -6,6 +6,7 @@ a cache that came with someone else's corpus can't run code when it is loaded.""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -61,6 +62,11 @@ def _duration(seconds: float) -> str:
     if seconds < 5400:
         return f"{seconds / 60:.0f} min"
     return f"{seconds / 3600:.1f} h"
+
+
+def _text_key(text: str) -> int:
+    """A passage's text as a number, to find its vector among the embeddings kept for another model."""
+    return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "little")
 
 
 def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
@@ -447,6 +453,8 @@ class Engine:
             if old is not None and old.vectors is not None and old.vectors.shape[1:] == (self.dim,) and self.dim:
                 # An edit changes a few passages: the others keep their vectors.
                 record.reuse = {p.embed_text: v for p, v in zip(old.passages, old.vectors)}
+            elif old is not None and old.reuse:  # vectors kept for this model, not yet taken back
+                record.reuse = old.reuse
             self.files[path] = record
         for folder in sorted(self.no_embed):
             where = folder or "the corpus"
@@ -462,12 +470,12 @@ class Engine:
         if touched:
             self._publish()
 
-        embedded = self._embed_missing(on_progress)
-        if touched or embedded:
+        embedded, filled = self._embed_missing(on_progress)
+        if touched or filled:
             self._publish()
             self._save()
         self._set_state("ready", on_progress)
-        if first or touched or embedded:
+        if first or touched or filled:
             meaning = ", keywords only" if self.embedder is None else (
                 f", {self.status.unembedded:,} of them keywords only" if self.status.unembedded else "")
             log.info("index ready: %s, %s%s (%s)", _count(len(self.files), "file"), _count(len(self.snapshot), "passage"),
@@ -481,9 +489,11 @@ class Engine:
             "seconds": round(time.perf_counter() - started, 2),
         }
 
-    def _embed_missing(self, on_progress) -> int:
+    def _embed_missing(self, on_progress) -> tuple[int, int]:
+        """Embeds the passages that have no vectors yet. Returns how many passages it embedded,
+        and how many files got their vectors (some may have taken them all from kept ones)."""
         if self.embedder is None:
-            return 0
+            return 0, 0
         pending = [
             r
             for path, r in self.files.items()
@@ -532,7 +542,7 @@ class Engine:
                 last_save = now
         if group:
             flush()
-        return self.status.to_embed
+        return self.status.to_embed, len(pending)
 
     def _set_state(self, state: str, on_progress) -> None:
         self.status.state = state
@@ -595,10 +605,49 @@ class Engine:
         """The size of the index on disk."""
         total = 0
         for prefix in self.roots:
-            for name in ("index.json", "index.npz"):
+            folder = self._cache_dir(prefix)
+            for path in [folder / "index.json", folder / "index.npz", *(folder / "models").glob("*.npz")]:
                 with suppress(OSError):  # not saved yet, or being replaced
-                    total += (self._cache_dir(prefix) / name).stat().st_size
+                    total += path.stat().st_size
         return total
+
+    def _kept_path(self, prefix: str, name: str) -> Path:
+        """Where the vectors of a model not in use are kept, one file per model."""
+        slug = re.sub(r"[^\w.-]+", "_", name)[:150]
+        return self._cache_dir(prefix) / "models" / f"{slug}.npz"
+
+    def _keep_aside(self, prefix: str, name: str | None, files: dict[str, FileRecord]) -> None:
+        """Keeps the vectors of the model being switched away from, so that switching back
+        doesn't embed everything again. They are found again by each passage's text."""
+        embedded = [r for r in files.values() if r.vectors is not None]
+        if not name or not embedded:
+            return
+        path = self._kept_path(prefix, name)
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}-{threading.get_ident()}.tmp.npz")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(tmp, name=np.array(name),
+                     keys=np.fromiter((_text_key(p.embed_text) for r in embedded for p in r.passages), np.uint64),
+                     vectors=np.concatenate([r.vectors for r in embedded]))
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning("could not keep the embeddings of %s: %s", name, e)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _kept_vectors(self, prefix: str, name: str) -> dict[int, np.ndarray]:
+        """The vectors kept for this model from an earlier run, by passage text."""
+        path = self._kept_path(prefix, name)
+        if not path.exists():
+            return {}
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                if str(data["name"]) != name or data["vectors"].shape[1:] != (self.dim,):
+                    return {}
+                return dict(zip(data["keys"].tolist(), data["vectors"]))
+        except Exception as e:
+            log.warning("ignoring unreadable kept embeddings in %s: %s", path, e)
+            return {}
 
     def _save(self) -> None:
         for prefix in self.roots:
@@ -682,10 +731,15 @@ class Engine:
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
         if self.embedder is None:
             self._vectors_from[prefix] = saved
-        elif saved != self.embedder.name:  # a different model: keep the text, re-embed
-            log.info("the embedding model changed: every passage will be embedded again")
+        elif saved != self.embedder.name:  # a different model: keep its vectors aside, and take back this one's
+            self._keep_aside(prefix, saved, files)
+            kept = self._kept_vectors(prefix, self.embedder.name)
             for record in files.values():
                 record.vectors = None
+                if kept:
+                    record.reuse = {p.embed_text: v for p in record.passages if (v := kept.get(_text_key(p.embed_text))) is not None}
+            log.info("the embedding model changed%s: %s", f" from {saved.split(':')[0]}" if saved else "",
+                     "embeddings kept from its last run are used again" if kept else "every passage will be embedded again")
         chunker = meta.get("chunker", 1)
         if chunker != CHUNKER_VERSION:
             if self.embedder is None and any(r.vectors is not None for r in files.values()):

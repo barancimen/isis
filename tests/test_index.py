@@ -86,6 +86,23 @@ def test_cache_is_reused_and_model_change_re_embeds(corpus, tmp_path):
     assert other.snapshot.vectors.shape[1] == 32
 
 
+def test_switching_back_to_a_model_reuses_its_kept_embeddings(corpus, tmp_path):
+    index = tmp_path / "index"
+    first = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    first.refresh()
+    vectors = first.snapshot.vectors.copy()
+    Engine(corpus, embedder=HashEmbedder(dim=32), index_dir=index).refresh()
+    (corpus / "finches.md").write_text("# Finches\n\nTheir beaks differ from island to island.\n")
+    Engine(corpus, embedder=HashEmbedder(dim=32), index_dir=index).refresh()  # an edit under the other model
+
+    back = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    stats = back.refresh()
+    assert stats["embedded"] == 1 and back.snapshot.has_vector.all()  # only the edited passage
+    rows = back.snapshot.file_rows["whales.md"]
+    assert np.allclose(back.snapshot.vectors[rows[0]:rows[1]], vectors[rows[0]:rows[1]], atol=1e-3)
+    assert Engine(corpus, embedder=HashEmbedder(dim=32), index_dir=index).refresh()["embedded"] == 0
+
+
 
 def test_a_run_without_a_model_keeps_the_embeddings(corpus, tmp_path):
     index = tmp_path / "index"
