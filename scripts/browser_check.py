@@ -358,21 +358,25 @@ def main() -> None:
         expect(page.locator("#index-size")).to_have_text(re.compile(r"^[\d,]+ documents · index [\d.]+ [KMG]B$"))
         step(f"status bar: {page.locator('#index-size').inner_text()}")
 
-        page.reload()
-        page.click(".side-tabs button[data-panel=files]")
-        expect(page.locator("#file-list .dir").first).to_be_visible(timeout=10000)
-        expect(page.locator("#file-list .file")).to_have_count(0)  # folders start collapsed
-        folder = page.locator("#file-list .dir").first
+        # Another browser: here a reload keeps the open folders, and the task's document opens its own.
+        fresh = browser.new_page(viewport={"width": 1600, "height": 1000})
+        fresh.goto(URL)
+        fresh.click(".side-tabs button[data-panel=files]")
+        expect(fresh.locator("#file-list .dir").first).to_be_visible(timeout=10000)
+        expect(fresh.locator("#file-list .file")).to_have_count(0)  # folders start collapsed
+        folder = fresh.locator("#file-list .dir").first
         folder.click()
-        expect(page.locator("#file-list .file").first).to_be_visible()
-        expect(page.locator("#file-list .dir").first).to_have_attribute("aria-expanded", "true")
-        page.locator("#file-list .dir").first.click()
-        expect(page.locator("#file-list .file")).to_have_count(0)
-        target = page.evaluate("window.isis.state.files[window.isis.state.files.length - 1].path")
-        page.evaluate("(path) => window.isis.openFile(path)", target)
-        expect(page.locator("#file-list .file.current")).to_have_attribute("data-path", target)  # revealed
+        expect(fresh.locator("#file-list .file").first).to_be_visible()
+        expect(fresh.locator("#file-list .dir").first).to_have_attribute("aria-expanded", "true")
+        fresh.locator("#file-list .dir").first.click()
+        expect(fresh.locator("#file-list .file")).to_have_count(0)
+        target = fresh.evaluate("window.isis.state.files[window.isis.state.files.length - 1].path")
+        fresh.evaluate("(path) => window.isis.openFile(path)", target)
+        expect(fresh.locator("#file-list .file.current")).to_have_attribute("data-path", target)  # revealed
+        fresh.close()
         step("files panel: folders start collapsed and toggle; the file in the reader is revealed")
 
+        page.click(".side-tabs button[data-panel=files]")
         first = page.evaluate("window.isis.state.files[0].path")
         page.fill("#file-filter", first)
         expect(page.locator("#file-list .file").first).to_have_attribute("data-path", first)
