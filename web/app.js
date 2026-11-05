@@ -93,7 +93,7 @@ const theme = EditorView.theme({
   "&": { height: "100%", fontSize: "16px", backgroundColor: "var(--bg)", color: "var(--fg)" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "var(--font)", lineHeight: "1.65", overflowY: "scroll" },
-  ".cm-content": { padding: "18px 0 40vh", maxWidth: "44em", caretColor: "var(--fg)" },
+  ".cm-content": { padding: "18px 0 50vh", maxWidth: "44em", caretColor: "var(--fg)" },
   ".cm-line": { padding: "0 22px" },
   ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--faint)", border: "none", fontSize: "12px" },
   ".cm-cursor": { borderLeftColor: "var(--fg)", borderLeftWidth: "2px" },
@@ -544,6 +544,7 @@ const state = {
   folders: [],
   readerPath: null,
   readerSeq: 0, // the latest document asked for: a slower answer for an earlier one is dropped
+  fileToReveal: false, // Files can't scroll while hidden, so this waits until it shows
   pendingView: null, // the task view on its way to the screen
   viewTurn: 0,
   readerScroll: store.json("reader-scroll", {}), // document path -> where its reader view was left
@@ -946,6 +947,26 @@ function closeReader() {
   markCurrentFile();
 }
 
+// The editor centers a passage that fits the pane. One taller than the pane it lines up by one end,
+// so there the middle is put in the middle by hand, once the editor has scrolled.
+function centerWhenTall(passage) {
+  const seq = state.readerSeq;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (seq !== state.readerSeq) return;
+    reader.requestMeasure({
+      read(view) {
+        const top = view.coordsAtPos(passage.from, 1), bottom = view.coordsAtPos(passage.to, -1);
+        if (!top || !bottom) return 0;
+        const box = view.scrollDOM.getBoundingClientRect();
+        return bottom.bottom - top.top > box.height ? (top.top + bottom.bottom - box.top - box.bottom) / 2 : 0;
+      },
+      write(off, view) {
+        if (off) view.scrollDOM.scrollTop += off;
+      },
+    });
+  }));
+}
+
 // `location`: the passage to highlight. It is scrolled to, unless `place` says where the document
 // goes instead: the top of a task's reader as that task left it.
 async function openFile(path, location = null, { place = null } = {}) {
@@ -968,8 +989,8 @@ async function openFile(path, location = null, { place = null } = {}) {
     $("#reader-path").textContent = path;
     $("#reader-path").title = path;
     $("#reader-add").hidden = true;
-    revealCurrentFile();
   }
+  revealCurrentFile({ showHidden: place === null });
   state.readerLocation = location;
   const doc = reader.state.doc;
   if (!location) {
@@ -979,11 +1000,15 @@ async function openFile(path, location = null, { place = null } = {}) {
   const line = doc.line(Math.min(location.line + 1, doc.lines));
   const from = line.from + Math.min(location.ch ?? 0, line.length);
   const decos = [];
+  let passage = EditorSelection.cursor(from);
   if (location.start !== undefined) {
     // The passage itself, exactly: it may start or end inside a paragraph, which flows as one line.
     const start = doc.line(Math.min(location.start + 1, doc.lines)).from;
     const end = doc.line(Math.min(location.end + 1, doc.lines)).to;
-    if (end > start) decos.push(Decoration.mark({ class: "cm-hit-range" }).range(start, end));
+    if (end > start) {
+      decos.push(Decoration.mark({ class: "cm-hit-range" }).range(start, end));
+      passage = EditorSelection.range(start, end);
+    }
   }
   for (const [n, s, e] of location.marks ?? []) {
     if (n >= doc.lines) continue;
@@ -992,9 +1017,10 @@ async function openFile(path, location = null, { place = null } = {}) {
     const b = l.from + Math.min(e, l.length);
     if (b > a) decos.push(Decoration.mark({ class: "cm-hit-match" }).range(a, b));
   }
+  if (place === null) centerWhenTall(passage);
   reader.dispatch({
     selection: EditorSelection.cursor(from),
-    effects: [hitSlot.set.of(Decoration.set(decos, true)), place === null ? EditorView.scrollIntoView(from, { y: "center" }) : scrollToPlace(place, doc)],
+    effects: [hitSlot.set.of(Decoration.set(decos, true)), place === null ? EditorView.scrollIntoView(passage, { y: "center" }) : scrollToPlace(place, doc)],
   });
 }
 
@@ -1040,13 +1066,19 @@ function toggleFolder(folder) {
   $(`#file-list [data-dir="${CSS.escape(folder)}"]`)?.focus();
 }
 
-// The file in the reader stays findable: opening one, from anywhere, opens the folders above it.
-function revealCurrentFile() {
+// The file in the reader stays findable: opening one, from anywhere, opens the folders above it
+// and brings it into view in Files. `showHidden` also clears a filter that leaves it out, which a
+// reload or a change of task doesn't do: they only bring back what was there.
+function revealCurrentFile({ showHidden = true } = {}) {
+  const filter = $("#file-filter").value.trim().toLowerCase();
+  const filtered = showHidden && filter && !state.readerPath.toLowerCase().includes(filter);
+  if (filtered) $("#file-filter").value = "";
   const closed = ancestors(state.readerPath).filter((folder) => !state.openFolders.has(folder));
   for (const folder of closed) state.openFolders.add(folder);
-  if (closed.length) renderFiles();
+  if (filtered || closed.length) renderFiles();
   else markCurrentFile();
-  $("#file-list .file.current")?.scrollIntoView({ block: "nearest" });
+  if (state.panel === "files") $("#file-list .file.current")?.scrollIntoView({ block: "nearest" });
+  else state.fileToReveal = true;
 }
 
 function markCurrentFile() {
@@ -1873,6 +1905,10 @@ function showPanel(name) {
   }
   for (const panel of ["files", "search", "related"]) $(`#panel-${panel}`).hidden = panel !== name;
   $("#related-refresh").hidden = name !== "related";
+  if (name === "files" && state.fileToReveal) {
+    state.fileToReveal = false;
+    $("#file-list .file.current")?.scrollIntoView({ block: "center" });
+  }
   if (name === "related" && state.task && state.relatedFor !== state.task) refreshRelated().catch(fail);
   if (name === "search") {
     if (state.searchPending) searchNow();
