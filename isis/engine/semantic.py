@@ -8,10 +8,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import zlib
 from collections import OrderedDict
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
@@ -71,12 +73,20 @@ class Embedder:
         options = ort.SessionOptions()
         if threads:
             options.intra_op_num_threads = threads
-        model_path = self._fetch(onnx_file)
+        model_path, data_path = self._fetch(onnx_file), None
         try:  # a large model keeps its weights in a second file beside it, which onnxruntime opens itself
-            self._fetch(f"{onnx_file}_data")
+            data_path = self._fetch(f"{onnx_file}_data")
         except Exception:
             pass  # most models have none
-        self.session = ort.InferenceSession(model_path, options, providers=["CPUExecutionProvider"])
+        try:
+            self.session = ort.InferenceSession(model_path, options, providers=["CPUExecutionProvider"])
+        except Exception as e:
+            # Newer onnxruntime (1.31 does, 1.23 doesn't) wants the weights file in the same folder as
+            # the model, but the Hugging Face cache keeps each file in a folder of its own.
+            if data_path is None or "External data path" not in str(e):
+                raise
+            model_path = _side_by_side(self.model_id, model_path, data_path)
+            self.session = ort.InferenceSession(model_path, options, providers=["CPUExecutionProvider"])
         self.input_names = {i.name for i in self.session.get_inputs()}
         self.dim = self.session.get_outputs()[0].shape[-1]
 
@@ -163,6 +173,28 @@ class Embedder:
         out = np.zeros((len(texts), self.dim), np.float32)
         np.add.at(out, np.array(owner, dtype=np.int64), _normalize(pooled))
         return _normalize(out)
+
+
+def _side_by_side(model_id: str, *files: str) -> str:
+    """The first of these model files, with the others beside it in one folder of isis's own cache:
+    hard links to the Hugging Face cache where the filesystem allows it, copies otherwise. Returns
+    the path of the first."""
+    folder = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "isis" / "onnx" / model_id.replace("/", "--")
+    folder.mkdir(parents=True, exist_ok=True)
+    for file in files:
+        source, target = Path(os.path.realpath(file)), folder / Path(file).name
+        if target.exists() and (os.path.samefile(source, target) or
+                                (target.stat().st_size, target.stat().st_mtime) == (source.stat().st_size, source.stat().st_mtime)):
+            continue
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(source, tmp)
+        except OSError:  # another filesystem
+            log.info("copying %s of %s to %s", Path(file).name, model_id, folder)
+            shutil.copy2(source, tmp)
+        os.replace(tmp, target)
+    return str(folder / Path(files[0]).name)
 
 
 @lru_cache(maxsize=100_000)
