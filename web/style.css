@@ -342,8 +342,30 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 #flash { margin-left: auto; color: var(--accent); }
 #statusbar { gap: 8px; }
-#model-pick { height: 19px; padding: 0 2px; font: inherit; font-size: 12px; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
-#statusbar.update-ready #model-pick { color: var(--fg); }
+/* How wide a browser draws a <select> and where it puts the arrow differ between browsers, and the
+   arrow can cover the end of the name. So the visible box is ordinary text, the chosen name and an
+   arrow pointing up (the menu opens upward), and the real <select> lies invisibly on top of it to
+   take clicks and keys. The box is as wide as its text in every browser. */
+#model-box {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 19px;
+  padding: 0 6px 0 5px;
+  font-size: 12px;
+  white-space: nowrap;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+#model-box[hidden] { display: none; }
+#model-box::after { content: ""; border: 4px solid transparent; border-top-width: 0; border-bottom-color: currentColor; }
+#model-box:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+#model-pick { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; font: inherit; cursor: pointer; }
+#statusbar.update-ready #model-box { color: var(--fg); }
 #statusbar { position: relative; }
 #statusbar.update-ready { background: #e00000; border-top-color: #e00000; color: #fff; }
 #statusbar.update-ready #flash { color: #fff; }

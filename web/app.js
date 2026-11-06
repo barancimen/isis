@@ -2087,17 +2087,16 @@ function statusText(s) {
   if (s.state === "error") return `Can't read your documents. ${s.error}. See the server log. This is tried again when a file changes.`;
   if (s.state !== "ready") return "Reading your documents…";
   if (s.models?.length) return ""; // the menu shows the model
-  return s.model ? s.model.split("/").pop() : "Keywords only";
+  return s.model ?? "Keywords only";
 }
 
 // Documents, passages and the size of the index, with the chosen model's vectors.
 function countsText(s) {
   const model = s.models?.find((m) => m.id === state.model) ?? s.models?.[0];
-  const unembedded = s.state === "ready" ? model?.unembedded ?? (s.model ? s.unembedded : 0) : 0;
   const bytes = model?.index_bytes ?? s.index_bytes;
   return [
     `${s.files.toLocaleString()} document${s.files === 1 ? "" : "s"}`,
-    `${s.passages.toLocaleString()} passage${s.passages === 1 ? "" : "s"}${unembedded ? ` (${unembedded.toLocaleString()} keywords only)` : ""}`,
+    `${s.passages.toLocaleString()} passage${s.passages === 1 ? "" : "s"}`,
     bytes ? `index ${formatBytes(bytes)}` : "",
   ].filter(Boolean).join(" · ");
 }
@@ -2115,12 +2114,14 @@ function renderModelPick(models) {
   const pick = $("#model-pick");
   pick.replaceChildren(...models.map((m) => h("option", { value: m.id }, m.label)));
   pick.value = state.model ?? "";
-  pick.hidden = !models.length;
+  $("#model-name").textContent = pick.selectedOptions[0]?.textContent ?? "";
+  $("#model-box").hidden = !models.length;
 }
 
 function pickModel(id) {
   state.model = id;
   store.set("model", id);
+  $("#model-name").textContent = $("#model-pick").selectedOptions[0]?.textContent ?? id;
   if (state.indexStatus) renderIndexStatus(state.indexStatus);
   runSearch();
   if (state.relatedFor) requestRelated();

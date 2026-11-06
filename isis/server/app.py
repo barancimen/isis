@@ -230,7 +230,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             "folders": [name for name in engine.roots if name],  # when serving several folders
             "model": getattr(engine.embedder, "model_id", None),  # the default
             "models": [
-                {"id": e.model_id, "label": e.model_id.split("/")[-1],
+                {"id": e.model_id, "label": e.model_id,  # the organisation and the model
                  "unembedded": int((~engine.view(e).has_vector).sum()), "index_bytes": engine.index_bytes(e)}
                 for e in engine.embedders
             ],
