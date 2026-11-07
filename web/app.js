@@ -1505,9 +1505,12 @@ async function fetchRelated() {
   state.relatedTerms = result.terms;
   state.relatedLanes = result.lanes;
   rememberLikes(result.prefs);
-  const lanes = result.lanes.map((lane) =>
+  // The time taken goes beside the first heading, where Refresh scrolls to.
+  const took = stop();
+  const lanes = result.lanes.map((lane, i) =>
     h("section", { class: "lane" },
-      h("h3", {}, lane.title, h("span", { class: "count" }, String(lane.items.length))),
+      h("h3", {}, lane.title, h("span", { class: "count" }, String(lane.items.length)),
+        i === 0 && h("span", { class: "took", title: "How long these results took" }, took)),
       h("p", { class: "lane-desc" }, lane.description),
       lane.note && h("p", { class: "lane-note" }, lane.note),
       lane.items.map((hit) => renderHit(hit, { lane: lane.name })),
@@ -1515,14 +1518,12 @@ async function fetchRelated() {
   );
   renderChips(state.relatedTerms);
   $("#related-lanes").replaceChildren(...lanes);
-  const took = stop();
   showPrefs(result.prefs);
   const s = result.stats;
-  const themes = result.themes.map((t) => t.label).join(" · ");
   const summary = s.gated === undefined
     ? (result.lanes[0]?.note || "")
-    : `${s.gated} of ${s.passages.toLocaleString()} passages are clearly related${themes ? ` · the topics are ${themes}` : ""}`;
-  $("#related-status").textContent = summary ? `${summary} · ${took}` : took;
+    : `${s.gated} of ${s.passages.toLocaleString()} passages are clearly related`;
+  $("#related-status").textContent = result.lanes.length ? summary : [summary, took].filter(Boolean).join(" · ");
 }
 
 // The keywords taken from the task. Boosting writes the word into the steer line; ignoring takes
