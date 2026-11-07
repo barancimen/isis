@@ -37,6 +37,29 @@ function debounce(fn, ms) {
   return wrapped;
 }
 
+// "13ms" or "12s 552ms".
+function formatElapsed(ms) {
+  const whole = Math.floor(ms);
+  return whole < 1000 ? `${whole}ms` : `${Math.floor(whole / 1000)}s ${whole % 1000}ms`;
+}
+
+// Counts the time since now, live, through `show`, until the returned stop() is called. stop()
+// gives the time taken and may be called more than once.
+function stopwatch(show) {
+  const started = performance.now();
+  let frame = requestAnimationFrame(function tick() {
+    show(formatElapsed(performance.now() - started));
+    frame = requestAnimationFrame(tick);
+  });
+  show(formatElapsed(0));
+  let took = null;
+  return () => {
+    cancelAnimationFrame(frame);
+    took ??= formatElapsed(performance.now() - started);
+    return took;
+  };
+}
+
 async function api(method, url, body, options = {}) {
   const res = await fetch(url, {
     method,
@@ -773,6 +796,7 @@ async function showView(view) {
 function showViewSearch(view) {
   runSearch.cancel();
   state.searchSeq++;
+  stopSearchClock();
   state.searchAsTyped = view.asTyped ?? null;
   state.searchTop = view.searchTop ?? 0;
   state.hiddenDocs = cleanHiddenDocs(view.hiddenDocs);
@@ -1332,10 +1356,12 @@ function renderHit(hit, { lane = null } = {}) {
 // ---------- search panel ----------
 
 const SEARCH_LIMIT = 50;
+let stopSearchClock = () => {};
 
 async function searchNow() {
   const q = $("#search-input").value;
   const seq = ++state.searchSeq;
+  stopSearchClock();
   if (!q.trim()) {
     $("#search-status").textContent = "";
     $("#search-results").replaceChildren();
@@ -1344,6 +1370,7 @@ async function searchNow() {
     return;
   }
   $("#search-results").classList.add("stale");
+  const stop = stopSearchClock = stopwatch((t) => { $("#search-status").textContent = `Searching… ${t}`; });
   try {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
     const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
@@ -1354,9 +1381,11 @@ async function searchNow() {
     const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}${asTyped}${model}`);
     if (seq !== state.searchSeq) return;
     const n = result.hits.length;
+    $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
+    const took = stop();
     const byMeaning = result.hits.some((hit) => "meaning_rank" in hit.why);
     const how = !byMeaning ? "" : result.hits.some((hit) => hit.why.keyword_rank) ? " by keywords and meaning" : " by meaning only";
-    const summary = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} ${n === 1 ? "passage" : "passages"}${how} · ${result.ms} ms` : "No passages found.";
+    const summary = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} ${n === 1 ? "passage" : "passages"}${how} · ${took}` : `No passages found · ${took}`;
     const correction = result.corrected && [
       "Showing results for ",
       h("strong", {}, result.corrected),
@@ -1365,11 +1394,11 @@ async function searchNow() {
       " · ",
     ];
     $("#search-status").replaceChildren(...(correction || []), summary);
-    $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
     $("#search-results").classList.remove("stale");
     searchArrived();
   } catch (error) {
     if (seq !== state.searchSeq) return;
+    stop();
     if (error.status !== 400) fail(error);
     $("#search-status").textContent = error.status === 400 ? `⚠ ${error.message}` : "";
     $("#search-results").replaceChildren();
@@ -1456,15 +1485,20 @@ async function fetchRelated() {
   const name = state.task;
   state.relatedStale = false;
   updateRefreshButton();
-  $("#related-status").textContent = "Refreshing…";
   $("#related-status").setAttribute("aria-busy", "true");
   for (const id of ["#related-lanes", "#related-terms"]) $(id).classList.add("stale");
-  const result = await api("POST", `api/tasks/${enc(name)}/related`, {
-    text: taskView.state.doc.toString(),
-    params: state.params.related,
-    skip_folders: [...state.skipped.related],
-    model: state.model ?? "",
-  });
+  const stop = stopwatch((t) => { $("#related-status").textContent = `Refreshing… ${t}`; });
+  let result;
+  try {
+    result = await api("POST", `api/tasks/${enc(name)}/related`, {
+      text: taskView.state.doc.toString(),
+      params: state.params.related,
+      skip_folders: [...state.skipped.related],
+      model: state.model ?? "",
+    });
+  } finally {
+    stop();
+  }
   if (name !== state.task) return;
 
   state.relatedFor = name;
@@ -1481,12 +1515,14 @@ async function fetchRelated() {
   );
   renderChips(state.relatedTerms);
   $("#related-lanes").replaceChildren(...lanes);
+  const took = stop();
   showPrefs(result.prefs);
   const s = result.stats;
   const themes = result.themes.map((t) => t.label).join(" · ");
-  $("#related-status").textContent = s.gated === undefined
+  const summary = s.gated === undefined
     ? (result.lanes[0]?.note || "")
     : `${s.gated} of ${s.passages.toLocaleString()} passages are clearly related${themes ? ` · the topics are ${themes}` : ""}`;
+  $("#related-status").textContent = summary ? `${summary} · ${took}` : took;
 }
 
 // The keywords taken from the task. Boosting writes the word into the steer line; ignoring takes
