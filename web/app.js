@@ -1339,9 +1339,11 @@ async function searchNow() {
   if (!q.trim()) {
     $("#search-status").textContent = "";
     $("#search-results").replaceChildren();
+    $("#search-results").classList.remove("stale");
     searchArrived();
     return;
   }
+  $("#search-results").classList.add("stale");
   try {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
     const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
@@ -1364,12 +1366,14 @@ async function searchNow() {
     ];
     $("#search-status").replaceChildren(...(correction || []), summary);
     $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
+    $("#search-results").classList.remove("stale");
     searchArrived();
   } catch (error) {
     if (seq !== state.searchSeq) return;
     if (error.status !== 400) fail(error);
     $("#search-status").textContent = error.status === 400 ? `⚠ ${error.message}` : "";
     $("#search-results").replaceChildren();
+    $("#search-results").classList.remove("stale");
     searchArrived();
   }
 }
@@ -1435,6 +1439,7 @@ function refreshRelated() {
       throw error;
     } finally {
       $("#related-status").removeAttribute("aria-busy");
+      for (const id of ["#related-lanes", "#related-terms"]) $(id).classList.remove("stale");
       relatedRunning = null;
       updateRefreshButton();
     }
@@ -1453,6 +1458,7 @@ async function fetchRelated() {
   updateRefreshButton();
   $("#related-status").textContent = "Refreshing…";
   $("#related-status").setAttribute("aria-busy", "true");
+  for (const id of ["#related-lanes", "#related-terms"]) $(id).classList.add("stale");
   const result = await api("POST", `api/tasks/${enc(name)}/related`, {
     text: taskView.state.doc.toString(),
     params: state.params.related,

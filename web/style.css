@@ -200,6 +200,19 @@ code { font-family: inherit; font-size: 0.92em; }
 /* ---- results (search and related) ---- */
 
 .results { display: flex; flex-direction: column; gap: 6px; }
+/* While newer results are on the way, the old ones fade under a veil of the page's colour. It comes
+   after a moment, so a quick answer doesn't flicker, and clicks still reach the results below. */
+.results, #related-terms { position: relative; }
+.results::after, #related-terms::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.results.stale::after, #related-terms.stale::after { opacity: 0.6; transition-delay: 0.15s; }
 .hit {
   border: 1px solid var(--border);
   border-radius: 8px;
