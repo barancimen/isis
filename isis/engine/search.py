@@ -9,7 +9,8 @@ spacing ignored) or a /regex/ (Python syntax; case-insensitive unless it has a c
     -x     never: passages matching x are dropped. A word is matched by its stem, so -whale also
            drops "whales" and "whaling".
 A partly typed last word is expanded to the corpus terms it starts. correct_query fixes misspelled
-plain words before a query from the page gets here. The + and - clauses filter
+plain words before a query from the page gets here. Words to prefer or require also match corpus
+words a typo or two away, for typos in the documents (see typo_terms). The + and - clauses filter
 every passage before ranking, in both modes, so similarity of meaning never brings back a
 passage they exclude. The same clauses steer the Related panel (see related.py).
 """
@@ -41,6 +42,11 @@ SITE = re.compile(r"site:(.*)", re.IGNORECASE)
 MIN_PREFIX = 3
 MAX_EXPANSIONS = 20
 MIN_TYPO_LENGTH, MIN_TWO_TYPOS_LENGTH = 4, 8  # letters a word needs for one typo, and for two
+# A typo is far rarer than the word it misspells: a word near yours counts as a typo of it, or yours
+# as a typo of it, only if one is in this many times as many passages as the other. Two words of
+# about the same frequency (form and farm) are more likely two real words.
+TYPO_RARITY = 10
+MAX_TYPO_TERMS = 50  # the most terms one word matches by typos, closest and most common first
 
 KEYWORDS = Group("Keyword score", "How well the words in a passage match yours.")
 FUSION = Group(
@@ -92,6 +98,14 @@ class SearchConfig:
         "Raise it to rank these passages higher.\n"
         "Lower it to rank them lower. At 0, they count only through \"How important keywords are\". "
         "If that's also at 0, they won't appear.",
+    )
+    typo_weight: float = tunable(
+        0.5, label="Words with typos", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        help="Search also finds words a typo away from yours, in case a document misspells them. "
+        "This is how much such a word counts next to the word you typed. Two typos away counts this times itself.\n"
+        "Raise it to rank passages with misspellings higher.\n"
+        "Lower it to rank them lower. At 0, only your words are matched as you typed them. "
+        "Words after + or - are always matched exactly.",
     )
     candidates: int = tunable(
         300, label="Length of each list", group=FUSION, min=20, max=2000, step=10,
@@ -376,7 +390,7 @@ def expand_prefix(snapshot: Snapshot, prefix: str, limit: int = MAX_EXPANSIONS) 
     return sorted(found, key=lambda t: -df[snapshot.term_id(t)])[:limit]
 
 
-def parse_query(snapshot: Snapshot, query: str) -> Query:
+def parse_query(snapshot: Snapshot, query: str, typo_weight: float = 0.0) -> Query:
     clauses = split_query(query)
     steer = steering(clauses)
     weights: dict[int, float] = {}
@@ -386,53 +400,70 @@ def parse_query(snapshot: Snapshot, query: str) -> Query:
         if tid is not None:
             weights[tid] = float(count)
             terms.add(stem)
+    typing = None  # a partly typed last word
     last = clauses[-1] if clauses else None
     if query and not query[-1].isspace() and last is not None and last.kind == "word" and last.op != NEVER:
         pairs = tokenize_with_surface(last.value)
         if pairs and snapshot.term_id(pairs[-1][0]) is None and len(pairs[-1][1]) >= MIN_PREFIX:
-            for t in expand_prefix(snapshot, pairs[-1][1]):  # a partly typed last word
+            typing = pairs[-1][0]
+            for t in expand_prefix(snapshot, pairs[-1][1]):
                 weights.setdefault(snapshot.term_id(t), 1.0)
                 terms.add(t)
+    if typo_weight > 0:
+        for stem, count in steer.words.items():
+            if stem == typing:
+                continue
+            for tid, weight in typo_terms(snapshot, stem, steer.surfaces[stem], typo_weight).items():
+                weights[tid] = max(weights.get(tid, 0.0), count * weight)
+                terms.add(snapshot.vocab.terms[tid])
     unknown = any(snapshot.term_id(stem) is None and len(word) >= MIN_PREFIX for stem, word in steer.surfaces.items())
     return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, steer.highlight, unknown)
 
 
-def typo_distance(a: str, b: str) -> int:
-    """How many typos turn `a` into `b`: a wrong, missing or extra letter, or two letters swapped."""
-    before, row = [], list(range(len(b) + 1))
-    for i, x in enumerate(a, 1):
-        before, row, last = row, [i], before
-        for j, y in enumerate(b, 1):
-            cost = min(before[j] + 1, row[j - 1] + 1, before[j - 1] + (x != y))
-            if i > 1 and j > 1 and x == b[j - 2] and a[i - 2] == y:
-                cost = min(cost, last[j - 2] + 1)
-            row.append(cost)
-    return row[-1]
+def typo_limit(word: str) -> int:
+    """How many typos a word may have: none if it's short or not all letters (a typo in a number
+    is another number)."""
+    if len(word) < MIN_TYPO_LENGTH or not word.isalpha():
+        return 0
+    return 2 if len(word) >= MIN_TWO_TYPOS_LENGTH else 1
 
 
-def closest_term(snapshot: Snapshot, stem: str, limit: int) -> str | None:
-    """The nearest corpus term within `limit` typos; of equally near ones, the most common."""
-    letters, df = set(stem), snapshot.bm25.doc_freq
-    best, best_key = None, None
-    for term in snapshot.sorted_terms:
-        # One typo changes the length by at most 1, and the set of letters by at most 2.
-        if abs(len(term) - len(stem)) > limit or len(letters ^ set(term)) > 2 * limit:
-            continue
-        distance = typo_distance(stem, term)
-        key = (distance, -df[snapshot.term_id(term)], term)
-        if distance <= limit and (best_key is None or key < best_key):
-            best, best_key = term, key
-    return best
+def near_words(snapshot: Snapshot, word: str) -> list[tuple[str, int, int]]:
+    """(word, term id, typos) for the corpus words a typo or two from `word`, by typo_limit, whose
+    term is still in the corpus. The last few lookups are kept, since typing repeats them."""
+
+    def find() -> list[tuple[str, int, int]]:
+        view, df = snapshot.words, snapshot.bm25.doc_freq
+        rows, typos = view.near(word, typo_limit(word))
+        found = [(view.words[i], int(view.terms[i]), int(t)) for i, t in zip(rows.tolist(), typos.tolist())]
+        return [(w, tid, t) for w, tid, t in found if tid < len(df) and df[tid] > 0]
+
+    return snapshot.cached(snapshot.near_words, word, 256, find)
 
 
-def written_form(snapshot: Snapshot, term: str, typed: str) -> str:
-    """A term as a word, since a stem can be no word at all: the form nearest to what was typed."""
-    matrix, column = snapshot.bm25.matrix, snapshot.term_id(term)
-    forms = set()
-    for row in matrix.indices[matrix.indptr[column]:matrix.indptr[column + 1]][:5]:
-        passage = snapshot.passages[row]
-        forms.update(word for t, word in tokenize_with_surface(f"{passage.heading} {passage.text}") if t == term)
-    return min(forms, key=lambda word: (typo_distance(typed, word), word), default=term)
+def typo_terms(snapshot: Snapshot, stem: str, word: str, typo_weight: float) -> dict[int, float]:
+    """Term id -> weight for the terms of the corpus words a typo or two from `word` (whose term is
+    `stem`), and for `stem` itself if it is in the corpus.
+
+    In BM25 a rare word weighs more, and a typo is about as rare as words get, so a passage with a
+    typo would rank above those with the word spelt right. As in Lucene's fuzzy queries, every
+    term here is weighed as if it were as common as the most common of them. A term then counts
+    `typo_weight` times as much per typo."""
+    df, idf = snapshot.bm25.doc_freq, snapshot.bm25.idf
+    tid = snapshot.term_id(stem)
+    own = int(df[tid]) if tid is not None else 0
+    best: dict[int, int] = {}
+    for _, term, typos in near_words(snapshot, word):
+        if term != tid and (not own or df[term] * TYPO_RARITY <= own or df[term] >= own * TYPO_RARITY):
+            best[term] = min(typos, best.get(term, typos))
+    if not best:
+        return {}
+    chosen = sorted(best, key=lambda t: (best[t], -df[t], t))[:MAX_TYPO_TERMS]
+    common = min(float(idf[t]) for t in chosen + ([tid] if own else []))
+    weights = {t: typo_weight ** best[t] * common / float(idf[t]) for t in chosen}
+    if own:
+        weights[tid] = common / float(idf[tid])
+    return weights
 
 
 def correct_query(snapshot: Snapshot, query: str) -> str | None:
@@ -440,20 +471,21 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
     no passage contains is changed: + and - clauses, phrases and regexes mean what they say."""
     if not len(snapshot):
         return None
+    df = snapshot.bm25.doc_freq
     parts, at = [], 0
     for m in TOKEN.finditer(query):
         written = m.group(5)
         pairs = tokenize_with_surface(written) if written and m.group(1) == PREFER else []
         if len(pairs) != 1 or snapshot.term_id(pairs[0][0]) is not None:
             continue
-        stem, word = pairs[0]
-        if len(word) < MIN_TYPO_LENGTH or not word.isalpha():
+        word = pairs[0][1]
+        if not typo_limit(word):
             continue
         if m.end() == len(query) and expand_prefix(snapshot, word, 1):
             continue  # still being typed
-        term = closest_term(snapshot, stem, 2 if len(word) >= MIN_TWO_TYPOS_LENGTH else 1)
-        if term:
-            parts += [query[at:m.start(5)], written_form(snapshot, term, word)]
+        near = near_words(snapshot, word)
+        if near:  # the closest, then the one whose term is in the most passages
+            parts += [query[at:m.start(5)], min(near, key=lambda n: (n[2], -df[n[1]], n[0]))[0]]
             at = m.end(5)
     return "".join(parts) + query[at:] if parts else None
 
@@ -506,7 +538,7 @@ def search(
     config = config or SearchConfig()
     if not len(snapshot) or not query.strip():
         return []
-    q = parse_query(snapshot, query)
+    q = parse_query(snapshot, query, config.typo_weight)
     if not q.term_ids and not q.patterns and not q.filters.requires and not q.filters.sites and not q.unknown:
         return []  # only exclusions, or a regex still being typed: nothing to look for
     allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)

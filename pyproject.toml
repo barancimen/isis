@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",
   "PyStemmer>=2.2",
+  "rapidfuzz>=3.0",
   "onnxruntime>=1.17",
   "tokenizers>=0.15",
   "huggingface_hub>=0.20",

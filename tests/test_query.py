@@ -4,7 +4,7 @@ import pytest
 
 from conftest import write_corpus
 from isis.engine.index import Engine
-from isis.engine.search import QueryError, correct_query, split_query, steering, typo_distance
+from isis.engine.search import QueryError, SearchConfig, correct_query, split_query, steering
 
 
 def paths(hits):
@@ -102,11 +102,63 @@ def test_meaning_weight_zero_is_keyword_search(engine):
     assert engine.search("whale", mode="hybrid", config=SearchConfig(meaning_weight=0, keyword_weight=0)) == []
 
 
-def test_typo_distance():
-    assert typo_distance("whale", "whale") == 0
-    assert typo_distance("whle", "whale") == 1
-    assert typo_distance("whlae", "whale") == 1  # two letters swapped
-    assert typo_distance("wlhae", "whale") == 2
+def typo_corpus(tmp_path, **files):
+    folder = tmp_path / "typos"
+    write_corpus(folder, files)
+    engine = Engine(folder, index_dir=tmp_path / "typo-index")
+    engine.refresh()
+    return engine
+
+
+def test_words_with_typos_in_documents_are_found(tmp_path):
+    files = {f"right{i}.md": f"The information desk number {i}." for i in range(12)}
+    files["typo.md"] = "The informaton desk was closed."
+    files["swap.md"] = "Some infromation about it."
+    files["other.md"] = "Nothing to see here."
+    engine = typo_corpus(tmp_path, **files)
+    found = paths(engine.search("information"))
+    assert found[-2:] in (["typo.md", "swap.md"], ["swap.md", "typo.md"])  # after every right spelling
+    assert "other.md" not in found
+    assert paths(engine.search("information", config=SearchConfig(typo_weight=0))) == found[:-2]
+    assert "typo.md" not in paths(engine.search("+information"))  # + means exactly this word
+    hit = next(h for h in engine.search("information") if h.path == "typo.md")
+    assert hit.marks  # the misspelt word is highlighted
+
+
+def test_words_about_as_common_as_yours_are_not_typos(tmp_path):
+    engine = typo_corpus(tmp_path, **{"form.md": "A form to fill in.", "farm.md": "A farm with cows."})
+    assert paths(engine.search("form")) == ["form.md"]
+
+
+def test_a_misspelt_query_word_also_finds_the_right_spelling(tmp_path):
+    files = {f"right{i}.md": f"The information desk number {i}." for i in range(12)}
+    files["typo.md"] = "The informaton desk was closed."
+    engine = typo_corpus(tmp_path, **files)
+    found = paths(engine.search("informaton"))
+    assert found[0] == "typo.md" and len(found) == 13
+
+
+def test_typos_are_measured_on_words_not_stems(tmp_path):
+    engine = typo_corpus(tmp_path, **{"a.md": "Information and naturally."})
+    assert correct_query(engine.snapshot, "informaton") == "information"  # the stem is inform
+    assert correct_query(engine.snapshot, "naturaly") in ("naturally",)
+
+
+def test_words_survive_the_cache_and_old_caches_get_them(tmp_path):
+    engine = typo_corpus(tmp_path, **{"a.md": "The informaton desk.", "b.md": "Plain words."})
+    words = set(engine.snapshot.words.words)
+    assert "informaton" in words
+    again = Engine(tmp_path / "typos", index_dir=tmp_path / "typo-index")
+    assert set(again.snapshot.words.words) == words
+    index = tmp_path / "typo-index"
+    meta_path = next(index.rglob("index.json"))
+    meta = json.loads(meta_path.read_text())
+    del meta["words"]  # a cache from before words were kept
+    meta_path.write_text(json.dumps(meta))
+    old = Engine(tmp_path / "typos", index_dir=index)
+    assert set(old.snapshot.words.words) == words
+    old.refresh()  # saves them
+    assert "words" in json.loads(meta_path.read_text())
 
 
 def test_only_unknown_plain_words_are_corrected(engine):

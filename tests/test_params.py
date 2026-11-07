@@ -24,7 +24,7 @@ def test_specs_describe_every_tunable_value():
     assert by_name["query"]["type"] == "choice" and by_name["query"]["choices"] == ["document", "paragraphs"]
     assert by_name["mmr_lambda.hidden"]["default"] == 0.6
     assert "lane_prior" not in by_name and "mmr_pool" not in by_name  # not tunable from the page
-    assert {s["name"] for s in specs(SearchConfig)} == {"k1", "b", "rrf_k", "keyword_weight", "meaning_weight", "unembedded_weight", "candidates"}
+    assert {s["name"] for s in specs(SearchConfig)} == {"k1", "b", "rrf_k", "keyword_weight", "meaning_weight", "unembedded_weight", "typo_weight", "candidates"}
 
 
 def test_configure_applies_valid_overrides_and_ignores_the_rest():

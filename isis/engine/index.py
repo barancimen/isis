@@ -28,7 +28,8 @@ import numpy as np
 
 from .chunker import MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, split_lines
 from .lexical import BM25, Vocabulary, term_counts
-from .text import tokenize
+from .text import STOPWORDS, WORD, stem_words, tokenize_with_surface
+from .typos import WordView, Words
 
 log = logging.getLogger(__name__)
 
@@ -119,12 +120,14 @@ class Snapshot:
     bm25: BM25
     vocab: Vocabulary  # shared with the engine and only ever grows: look terms up with term_id()
     sorted_terms: list[str]  # terms that occur in the corpus, for prefix expansion
+    words: WordView  # every word as written, with its term, for typo-tolerant search
     vectors: np.ndarray  # float32 [n, dim] from one model; zero rows where has_vector is False
     has_vector: np.ndarray  # bool [n]
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
     file_sites: dict[str, str] = field(default_factory=dict)  # path -> host, for documents that have one
     _bm25_variants: dict = field(default_factory=dict, repr=False)
     _pattern_counts: dict = field(default_factory=dict, repr=False)
+    near_words: dict = field(default_factory=dict, repr=False)  # for search.near_words
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
     _typical: dict = field(default_factory=dict, repr=False)
@@ -232,6 +235,8 @@ class Engine:
         self.exclude = {Path(p).resolve() for p in exclude}
         self.chunking = (target_words, max_words)
         self.vocab = Vocabulary()
+        self.words = Words()
+        self._words_unsaved = False  # words listed from a cache that didn't have them
         self.files: dict[str, FileRecord] = {}
         self.status = IndexStatus()
         self._lock = threading.Lock()
@@ -416,9 +421,13 @@ class Engine:
     def _read(self, path: str, stat: os.stat_result) -> FileRecord:
         text = self._located(path).read_text(encoding="utf-8", errors="replace")
         passages = chunk_markdown(path, text, *self.chunking)
-        tokens = [tokenize(p.heading) + tokenize(p.text) for p in passages]
+        pairs = [tokenize_with_surface(p.heading) + tokenize_with_surface(p.text) for p in passages]
         site = document_site(split_lines(text)[:MAX_FRONT_MATTER])
-        return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *term_counts(tokens, self.vocab), site=site)
+        record = FileRecord(stat.st_mtime_ns, stat.st_size, passages,
+                            *term_counts([[t for t, _ in ps] for ps in pairs], self.vocab), site=site)
+        for term, word in {pair for ps in pairs for pair in ps}:
+            self.words.add(word, self.vocab.ids[term])
+        return record
 
     def _site_on_disk(self, path: str) -> str | None:
         """The site of a file in a cache from before sites were kept, without reading all of it."""
@@ -493,9 +502,10 @@ class Engine:
             self._publish()
 
         embedded, filled = self._embed_missing(on_progress)
-        if touched or filled:
+        if touched or filled or self._words_unsaved:
             self._publish()
             self._save()
+            self._words_unsaved = False
         self._set_state("ready", on_progress)
         if first or touched or filled:
             meaning = ", keywords only" if self.embedder is None else (
@@ -627,6 +637,7 @@ class Engine:
             bm25=bm25,
             vocab=self.vocab,
             sorted_terms=sorted(self.vocab.terms[i] for i in np.flatnonzero(bm25.doc_freq)),
+            words=self.words.view(),
             vectors=default_vectors,
             has_vector=default_has,
             file_rows=file_rows,
@@ -738,11 +749,13 @@ class Engine:
         records = [self.files[p] for p in paths]
         term_ids = np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32)
         used, local_ids = np.unique(term_ids, return_inverse=True)  # the cache names only its own terms
+        words, word_terms, word_masks = self.words.of_terms(used)
         meta = {
             "version": INDEX_VERSION,
             "chunking": list(self.chunking),
             "chunker": self._chunker_from.get(prefix, CHUNKER_VERSION),
             "vocab": [self.vocab.terms[i] for i in used],
+            "words": words,  # as written, each with its term in word_terms
             "files": [
                 {
                     "path": path[len(lead):],
@@ -759,6 +772,8 @@ class Engine:
             "term_ids": local_ids.astype(np.int32),
             "counts": np.concatenate([r.counts for r in records]) if records else np.zeros(0, np.float32),
             "vectors": np.zeros((0, 0), np.float16),  # each model's are in a file of their own
+            "word_terms": word_terms,
+            "word_masks": word_masks,  # their letters, so loading needn't work them out again
         }
         # The arrays go first: a cache is only used when its JSON matches them (see _load).
         unique = f"{os.getpid()}-{threading.get_ident()}"  # another process may share the folder
@@ -789,12 +804,20 @@ class Engine:
                 return
             with np.load(npz_path, allow_pickle=False) as data:
                 arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
+                word_terms = data["word_terms"] if "word_terms" in data else None
+                word_masks = data["word_masks"] if "word_masks" in data else None
             terms = list(meta["vocab"])
             legacy = meta.get("embedder")  # a cache from before each model had a file of its own
             lead = f"{prefix}/" if prefix else ""
             ids = np.fromiter((self.vocab.add(t) for t in terms), np.int32, len(terms))  # into the shared vocabulary
             arrays["term_ids"] = ids[arrays["term_ids"]] if len(ids) else arrays["term_ids"]
             files, legacy_vectors = self._records(meta["files"], arrays, lead)
+            if word_terms is not None and word_masks is not None and "words" in meta:
+                if not len(meta["words"]) == len(word_terms) == len(word_masks):
+                    raise ValueError("the word list doesn't match its terms")
+                self.words.extend(meta["words"], ids[word_terms].tolist(), word_masks)
+            else:
+                self._list_words(files)
         except Exception as e:
             log.warning("ignoring unreadable index cache in %s: %s", folder, e)
             return
@@ -817,6 +840,22 @@ class Engine:
                 log.info("files are split differently now: reading them again (unchanged passages keep their embeddings)")
                 for record in files.values():
                     record.mtime_ns = 0  # looks changed to the next refresh
+
+    def _list_words(self, files: dict[str, FileRecord]) -> None:
+        """The words of a cache from before words were kept, from the passages it holds, so the
+        files don't have to be read again. Only the distinct words are stemmed."""
+        n = sum(len(r.passages) for r in files.values())
+        log.info("listing the words of %s for typo-tolerant search (only this once)", _count(n, "passage"))
+        found: set[str] = set()
+        for record in files.values():
+            for p in record.passages:
+                found.update(WORD.findall(p.heading))
+                found.update(WORD.findall(p.text))
+        words = sorted({w.lower() for w in found} - STOPWORDS)
+        words = [w for w in words if len(w) > 1]
+        found_terms = [(w, self.vocab.get(t)) for w, t in zip(words, stem_words(words))]
+        self.words.extend([w for w, i in found_terms if i is not None], [i for _, i in found_terms if i is not None])
+        self._words_unsaved = True
 
     @staticmethod
     def _records(entries: list[dict], arrays: dict, lead: str = "") -> tuple[dict[str, FileRecord], dict[str, np.ndarray]]:

@@ -43,6 +43,11 @@ def _stems(words: list[tuple[int, int, str]]) -> list[str]:
     return _stemmer().stemWords([w for _, _, w in words])
 
 
+def stem_words(words: list[str]) -> list[str]:
+    """The search term of each lowercase word."""
+    return _stemmer().stemWords(words)
+
+
 def tokenize(text: str) -> list[str]:
     """Search terms in `text`, in order."""
     return _stems(_words(text))
