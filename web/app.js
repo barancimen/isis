@@ -1487,7 +1487,12 @@ async function fetchRelated() {
   updateRefreshButton();
   $("#related-status").setAttribute("aria-busy", "true");
   for (const id of ["#related-lanes", "#related-terms"]) $(id).classList.add("stale");
-  const stop = stopwatch((t) => { $("#related-status").textContent = `Refreshing… ${t}`; });
+  // The time beside Best results counts too, above the fade, as that is where the reader may be.
+  const shown = $("#related-lanes .took");
+  const stop = stopwatch((t) => {
+    $("#related-status").textContent = `Refreshing… ${t}`;
+    if (shown) shown.textContent = t;
+  });
   let result;
   try {
     result = await api("POST", `api/tasks/${enc(name)}/related`, {
