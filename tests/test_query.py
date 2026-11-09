@@ -2,14 +2,89 @@ import json
 
 import pytest
 
-from conftest import write_corpus
+from conftest import paths, write_corpus
 from isis.engine.index import Engine
 from isis.engine.search import QueryError, SearchConfig, correct_query, split_query, steering
+from isis.engine.semantic import HashEmbedder
 
 
-def paths(hits):
-    return [h.path for h in hits]
+# ---- ranking and snippets ----
 
+def test_search_returns_location_snippet_and_highlights(engine):
+    (hit,) = engine.search("ambergris")
+    assert (hit.path, hit.heading, hit.start_line, hit.end_line) == ("whales.md", "Whales", 4, 4)
+    assert hit.match == (4, 0, len("Ambergris"))
+    line = next(s for s in hit.snippet if s.line == 4)
+    assert line.in_passage and line.marks == [(0, 9)]
+    assert [s.line for s in hit.snippet] == [2, 3, 4, 5]  # two lines of context either side
+
+
+def test_ranking_prefers_more_and_rarer_matches(engine):
+    hits = engine.search("whale captain")
+    assert hits[0].path == "ships/pequod.md" and "Ahab" in hits[0].text
+
+
+def test_partly_typed_last_word_is_expanded(engine):
+    assert "finches.md" in paths(engine.search("galap"))
+    assert engine.search("galap ") == []  # a finished word is not expanded
+
+
+def test_hybrid_mode_keeps_the_best_of_each_signal(engine):
+    hits = engine.search("finches beaks", mode="hybrid", limit=3)
+    assert hits[0].path == "finches.md" and hits[0].why["keyword_rank"] == 1 and hits[0].why["meaning_rank"] == 1
+    assert {"bm25", "cosine"} <= set(hits[0].why)
+    meaning_only = [h for h in engine.search("finches beaks", mode="hybrid") if h.why["keyword_rank"] is None]
+    assert meaning_only and all(h.why["meaning_rank"] for h in meaning_only)  # found by meaning alone, and labelled so
+
+
+def test_hybrid_search_does_not_bury_passages_without_embeddings(tmp_path):
+    root = tmp_path / "c"
+    (root / "plain").mkdir(parents=True)
+    (root / "plain" / ".no-embed").touch()
+    (root / "plain" / "exact.md").write_text("Coral reefs and coral atolls.\n")
+    for i in range(6):  # embedded passages that share a word and so are close in meaning
+        (root / f"e{i}.md").write_text(f"Coral and the sea, number {i}, with other words here.\n")
+    e = Engine(root, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    e.refresh()
+    rank = lambda w: paths(e.search("coral reefs", mode="hybrid", config=SearchConfig(unembedded_weight=w))).index("plain/exact.md")
+    assert rank(1.0) == 0 and rank(0.0) > 0
+    hit = next(h for h in e.search("coral reefs", mode="hybrid") if h.path == "plain/exact.md")
+    assert hit.why["embedded"] is False and hit.why["meaning_rank"] is None
+
+
+# ---- passages without embeddings ----
+
+@pytest.fixture(scope="module")
+def plain_engine(tmp_path_factory):
+    """Coral passages, five of them in a folder that is kept to keywords."""
+    root = tmp_path_factory.mktemp("corpus")
+    (root / "plain").mkdir()
+    (root / "plain" / ".no-embed").touch()
+    for i in range(5):
+        (root / "plain" / f"p{i}.md").write_text(f"The coral reef number {i} is plain.\n")
+    for i in range(10):
+        (root / f"e{i}.md").write_text(f"Coral and fish number {i} in the sea.\n")
+    e = Engine(root, embedder=HashEmbedder(), index_dir=tmp_path_factory.mktemp("index"))
+    e.refresh()
+    return e
+
+
+@pytest.mark.parametrize("query", ["coral reef", '"coral reef"', "/coral/", "+coral", "coral +/reef|fish/"])
+def test_with_nothing_to_count_for_them_passages_without_embeddings_are_left_out(plain_engine, query):
+    e = plain_engine
+    plain = lambda hits: [h for h in hits if h.path.startswith("plain/")]
+    hits = e.search(query, mode="hybrid", config=SearchConfig(keyword_weight=0, unembedded_weight=0))
+    assert hits and not plain(hits)
+    assert plain(e.search(query, mode="hybrid", config=SearchConfig(keyword_weight=0.5, unembedded_weight=0)))
+    kept = e.search(query, mode="hybrid", config=SearchConfig(keyword_weight=0, unembedded_weight=1))
+    assert plain(kept) and all(h.score > 0 for h in kept)  # either weight keeps them
+    assert plain(e.search(query, mode="hybrid"))  # the defaults keep them
+    assert plain(e.search(query, mode="lexical"))
+    lexical = e.search(query, mode="lexical", config=SearchConfig(keyword_weight=0, unembedded_weight=0))
+    assert not plain(lexical)  # with or without 'meaning' ticked
+
+
+# ---- the query language ----
 
 def test_query_tokens():
     clauses = split_query('whale +ship -"sperm whale" /cap\\w+/ +/x/ -/ahab/ /typ')
@@ -29,6 +104,7 @@ def test_query_tokens():
 
 def test_prefer_require_and_never(engine):
     assert paths(engine.search('"white whale"')) == ["ships/pequod.md"]  # a phrase alone: exact matches only
+    assert engine.search('"whale white"') == []
     hits = engine.search("whale /white/")  # prefer: matches first, the rest still found
     assert "white whale" in hits[0].text and len(hits) == 4
     assert [h.text for h in engine.search("whale +/white/")] == [hits[0].text]  # require
@@ -47,7 +123,6 @@ def test_regex_must_match_and_ranks_with_the_words(engine):
     assert marked == ["squid"]
     marked = [line.text[a:b] for h in engine.search('"white whale"') for line in h.snippet for a, b in line.marks]
     assert marked == ["white whale"]  # the phrase and its words make one mark
-
 
 
 def test_phrases_and_regexes_see_headings_like_words_do(engine):
@@ -93,13 +168,15 @@ def test_hits_list_every_highlight_in_the_passage(engine):
 
 
 def test_meaning_weight_zero_is_keyword_search(engine):
-    from isis.engine.search import SearchConfig
-
     for query in ("whale", "whale ship", '"white whale"', "/sq.id/", "whale +ship", "whale -ahab", "+captain"):
         lexical = [(h.path, h.start_line, h.score) for h in engine.search(query, mode="lexical")]
         off = [(h.path, h.start_line, h.score) for h in engine.search(query, mode="hybrid", config=SearchConfig(meaning_weight=0))]
         assert off == lexical, query
     assert engine.search("whale", mode="hybrid", config=SearchConfig(meaning_weight=0, keyword_weight=0)) == []
+
+
+MOSTLY_RIGHT = {**{f"right{i}.md": f"The information desk number {i}." for i in range(12)},
+                "typo.md": "The informaton desk was closed."}
 
 
 def typo_corpus(tmp_path, **files):
@@ -111,11 +188,7 @@ def typo_corpus(tmp_path, **files):
 
 
 def test_words_with_typos_in_documents_are_found(tmp_path):
-    files = {f"right{i}.md": f"The information desk number {i}." for i in range(12)}
-    files["typo.md"] = "The informaton desk was closed."
-    files["swap.md"] = "Some infromation about it."
-    files["other.md"] = "Nothing to see here."
-    engine = typo_corpus(tmp_path, **files)
+    engine = typo_corpus(tmp_path, **MOSTLY_RIGHT, **{"swap.md": "Some infromation about it.", "other.md": "Nothing to see here."})
     found = paths(engine.search("information"))
     assert found[-2:] in (["typo.md", "swap.md"], ["swap.md", "typo.md"])  # after every right spelling
     assert "other.md" not in found
@@ -131,9 +204,7 @@ def test_words_about_as_common_as_yours_are_not_typos(tmp_path):
 
 
 def test_a_misspelt_query_word_also_finds_the_right_spelling(tmp_path):
-    files = {f"right{i}.md": f"The information desk number {i}." for i in range(12)}
-    files["typo.md"] = "The informaton desk was closed."
-    engine = typo_corpus(tmp_path, **files)
+    engine = typo_corpus(tmp_path, **MOSTLY_RIGHT)
     found = paths(engine.search("informaton"))
     assert found[0] == "typo.md" and len(found) == 13
 
@@ -141,7 +212,7 @@ def test_a_misspelt_query_word_also_finds_the_right_spelling(tmp_path):
 def test_typos_are_measured_on_words_not_stems(tmp_path):
     engine = typo_corpus(tmp_path, **{"a.md": "Information and naturally."})
     assert correct_query(engine.snapshot, "informaton") == "information"  # the stem is inform
-    assert correct_query(engine.snapshot, "naturaly") in ("naturally",)
+    assert correct_query(engine.snapshot, "naturaly") == "naturally"
 
 
 def test_words_survive_the_cache_and_old_caches_get_them(tmp_path):

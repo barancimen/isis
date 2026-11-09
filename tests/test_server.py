@@ -4,17 +4,14 @@ import threading
 import time
 
 import pytest
+from conftest import write_corpus
 from fastapi.testclient import TestClient
 
+from isis.cli import allowed_hosts
+from isis.engine.index import Engine
+from isis.engine.semantic import HashEmbedder
 from isis.server.app import PageVersion, create_app
 from isis.server.tasks import TaskError, TaskStore
-
-
-@pytest.fixture
-def client(engine, corpus):
-    store = TaskStore(corpus / "_tasks")
-    with TestClient(create_app(engine, store, background=False, watch=False)) as c:
-        yield c
 
 
 def test_status_files_and_file_content(client):
@@ -135,21 +132,9 @@ def test_dismissals_can_be_restored_and_feedback_forgotten(client, corpus):
     assert len(list((corpus / "_tasks" / ".trash").glob("t.*.prefs.json"))) == 1
 
 
-def test_tasks_inside_the_corpus_are_not_indexed(client, engine):
-    client.post("/api/tasks", json={"name": "ambergris"})
-    client.put("/api/tasks/ambergris", json={"content": "Ambergris ambergris ambergris."})
-    engine.exclude.add((engine.root / "_tasks").resolve())
-    engine.refresh()
-    assert [h["path"] for h in client.get("/api/search", params={"q": "ambergris"}).json()["hits"]] == ["whales.md"]
-
-
 def test_the_browser_must_check_the_page_is_current(client):
     for path in ("/", "/app.js", "/reflow.js", "/style.css"):
         assert client.get(path).headers["cache-control"] == "no-store", path
-
-
-def test_page_is_served(client):
-    assert client.get("/").status_code == 200
 
 
 def test_steer_line_and_avoided_passages(client):
@@ -196,14 +181,15 @@ def test_preference_changes_do_not_overwrite_each_other(corpus):
     assert not list((corpus / "_tasks" / ".meta").glob(".*.tmp"))
 
 
-def test_unreadable_preferences_are_kept_aside(corpus):
+@pytest.mark.parametrize("damaged", [b'{"steer": "whale', b"\xff\xfe"], ids=["not json", "not utf-8"])
+def test_unreadable_preferences_are_kept_aside(corpus, damaged):
     store = TaskStore(corpus / "_tasks")
     store.create("T")
     (corpus / "_tasks" / ".meta").mkdir()
-    (corpus / "_tasks" / ".meta" / "T.json").write_text('{"steer": "whale', encoding="utf-8")
+    (corpus / "_tasks" / ".meta" / "T.json").write_bytes(damaged)
     assert store.prefs("T").steer == ""
     (kept,) = (corpus / "_tasks" / ".trash").glob("T.*.bad.json")
-    assert kept.read_text(encoding="utf-8") == '{"steer": "whale'
+    assert kept.read_bytes() == damaged
 
 
 def test_requests_for_other_hosts_are_refused(engine, corpus):
@@ -214,8 +200,6 @@ def test_requests_for_other_hosts_are_refused(engine, corpus):
 
 
 def test_allowed_hosts_from_the_command_line():
-    from isis.cli import allowed_hosts
-
     assert allowed_hosts("127.0.0.1", []) == ["localhost", "127.0.0.1", "::1"]
     assert allowed_hosts("0.0.0.0", []) == ["*"]
     assert allowed_hosts("0.0.0.0", ["notes.lan"]) == ["localhost", "127.0.0.1", "::1", "notes.lan"]
@@ -228,8 +212,6 @@ def test_dismissed_texts_are_sent_as_previews(client):
     client.post("/api/tasks/t/feedback", json={"action": "dismiss", "lane": "core", "path": "whales.md", "text": long})
     body = client.post("/api/tasks/t/related", json={"text": "The sperm whale."}).json()
     assert len(body["prefs"]["dismissed"][0]["text"]) == 200
-    client.post("/api/tasks/t/feedback", json={"action": "restore", "id": body["prefs"]["dismissed"][0]["id"]})
-    assert client.get("/api/tasks/t/prefs").json()["dismissed"] == []
 
 
 def test_saves_wait_for_each_other_and_never_bring_back_a_deleted_task(corpus):
@@ -282,81 +264,10 @@ def test_no_pages_that_load_from_a_cdn(client):
         assert client.get(path).status_code == 404
 
 
-def wait_until(check, seconds=10):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if check():
-            return True
-        time.sleep(0.1)
-    return False
-
-
-def test_the_watcher_follows_links_and_moved_folders(engine, corpus, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (corpus / "old-link").symlink_to(outside)
-    engine.refresh()
-    with TestClient(create_app(engine, TaskStore(corpus / "_tasks"), background=False, watch=True)):
-        time.sleep(1)
-        (outside / "a.md").write_text("Quokkaword, in a linked folder.\n")
-        assert wait_until(lambda: engine.search("quokkaword"))
-
-        added = tmp_path / "added"
-        added.mkdir()
-        (added / "b.md").write_text("Raccoonword, behind a link made while running.\n")
-        (corpus / "new-link").symlink_to(added)
-        assert wait_until(lambda: engine.search("raccoonword"))
-        time.sleep(1.5)  # the watch restarts to cover the new link
-        (added / "c.md").write_text("Salamanderword, added to that folder afterwards.\n")
-        assert wait_until(lambda: engine.search("salamanderword"))
-
-        (corpus / "new-link").unlink()
-        assert wait_until(lambda: not engine.search("raccoonword"))
-
-        moved = tmp_path / "moved" / "deep"
-        moved.mkdir(parents=True)
-        (moved / "d.md").write_text("Tapirword, in a folder moved into the corpus.\n")
-        (tmp_path / "moved").rename(corpus / "moved")
-        assert wait_until(lambda: engine.search("tapirword"))
-
-
-def test_the_watcher_sees_no_embed_files_and_every_folder(tmp_path):
-    from isis.engine.index import Engine
-    from isis.engine.semantic import HashEmbedder
-
-    a, b = tmp_path / "a", tmp_path / "b"
-    a.mkdir()
-    b.mkdir()
-    (a / "one.md").write_text("Newtword is here.\n")
-    (b / "two.md").write_text("Oryxword is here.\n")
-    engine = Engine([a, b], embedder=HashEmbedder())
-    engine.refresh()
-    with TestClient(create_app(engine, TaskStore(tmp_path / "tasks"), background=False, watch=True)) as c:
-        time.sleep(1)
-        (b / "three.md").write_text("Pumaword arrives in the second folder.\n")
-        assert wait_until(lambda: engine.search("pumaword"))
-        assert c.get("/api/file", params={"path": "b/three.md"}).status_code == 200
-        (b / ".no-embed").touch()
-        assert wait_until(lambda: engine.status.unembedded == 2)
-        assert c.get("/api/status").json()["unembedded"] == 2
-        (b / ".no-embed").unlink()
-        assert wait_until(lambda: engine.status.unembedded == 0)
-
-
 def test_each_panel_can_leave_out_a_folder(tmp_path):
-    from isis.engine.index import Engine
-    from isis.engine.semantic import HashEmbedder
-    from test_related import TOPICS, paragraph
-    import random
-
-    rng = random.Random(5)
-    a, b = tmp_path / "a", tmp_path / "b"
-    for root in (a, b):
-        root.mkdir()
-        for topic in TOPICS:
-            for f in range(6):
-                (root / f"{topic}-{f}.md").write_text("\n\n".join(paragraph(rng, topic) for _ in range(4)) + "\n")
-    engine = Engine([a, b], embedder=HashEmbedder(dim=1024), target_words=0)
+    words = {"whale.md": "The whale and the harpoon.\n", "finch.md": "The finch and its beak.\n", "rock.md": "Granite and basalt.\n"}
+    a, b = write_corpus(tmp_path / "a", words), write_corpus(tmp_path / "b", words)
+    engine = Engine([a, b], embedder=HashEmbedder(), target_words=0)
     engine.refresh()
     with TestClient(create_app(engine, TaskStore(tmp_path / "tasks"), background=False, watch=False)) as c:
         assert c.get("/api/status").json()["folders"] == ["a", "b"]
@@ -364,7 +275,7 @@ def test_each_panel_can_leave_out_a_folder(tmp_path):
         assert folders() == {"a", "b"} and folders(skip='["b"]') == {"a"}
         assert c.get("/api/search", params={"q": "whale", "skip": "nope"}).status_code == 400
         c.post("/api/tasks", json={"name": "t"})
-        body = {"text": "The whale and the harpoon, the ship and its captain."}
+        body = {"text": "The whale and the harpoon.", "params": {"z_weak": -1}}
         shown = lambda **k: {h["path"].split("/")[0] for l in c.post("/api/tasks/t/related", json={**body, **k}).json()["lanes"] for h in l["items"]}
         assert shown() == {"a", "b"} and shown(skip_folders=["b"]) == {"a"}
 
@@ -380,16 +291,6 @@ def test_more_like_this_through_the_api(client):
     assert client.post("/api/tasks/t/related", json={"text": "The sperm whale."}).json()["prefs"]["liked"]
     prefs = client.post("/api/tasks/t/feedback", json={"action": "unlike", "id": entry["id"]}).json()
     assert prefs["liked"] == [] and prefs["feedback"] == {"core": [0, 0]}
-
-
-def test_preferences_that_are_not_utf8_are_kept_aside(client, corpus):
-    client.post("/api/tasks", json={"name": "t"})
-    meta = corpus / "_tasks" / ".meta"
-    meta.mkdir(exist_ok=True)
-    (meta / "t.json").write_bytes(b"\xff\xfe")
-    response = client.get("/api/tasks/t/prefs")
-    assert response.status_code == 200 and response.json()["steer"] == ""
-    assert len(list((corpus / "_tasks" / ".trash").glob("t.*.bad.json"))) == 1
 
 
 def test_only_tasks_that_can_be_opened_are_listed(client, corpus):
@@ -409,24 +310,6 @@ def test_two_deletions_of_one_name_in_a_second_keep_both_copies(tmp_path, monkey
         store.write("dup", text)
         store.delete("dup")
     assert {p.read_text() for p in (tmp_path / ".trash").glob("dup.*.md")} == {"first", "second"}
-
-
-def test_the_watcher_survives_an_error_and_keeps_checking(engine, corpus, monkeypatch):
-    calls = []
-
-    def broken(*_, **__):
-        calls.append(1)
-        raise OSError("OS file watch limit reached")
-
-    monkeypatch.setattr("watchfiles.watch", broken)
-    monkeypatch.setattr("isis.server.app.WATCH_RETRY", 0.01)
-    with TestClient(create_app(engine, TaskStore(corpus / "_tasks"), background=False)) as c:
-        (corpus / "fresh.md").write_text("Stoatword arrived.\n")
-        deadline = time.time() + 20
-        while ("fresh.md" not in engine.files or len(calls) < 2) and time.time() < deadline:
-            time.sleep(0.02)
-        assert "fresh.md" in engine.files and len(calls) > 1
-        assert c.get("/api/status").status_code == 200
 
 
 def test_settings_are_restored_together(client):

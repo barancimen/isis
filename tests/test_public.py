@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from isis import cli
 from isis.engine.search import QueryError, compile_pattern, pattern_time_limit
-from isis.server.app import create_app
+from isis.server.app import WEB, create_app
 from isis.server.public import COOKIE, Limits, PublicGuard, RateLimiter, Workspaces, client_address
 from isis.server.tasks import TaskStore
 
@@ -37,13 +37,13 @@ def make_client(engine, tmp_path):
         client.__exit__(None, None, None)
 
 
-def visitor(client, share, address="203.0.113.8"):
+def visitor(client, address="203.0.113.8"):
     return TestClient(client.app, base_url=HTTPS, headers={"CF-Connecting-IP": address})
 
 
 def test_visitors_have_separate_private_tasks(make_client):
     alice = make_client()
-    bob = visitor(alice, alice.workspaces)
+    bob = visitor(alice)
     alice.post("/api/tasks", json={"name": "mine"}).raise_for_status()
     alice.put("/api/tasks/mine", json={"content": "secret"}).raise_for_status()
     assert [t["name"] for t in alice.get("/api/tasks").json()] == ["mine"]
@@ -187,8 +187,7 @@ def test_clearing_cookies_does_not_get_round_the_workspace_limit(make_client):
         client.cookies.clear()
         response = client.post("/api/tasks", json={"name": "t"})
         assert response.status_code == (429 if i == 2 else 200)
-    elsewhere = TestClient(client.app, base_url=HTTPS, headers={"CF-Connecting-IP": "198.51.100.1"})
-    elsewhere.post("/api/tasks", json={"name": "t"}).raise_for_status()
+    visitor(client, "198.51.100.1").post("/api/tasks", json={"name": "t"}).raise_for_status()
 
 
 def test_idle_workspaces_go_and_used_ones_stay(make_client):
@@ -209,8 +208,7 @@ def test_rate_limits_answer_429_with_retry_after(make_client):
     codes = [client.get("/api/search", params={"q": "whale"}) for _ in range(4)]
     assert [r.status_code for r in codes] == [200, 200, 200, 429]
     assert int(codes[-1].headers["retry-after"]) >= 1
-    other = TestClient(client.app, headers={"CF-Connecting-IP": "198.51.100.1"})
-    assert other.get("/api/search", params={"q": "whale"}).status_code == 200  # each address has its own
+    assert visitor(client, "198.51.100.1").get("/api/search", params={"q": "whale"}).status_code == 200  # each address has its own
     assert client.get("/api/tasks").status_code == 200  # and each kind of request
 
 
@@ -248,12 +246,12 @@ def test_the_address_comes_from_the_proxy():
 
 
 def test_expensive_work_is_charged_by_the_time_it_took(tmp_path):
-    workspaces = Workspaces(tmp_path / "public", Limits(rates=ROOMY, work=(0.1, 0.01)))
+    workspaces = Workspaces(tmp_path / "public", Limits(rates=ROOMY, work=(0.02, 0.002)))
     ran = []
 
     async def slow(scope, receive, send):
         ran.append(scope["path"])
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.04)
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"{}"})
 
@@ -268,7 +266,7 @@ def test_expensive_work_is_charged_by_the_time_it_took(tmp_path):
 
     first, second, cheap, other = asyncio.run(main())
     assert (first.status_code, second.status_code, cheap.status_code, other.status_code) == (200, 429, 200, 200)
-    assert int(second.headers["retry-after"]) >= 5  # the 0.1 s it overspent, at 0.01 s per second
+    assert int(second.headers["retry-after"]) >= 5  # the 0.02 s it overspent, at 0.002 s per second
     assert len(ran) == 3
 
 
@@ -282,37 +280,35 @@ def test_rate_limiter_refills():
 
 
 def test_busy_limit_runs_a_few_and_turns_the_rest_away(tmp_path):
-    limits = Limits(rates=ROOMY, busy_slots=1, busy_wait=0.15, busy_waiters=2)
+    limits = Limits(rates=ROOMY, busy_slots=1, busy_wait=0.01, busy_waiters=2)
     workspaces = Workspaces(tmp_path / "public", limits)
     running, peak = [0], [0]
 
-    async def slow(scope, receive, send):
-        running[0] += 1
-        peak[0] = max(peak[0], running[0])
-        await asyncio.sleep(0.4)
-        running[0] -= 1
-        await send({"type": "http.response.start", "status": 200, "headers": []})
-        await send({"type": "http.response.body", "body": b"{}"})
-
     async def main():
-        transport = httpx.ASGITransport(app=PublicGuard(slow, workspaces))
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            return await asyncio.gather(*(client.get("/api/search") for _ in range(5)))
+        release = asyncio.Event()
 
-    responses = asyncio.run(main())
+        async def held(scope, receive, send):
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+            await release.wait()
+            running[0] -= 1
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        transport = httpx.ASGITransport(app=PublicGuard(held, workspaces))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            requests = [asyncio.create_task(client.get("/api/search")) for _ in range(5)]
+            while sum(r.done() for r in requests) < 4:  # all but the one that holds the slot
+                await asyncio.sleep(0.002)
+            release.set()
+            return await asyncio.gather(*requests), await client.get("/api/search")  # the slot came back
+
+    responses, after = asyncio.run(asyncio.wait_for(main(), 10))
     assert peak[0] == 1
     assert sorted(r.status_code for r in responses) == [200, 503, 503, 503, 503]
     assert all(r.json()["detail"].startswith("the server is busy") for r in responses if r.status_code == 503)
+    assert after.status_code == 200
 
-    async def again():  # the slot came back
-        transport = httpx.ASGITransport(app=PublicGuard(slow, workspaces))
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            return await client.get("/api/search")
-
-    assert asyncio.run(again()).status_code == 200
-
-
-# ---- under a path ----
 
 def test_the_site_can_live_under_a_path(engine, tmp_path):
     workspaces = Workspaces(tmp_path / "public", Limits(rates=ROOMY), base_path="/isis")
@@ -330,8 +326,6 @@ def test_the_site_can_live_under_a_path(engine, tmp_path):
 
 
 def test_the_page_uses_relative_addresses():
-    from isis.server.app import WEB
-
     source = (WEB / "app.js").read_text(encoding="utf-8")
     assert "/api/" not in re.sub(r"//.*", "", source)
 
@@ -349,26 +343,16 @@ def test_without_a_limit_patterns_stay_plain_re():
     assert isinstance(compile_pattern("whale"), re.Pattern)
 
 
-def test_a_slow_pattern_stops_in_time():
-    text = "a" * 3000
-    with pattern_time_limit(0.2):
-        pattern = compile_pattern(r"(a+)+$b")
+def test_a_slow_pattern_stops_in_time_and_uses_up_the_request():
+    with pattern_time_limit(5):  # so that compiling never counts
+        slow, quick = compile_pattern(r"(a+)+$b"), compile_pattern("whale")
+    with pattern_time_limit(0.05):
         started = time.monotonic()
         with pytest.raises(QueryError, match="took too long"):
-            list(pattern.finditer(text))
-    assert time.monotonic() - started < 2
-
-
-def test_all_patterns_of_a_request_share_the_time():
-    text = "a" * 3000
-    with pattern_time_limit(0.2):
-        first, second = compile_pattern(r"(a+)+$b"), compile_pattern(r"(a*)*\d")
-        started = time.monotonic()
-        with pytest.raises(QueryError):
-            list(first.finditer(text))
-        with pytest.raises(QueryError):
-            list(second.finditer(text))
-    assert time.monotonic() - started < 2
+            list(slow.finditer("a" * 3000))
+        assert time.monotonic() - started < 2
+        with pytest.raises(QueryError, match="took too long"):  # no time left, even for an easy one
+            list(quick.finditer("whale"))
 
 
 @pytest.mark.parametrize("pattern", [r"(x{65535}){65535}", r"((a{50}){50}){50}", r"a{3000}", "x" * 301])

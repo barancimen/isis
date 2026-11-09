@@ -84,3 +84,24 @@ def test_pattern_scores_are_unchanged_where_they_match():
     idf = np.log1p((3 - 2 + 0.5) / (2 + 0.5))
     expected = idf * counts * 2.2 / (counts + 1.2 * (0.25 + 0.75 * bm25.doc_len / bm25.avg_len))
     assert np.allclose(bm25.pattern_scores(counts)[:2], expected[:2]) and bm25.pattern_scores(counts)[2] == 0
+
+
+def test_bm25_variants_match_a_fresh_index():
+    docs = [["whale", "sea", "whale"], ["ship", "sea"], ["ship", "captain", "ship", "sea", "storm", "storm"]]
+    vocab = Vocabulary()
+    pieces = term_counts(docs, vocab)
+    base = BM25(*pieces, n_terms=len(vocab))
+    ids, weights = [vocab.get("ship"), vocab.get("storm")], [1.0, 1.0]
+    fresh = BM25(*pieces, n_terms=len(vocab), k1=2.0, b=0.2).scores(ids, weights)
+    assert base.with_params(2.0, 0.2).scores(ids, weights) == pytest.approx(fresh)
+    assert base.with_params(1.2, 0.75) is base
+
+
+def test_snapshot_keeps_a_few_variants(engine):
+    snap = engine.snapshot
+    assert snap.bm25_for(1.2, 0.75) is snap.bm25
+    first = snap.bm25_for(0.5, 0.5)
+    assert snap.bm25_for(0.5, 0.5) is first
+    for k1 in (0.1, 0.2, 0.3, 0.4, 0.6):
+        snap.bm25_for(k1, 0.5)
+    assert len(snap._bm25_variants) <= 4

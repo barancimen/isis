@@ -4,8 +4,11 @@ import random
 import numpy as np
 import pytest
 
+import isis.engine.index as I
+import isis.engine.related as R
 from isis.engine.index import Engine
-from isis.engine.related import EMPTY_NOTE, LANES, RelatedConfig, TaskPrefs, allocate_slots, passage_id, task_units
+from isis.engine.related import (EMPTY_NOTE, LANES, RelatedConfig, TaskPrefs, Unit, _cluster_label, allocate_slots,
+                                 assign_themes, mmr_select, passage_id, task_units, zscores)
 from isis.engine.semantic import HashEmbedder
 
 TOPICS = {
@@ -111,7 +114,6 @@ def test_dismissed_passages_stay_away(engine):
     assert items(engine.related(task, prefs=prefs), "core")[0].text == first.text
 
 
-
 def test_passages_from_the_corpus_are_not_embedded_again(engine, monkeypatch):
     rows = engine.snapshot.file_rows
     collected = [engine.snapshot.passages[rows[f"sea-{i}.md"][0]] for i in range(3)]
@@ -138,7 +140,7 @@ def test_passages_from_the_corpus_are_not_embedded_again(engine, monkeypatch):
     assert shown[2].text + " (edited since)" in embedded  # no longer the corpus passage: embedded
 
 
-def test_long_tasks_get_a_few_themes_with_readable_labels(engine):
+def test_long_tasks_get_a_few_themes(engine):
     rng = random.Random(7)
     task = "\n\n".join(paragraph(rng, rng.choice(["sea", "birds"])) for _ in range(40)) + "\n"
     result = engine.related(task)
@@ -146,8 +148,6 @@ def test_long_tasks_get_a_few_themes_with_readable_labels(engine):
 
 
 def test_theme_labels_prefer_distinctive_words(engine):
-    from isis.engine.related import Unit, _cluster_label
-
     units = [Unit("", 0, 0, "A long day by the old basalt.")]
     assert _cluster_label(units, engine.snapshot).startswith("basalt")  # rarer in the corpus than "long", "day" or "old"
 
@@ -279,16 +279,7 @@ def test_a_passage_liked_in_an_excluded_document_keeps_pulling(engine):
     assert [h.text for h in pulled] != [h.text for h in plain]  # the like still changed the results
 
 
-def test_dismissing_a_passage_takes_back_more_like_this():
-    prefs = TaskPrefs()
-    prefs.like("core", "a.md", "Some text", 1, 2)
-    prefs.dismiss("core", "a.md", " some  TEXT ")
-    assert prefs.liked == []
-
-
 def test_a_marked_passage_does_not_count_as_redundant(engine):
-    from isis.engine.related import mmr_select
-
     rows = {i: 1.0 - i / 100 for i in range(*engine.snapshot.file_rows["sea-0.md"])}
     first = min(rows)
     config = RelatedConfig(max_per_file=99)
@@ -299,8 +290,6 @@ def test_a_marked_passage_does_not_count_as_redundant(engine):
 
 
 def test_headings_do_not_decide_the_themes(engine):
-    from isis.engine.related import assign_themes, task_units
-
     config = RelatedConfig()
     plain = "Whale harpoon ship captain sail.\n\nWhale ship harpoon sail deck.\n\nFinch beak species nest song.\n"
     headed = "# One\nWhale harpoon ship captain sail.\n\n# Two\nWhale ship harpoon sail deck.\n\n# Three\nFinch beak species nest song.\n"
@@ -324,8 +313,6 @@ def test_heading_words_count_as_plain_text(engine):
 
 
 def test_a_refresh_only_rescores_the_theme_that_changed(engine, monkeypatch):
-    import isis.engine.related as R
-
     sea = " ".join(SEA_TASK) + "."
     birds = " ".join(BIRD_TASK) + "."
     task = f"{sea}\n\n{birds}\n\n{birds} Nest.\n"
@@ -345,9 +332,6 @@ def test_a_refresh_only_rescores_the_theme_that_changed(engine, monkeypatch):
 
 
 def test_large_corpora_estimate_typical_similarity_from_a_fixed_sample(engine, monkeypatch):
-    import isis.engine.index as I
-    from isis.engine.related import zscores
-
     snap = engine.snapshot
     rows = snap.typical_rows()
     assert len(rows) == int(snap.has_vector.sum())  # small corpus: all of it
@@ -388,6 +372,6 @@ def test_negative_saved_feedback_counts_are_clamped(engine):
 
 def test_dismissing_a_liked_passage_takes_back_its_add():
     prefs = TaskPrefs()
-    prefs.like("core", "a.md", "text")
-    prefs.dismiss("core", "a.md", "text")
+    prefs.like("core", "a.md", "Some text", 1, 2)
+    prefs.dismiss("core", "a.md", " some  TEXT ")  # the same passage, however it is spaced
     assert prefs.liked == [] and prefs.feedback == {"core": [0, 1]}

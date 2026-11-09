@@ -1,9 +1,12 @@
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from isis.engine.index import Engine
 from isis.engine.semantic import HashEmbedder
+from isis.server.app import create_app
+from isis.server.tasks import TaskStore
 
 FILES = {
     "whales.md": "# Whales\n\nThe sperm whale dives deep for squid.\n\nAmbergris is found in whales.\n",
@@ -22,6 +25,10 @@ def write_corpus(root: Path, files: dict[str, str] = FILES) -> Path:
     return root
 
 
+def paths(hits) -> list[str]:
+    return [h.path for h in hits]
+
+
 @pytest.fixture
 def corpus(tmp_path) -> Path:
     return write_corpus(tmp_path / "corpus")
@@ -32,3 +39,9 @@ def engine(corpus, tmp_path) -> Engine:
     e = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
     e.refresh()
     return e
+
+
+@pytest.fixture
+def client(engine, corpus):
+    with TestClient(create_app(engine, TaskStore(corpus / "_tasks"), background=False, watch=False)) as c:
+        yield c

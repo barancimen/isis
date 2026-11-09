@@ -1,6 +1,6 @@
 import pytest
 
-from isis.engine.chunker import chunk_markdown, document_site, document_title, split_lines
+from isis.engine.chunker import chunk_markdown, document_site, document_title, heading_texts, split_lines
 
 
 def spans(passages):
@@ -60,8 +60,6 @@ def test_embed_text_includes_heading():
 
 
 def test_heading_texts_lists_every_heading_line():
-    from isis.engine.chunker import heading_texts
-
     text = "---\ntitle: no\n---\n# One\n\ntext\n\n## Two ##\n\n# One\n```\n# not a heading\n```\n"
     assert heading_texts(text) == ["One", "Two", "One"]
 
