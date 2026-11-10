@@ -47,6 +47,11 @@ def term_counts(token_lists: list[list[str]], vocab: Vocabulary):
     return indptr, term_ids, counts
 
 
+# The defaults of Search and Related. A snapshot's own matrix uses them, so that a search or a
+# Related refresh with default settings never has to build another one (seconds, in a large corpus).
+K1, B = 1.2, 0.35
+
+
 class BM25:
     def __init__(self, indptr, term_ids, counts, n_terms: int, k1: float = 1.2, b: float = 0.75):
         n_docs = len(indptr) - 1
@@ -75,10 +80,14 @@ class BM25:
             return self
         return BM25(*self._raw, n_terms=self.n_terms, k1=k1, b=b)
 
-    def pattern_scores(self, counts: np.ndarray) -> np.ndarray:
+    def pattern_scores(self, counts: np.ndarray, rows: np.ndarray | None = None) -> np.ndarray:
         """BM25 of a pseudo-term (a phrase or a regex) from how often it matches in each passage, so
-        that it ranks like one more word of the query."""
-        df = int((counts > 0).sum())
+        that it ranks like one more word of the query. If it was only matched in `rows`, how many
+        passages of the corpus it is in is estimated from those, as words count the whole corpus."""
+        if rows is None:
+            df = float((counts > 0).sum())
+        else:
+            df = float((counts[rows] > 0).sum()) * self.n_docs / max(len(rows), 1)
         if not df:
             return np.zeros(self.n_docs, np.float32)
         idf = np.log1p((self.n_docs - df + 0.5) / (df + 0.5))

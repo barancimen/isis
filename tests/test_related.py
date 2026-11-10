@@ -322,9 +322,9 @@ def test_a_refresh_only_rescores_the_theme_that_changed(engine, monkeypatch):
     task = f"{sea}\n\n{birds}\n\n{birds} Nest.\n"
     engine.related(task)  # the themes are now remembered
     scored, searched = [], []
-    real_scores, real_bm25 = R.zscores, engine.snapshot.bm25.scores
+    real_scores, real_closest = R.zscores, R._closest_in_words
     monkeypatch.setattr(R, "zscores", lambda snap, vecs: scored.append(len(vecs)) or real_scores(snap, vecs))
-    monkeypatch.setattr(engine.snapshot.bm25, "scores", lambda *a: searched.append(1) or real_bm25(*a))
+    monkeypatch.setattr(R, "_closest_in_words", lambda *a: searched.append(1) or real_closest(*a))
     engine.related(task)
     assert scored == [1]  # the document vector, and no paragraph
     assert not searched  # no paragraph's excerpt check either

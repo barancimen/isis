@@ -303,3 +303,27 @@ def test_a_word_finds_only_itself_not_other_forms(tmp_path):
     engine = typo_corpus(tmp_path, **{"a.md": "A conditional clause.", "b.md": "In good condition.", "c.md": "Three conditions."})
     assert paths(engine.search("conditional")) == ["a.md"]
     assert paths(engine.search("Condition")) == ["b.md"]  # case never counts
+
+
+def test_a_search_in_some_folders_only_looks_at_them(tmp_path, monkeypatch):
+    import isis.engine.search as S
+
+    files = {f"{topic}{i}.md": f"The {topic} and the white whale, number {i}.\n\nA sea of {topic}s.\n"
+             for topic in ("ship", "harpoon", "squid") for i in range(4)}
+    a, b = write_corpus(tmp_path / "a", files), write_corpus(tmp_path / "b", files)
+    e = Engine([a, b], embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
+    e.refresh()
+    queries = ['"white whale"', "whale /sq.id/", "sea +/harpoon/", "whale -/ship/"]
+    scoped = {(q, mode): [(h.path, h.start_line, h.score) for h in e.search(q, mode=mode, skip_folders=["b"])]
+              for q in queries for mode in ("lexical", "hybrid")}
+    (start, end) = e.snapshot.folder_rows()["b"]
+    for counts, done in e.snapshot._pattern_counts.values():
+        assert not done[start:end].any() and done[:start].all()  # folder b was never scanned
+
+    for q in queries:  # as when every passage was scored and the left-out ones dropped afterwards
+        e.search(q)  # (the two folders are alike, so a pattern's share of passages is the same)
+    monkeypatch.setattr(S, "MAX_RUNS", 0)
+    monkeypatch.setattr(e.snapshot.bm25, "pattern_scores", lambda counts, rows=None, f=e.snapshot.bm25.pattern_scores: f(counts))
+    for (q, mode), hits in scoped.items():
+        assert hits and all(path.startswith("a/") for path, _, _ in hits), q
+        assert [(h.path, h.start_line, h.score) for h in e.search(q, mode=mode, skip_folders=["b"])] == hits, (q, mode)

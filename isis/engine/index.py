@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from .chunker import MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, split_lines
-from .lexical import BM25, Vocabulary, term_counts
+from .lexical import B, BM25, K1, Vocabulary, term_counts
 from .text import STOPWORDS, WORD, tokenize_with_surface
 from .typos import WordView, Words
 
@@ -129,6 +129,7 @@ class Snapshot:
     file_sites: dict[str, str] = field(default_factory=dict)  # path -> host, for documents that have one
     _bm25_variants: dict = field(default_factory=dict, repr=False)
     _pattern_counts: dict = field(default_factory=dict, repr=False)
+    _folder_rows: dict = field(default_factory=dict, repr=False)
     near_words: dict = field(default_factory=dict, repr=False)  # for search.near_words
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
@@ -148,13 +149,21 @@ class Snapshot:
             return self.bm25
         return self.cached(self._bm25_variants, key, 4, lambda: self.bm25.with_params(*key))
 
-    def pattern_counts(self, pattern: re.Pattern) -> np.ndarray:
-        """How often `pattern` matches in each passage. The last few patterns are kept, so a
-        regex in a steer line is not rescanned on every refresh."""
-        return self.cached(self._pattern_counts, (pattern.pattern, pattern.flags), 32, lambda: np.fromiter(
-            (sum(1 for m in pattern.finditer(p.embed_text) if m.end() > m.start()) for p in self.passages),
-            np.float32, len(self.passages),
-        ))
+    def pattern_counts(self, pattern: re.Pattern, rows: np.ndarray | None = None) -> np.ndarray:
+        """How often `pattern` matches in each passage, worked out for `rows` (default: every
+        passage; the others may read 0). Counts are kept per passage for the last few patterns, so
+        a search in one folder scans only that folder, ticking another later scans only that one,
+        and a regex in a steer line is not rescanned on every refresh."""
+        n = len(self.passages)
+        counts, done = self.cached(self._pattern_counts, (pattern.pattern, pattern.flags), 32,
+                                   lambda: (np.zeros(n, np.float32), np.zeros(n, bool)))
+        todo = np.flatnonzero(~done) if rows is None else rows[~done[rows]]
+        if len(todo):
+            passages = self.passages  # a pattern that runs out of time raises before anything is marked done
+            counts[todo] = np.fromiter((sum(1 for m in pattern.finditer(passages[i].embed_text) if m.end() > m.start())
+                                        for i in todo.tolist()), np.float32, len(todo))
+            done[todo] = True
+        return counts
 
     def cached(self, cache: dict, key, size: int, make: Callable):
         """cache[key], made on first use; the oldest entries go when there are `size`."""
@@ -180,12 +189,25 @@ class Snapshot:
 
         return self.cached(self._typical, "rows", 1, choose)
 
+    def folder_rows(self) -> dict[str, tuple[int, int]]:
+        """The rows of each corpus folder (the first part of a path): one block each, as passages
+        are in the order of their paths."""
+
+        def spans() -> dict[str, tuple[int, int]]:
+            out: dict[str, tuple[int, int]] = {}
+            for path, (start, end) in self.file_rows.items():
+                name = path.partition("/")[0]
+                out[name] = (out[name][0], end) if name in out else (start, end)
+            return out
+
+        return self.cached(self._folder_rows, "spans", 1, spans)
+
     def outside_folders(self, skip) -> np.ndarray:
-        """Which passages are not in these corpus folders (the first part of a path)."""
+        """Which passages are not in these corpus folders."""
         ok = np.ones(len(self.passages), bool)
-        for path, (start, end) in self.file_rows.items():
-            if path.partition("/")[0] in skip:
-                ok[start:end] = False
+        for name in skip:
+            if (span := self.folder_rows().get(name)) is not None:
+                ok[span[0]:span[1]] = False
         return ok
 
     def at_sites(self, sites) -> np.ndarray:
@@ -635,6 +657,8 @@ class Engine:
             np.concatenate(term_ids) if term_ids else np.zeros(0, np.int32),
             np.concatenate(counts) if counts else np.zeros(0, np.float32),
             n_terms=len(self.vocab),
+            k1=K1,
+            b=B,
         )
         default_vectors, default_has = of(self.embedder)
         snapshot = Snapshot(

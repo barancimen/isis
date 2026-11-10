@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 
 from isis.engine.lexical import BM25, Vocabulary, term_counts
+from isis.engine.related import RelatedConfig
+from isis.engine.search import SearchConfig
 
 DOCS = [
     ["whale", "sea", "whale"],
@@ -99,7 +101,9 @@ def test_bm25_variants_match_a_fresh_index():
 
 def test_snapshot_keeps_a_few_variants(engine):
     snap = engine.snapshot
-    assert snap.bm25_for(1.2, 0.75) is snap.bm25
+    defaults = SearchConfig(), RelatedConfig()
+    assert snap.bm25_for(defaults[0].k1, defaults[0].b) is snap.bm25  # no matrix to build for default settings
+    assert snap.bm25_for(defaults[1].bm25_k1, defaults[1].bm25_b) is snap.bm25
     first = snap.bm25_for(0.5, 0.5)
     assert snap.bm25_for(0.5, 0.5) is first
     for k1 in (0.1, 0.2, 0.3, 0.4, 0.6):

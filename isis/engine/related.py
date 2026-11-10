@@ -43,6 +43,7 @@ import numpy as np
 
 from .chunker import MAX_WORDS, chunk_markdown, heading_texts
 from .index import Snapshot
+from .lexical import B, K1
 from .params import Group, tunable
 from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit,
                      remembering_lines, split_query, steering, top_rows)
@@ -112,13 +113,13 @@ class RelatedConfig:
         "Lower it to keep results closer to your task. At 0, ↑ has no effect.",
     )
     bm25_k1: float = tunable(
-        1.2, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
+        K1, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
         help="How much a word adds to the score when it appears many times in a passage.\n"
         "Raise it to rank passages that repeat a keyword higher.\n"
         "Lower it and repeats count for less. At 0, one use counts the same as many.",
     )
     bm25_b: float = tunable(
-        0.35, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        B, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
         help="Long passages contain more words, so they can score well just because of their length. "
         "This sets how much a long passage's score is reduced.\n"
         "Raise it to rank short passages higher. At 1, length is fully corrected for.\n"

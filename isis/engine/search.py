@@ -31,6 +31,7 @@ import numpy as np
 
 from .chunker import HEADING, document_title, web_host
 from .index import Snapshot
+from .lexical import B, K1
 from .params import Group, tunable
 from .text import term_spans, tokenize, tokenize_with_surface
 
@@ -59,13 +60,13 @@ FUSION = Group(
 @dataclass
 class SearchConfig:
     k1: float = tunable(
-        1.2, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
+        K1, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
         help="How much a word adds to the score when it appears many times in a passage.\n"
         "Raise it to rank passages that repeat your words higher.\n"
         "Lower it and repeats count for less. At 0, one use counts the same as many.",
     )
     b: float = tunable(
-        0.35, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
+        B, label="Passage length", group=KEYWORDS, min=0.0, max=1.0, step=0.05,
         help="Long passages contain more words, so they can score well just because of their length. "
         "This sets how much a long passage's score is reduced.\n"
         "Raise it to rank short passages higher. At 1, length is fully corrected for.\n"
@@ -303,9 +304,9 @@ class Filters:
         for term in self.excluded_terms:
             ok &= ~containing(term)
         for p in self.required:  # match counts are cached per snapshot, so typing doesn't rescan
-            ok &= snapshot.pattern_counts(p)[rows] > 0
+            ok &= snapshot.pattern_counts(p, rows)[rows] > 0
         for p in self.excluded:
-            ok &= snapshot.pattern_counts(p)[rows] == 0
+            ok &= snapshot.pattern_counts(p, rows)[rows] == 0
         if self.sites:
             ok &= snapshot.at_sites(self.sites)[rows]
         if self.excluded_sites:
@@ -490,12 +491,34 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
     return "".join(parts) + query[at:] if parts else None
 
 
-def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns) -> np.ndarray:
-    """BM25 for weighted terms, plus each phrase or regex scored as one more term."""
+def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns, rows=None) -> np.ndarray:
+    """BM25 for weighted terms, plus each phrase or regex scored as one more term. Patterns are
+    only matched in `rows` (default: every passage), and score 0 elsewhere."""
     scores = bm25.scores(term_ids, weights)
     for p in patterns:
-        scores = scores + bm25.pattern_scores(snapshot.pattern_counts(p))
+        scores = scores + bm25.pattern_scores(snapshot.pattern_counts(p, rows), rows)
     return scores
+
+
+MAX_RUNS = 256  # beyond this many separate runs of rows, one product over every passage is quicker
+
+
+def similarities(vectors: np.ndarray, query: np.ndarray, scope: np.ndarray | None, wanted: np.ndarray) -> np.ndarray:
+    """vectors @ query where `wanted`, and -inf elsewhere. Within `scope` (None: everywhere) only
+    its runs of rows are multiplied, as views without copying, so a search in one folder costs
+    about as much as that folder."""
+    if scope is None:
+        out = vectors @ query
+    else:
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], scope.view(np.int8), [0]))))
+        if len(edges) > 2 * MAX_RUNS:
+            out = vectors @ query
+        else:
+            out = np.full(len(vectors), -np.inf, np.float32)
+            for start, end in zip(edges[::2], edges[1::2]):
+                out[start:end] = vectors[start:end] @ query
+    out[~wanted] = -np.inf
+    return out
 
 
 def top_rows(scores: np.ndarray, k: int, positive: bool = False) -> np.ndarray:
@@ -541,12 +564,20 @@ def search(
     q = parse_query(snapshot, query, config.typo_weight)
     if not q.term_ids and not q.patterns and not q.filters.requires and not q.filters.sites and not q.unknown:
         return []  # only exclusions, or a regex still being typed: nothing to look for
-    allowed = q.filters.allowed(snapshot) if q.filters else np.ones(len(snapshot), bool)
-    if skip_folders:
-        allowed &= snapshot.outside_folders(skip_folders)
-    for path in skip_files:
-        if (rows := snapshot.file_rows.get(path)) is not None:
-            allowed[rows[0]:rows[1]] = False
+    # The passages this search may show: all of them, or those outside the folders and documents
+    # left out. Only these are scanned for patterns and compared by meaning.
+    scope, rows = None, None
+    if skip_folders or skip_files:
+        scope = snapshot.outside_folders(skip_folders) if skip_folders else np.ones(len(snapshot), bool)
+        for path in skip_files:
+            if (span := snapshot.file_rows.get(path)) is not None:
+                scope[span[0]:span[1]] = False
+        rows = np.flatnonzero(scope)
+    if rows is None:
+        allowed = q.filters.allowed(snapshot)
+    else:
+        allowed = np.zeros(len(snapshot), bool)
+        allowed[rows] = q.filters.allowed(snapshot, rows)
     if mode == "hybrid" and config.keyword_weight + config.meaning_weight <= 0:
         return []  # nothing counts
     embeddings = mode == "hybrid" and config.meaning_weight > 0 and embedder is not None and snapshot.has_vector.any()
@@ -554,11 +585,11 @@ def search(
     if config.keyword_weight + stand_in <= 0:  # nothing counts for a passage without embeddings: it is out
         allowed &= snapshot.has_vector
     bm25 = snapshot.bm25_for(config.k1, config.b)
-    lexical = np.where(allowed, lexical_scores(snapshot, bm25, q.term_ids, q.weights, q.patterns), 0.0)
+    lexical = np.where(allowed, lexical_scores(snapshot, bm25, q.term_ids, q.weights, q.patterns, rows), 0.0)
 
     if embeddings and q.text.strip():
-        semantic = snapshot.vectors @ embedder.embed([q.text], cache=True, query=True)[0]
-        semantic[~(snapshot.has_vector & allowed)] = -np.inf
+        semantic = similarities(snapshot.vectors, embedder.embed([q.text], cache=True, query=True)[0], scope,
+                                snapshot.has_vector & allowed)
         lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, config.candidates, positive=True))}
         sem_rank = {int(row): rank for rank, row in enumerate(top_rows(semantic, config.candidates))}
         fused: dict[int, float] = {}
