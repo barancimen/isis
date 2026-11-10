@@ -675,8 +675,14 @@ def make_hit(
     last_line = len(lines) - 1
     start, end = min(p.start_line, last_line), min(p.end_line, last_line)
 
+    found: dict[int, list[tuple[int, int]]] = {}
+
     def spans_on(n: int) -> list[tuple[int, int]]:
-        return _spans(lines[n], terms, patterns)
+        """The highlights of a line, worked out once: the first match, the snippet and the marks
+        each ask for them."""
+        if n not in found:
+            found[n] = _spans(lines[n], terms, patterns)
+        return found[n]
 
     def first_match_on(n: int) -> tuple[int, int, int] | None:
         spans = spans_on(n)

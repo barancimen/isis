@@ -36,8 +36,10 @@ class Passage:
 
 
 def split_lines(content: str) -> list[str]:
-    """Split lines the way CodeMirror does, so line numbers agree with the editor."""
-    return re.split(r"\r\n|\r|\n", content)
+    """Split lines the way CodeMirror does, at \\r\\n, \\r and \\n only, so line numbers agree with the
+    editor. (str.splitlines also breaks at form feeds and Unicode separators. A regex gives the
+    same lines as this, five times slower, and a search splits every file it shows.)"""
+    return content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
 def _body_start(lines: list[str]) -> int:
