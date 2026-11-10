@@ -1,4 +1,5 @@
-"""Command line: `isis index` builds or updates the index, `isis serve` runs the web app."""
+"""`isis index` builds or updates the index, `isis serve` runs the web app, and `isis search` and
+`isis related` ask a running server."""
 
 from __future__ import annotations
 
@@ -7,9 +8,6 @@ import os
 import re
 import sys
 from pathlib import Path
-
-from .engine.index import configure_logging, corpus_exclude
-from .engine.semantic import MODELS
 
 EVERY_INTERFACE = ("0.0.0.0", "::", "")
 
@@ -26,6 +24,8 @@ def cmd_index(args) -> None:
     from .engine.index import Engine
     from .engine.semantic import Embedder
 
+    from .engine.index import corpus_exclude
+
     folders = folders_of(args.corpus)
     tasks_dir = Path(args.tasks).resolve() if args.tasks else folders[0] / "_tasks"
     embedders = [] if args.no_model else [Embedder(m) for m in models(args)]
@@ -35,6 +35,8 @@ def cmd_index(args) -> None:
 
 def models(args) -> list[str]:
     """The models to offer: those named with --model, or else every model in MODELS."""
+    from .engine.semantic import MODELS
+
     return list(dict.fromkeys(args.model or MODELS))
 
 
@@ -100,7 +102,18 @@ def cmd_serve(args) -> None:
     )
 
 
+CLIENT_COMMANDS = ("search", "related")
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in CLIENT_COMMANDS:  # before the engine is imported, so they start at once
+        from .client import main as client_main
+
+        sys.exit(client_main(argv))
+    from .engine.index import configure_logging
+    from .engine.semantic import MODELS
+
     configure_logging()
     parser = argparse.ArgumentParser(prog="isis", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -130,6 +143,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--base-path", default="", metavar="PATH",
                    help="with --public: where the site lives on its domain, such as /isis")
     p.set_defaults(func=cmd_serve)
+
+    # Listed for --help only: main() hands them to client.py before this parser exists.
+    sub.add_parser("search", help="search the corpus of a running server (isis search -h)", add_help=False)
+    sub.add_parser("related", help="passages related to a task document, from a running server (isis related -h)",
+                   add_help=False)
 
     args = parser.parse_args(argv)
     args.func(args)

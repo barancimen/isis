@@ -286,7 +286,7 @@ def body_limit(limits: Limits, kind: str, method: str, path: str) -> int:
 def kind_of(method: str, path: str) -> str:
     if path == "/api/search":
         return "search"
-    if method == "POST" and path.startswith("/api/tasks/") and path.endswith("/related"):
+    if method == "POST" and (path == "/api/related" or path.startswith("/api/tasks/") and path.endswith("/related")):
         return "related"
     if path.startswith("/api/tasks") and method in ("POST", "PUT", "DELETE", "PATCH"):
         return "write"

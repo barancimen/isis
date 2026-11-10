@@ -358,3 +358,13 @@ def test_page_version_waits_for_the_files_to_settle(tmp_path):
 
     os.utime(page, (2, 2))  # still for long enough
     assert version.current() != first
+
+
+def test_related_for_any_text_stores_nothing(client, corpus):
+    body = client.post("/api/related", json={"text": "The sperm whale dives for squid.", "steer": "+squid"}).json()
+    items = [item for lane in body["lanes"] for item in lane["items"]]
+    assert items and all("squid" in item["text"].lower() for item in items)
+    assert "prefs" not in body
+    r = client.post("/api/related", json={"text": "whales", "steer": "/(/"})
+    assert r.status_code == 400 and "invalid pattern" in r.json()["detail"]
+    assert not any((corpus / "_tasks").iterdir())

@@ -25,7 +25,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..engine import native
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
-from ..engine.related import RelatedConfig
+from ..engine.related import RelatedConfig, TaskPrefs
 from ..engine.search import QueryError, SearchConfig, correct_query, pattern_time_limit
 from .public import PATTERN_SECONDS, PublicGuard, Workspaces
 from .tasks import Conflict, TaskError, TaskStore
@@ -123,6 +123,10 @@ class RelatedRequest(BaseModel):
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
     skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
     model: str = ""  # the embedding model, as named in /api/status; the default if empty or unknown
+
+
+class StatelessRelatedRequest(RelatedRequest):
+    steer: str = ""  # word rules, as on the steer line of a task: x prefer, +x require, -x never show
 
 
 class TermRequest(BaseModel):
@@ -324,9 +328,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         tasks.delete(name)
         return {"ok": True}
 
-    @app.post("/api/tasks/{name}/related")
-    def related(name: str, body: RelatedRequest):
-        prefs = tasks.prefs(name)
+    def run_related(body: RelatedRequest, prefs: TaskPrefs, seed: int) -> dict:
         try:
             with time_limit():
                 result = engine.related(
@@ -334,12 +336,29 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                     prefs=prefs,
                     config=configure(RelatedConfig, body.params),
                     skip_folders=body.skip_folders,
-                    seed=zlib.crc32(name.encode()),
+                    seed=seed,
                     model=body.model or None,
                 )
         except QueryError as e:  # a regex that ran out of time
             raise HTTPException(400, str(e))
-        return as_json({**{f.name: getattr(result, f.name) for f in dataclasses.fields(result)}, "prefs": prefs.summary()})
+        return {f.name: getattr(result, f.name) for f in dataclasses.fields(result)}
+
+    @app.post("/api/tasks/{name}/related")
+    def related(name: str, body: RelatedRequest):
+        prefs = tasks.prefs(name)
+        return as_json({**run_related(body, prefs, zlib.crc32(name.encode())), "prefs": prefs.summary()})
+
+    @app.post("/api/related")
+    def related_to_text(body: StatelessRelatedRequest):
+        """Related for any text, with word rules and settings given in the request and nothing
+        stored: what `isis related` asks for."""
+        prefs = TaskPrefs()
+        try:
+            with time_limit():
+                prefs.set_steer(body.steer)
+        except QueryError as e:
+            raise HTTPException(400, str(e))
+        return as_json(run_related(body, prefs, 0))
 
     @app.get("/api/tasks/{name}/prefs")
     def get_prefs(name: str):

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from isis import cli
 from isis.engine.search import QueryError, compile_pattern, pattern_time_limit
 from isis.server.app import WEB, create_app
-from isis.server.public import COOKIE, Limits, PublicGuard, RateLimiter, Workspaces, client_address
+from isis.server.public import COOKIE, Limits, PublicGuard, RateLimiter, Workspaces, client_address, kind_of
 from isis.server.tasks import TaskStore
 
 pytest.importorskip("regex")
@@ -437,3 +437,16 @@ def test_public_mode_refuses_unsafe_settings(corpus, tmp_path, flags, message):
     with pytest.raises(SystemExit) as e:
         cli.main(["serve", str(corpus), "--public", *flags])
     assert message in str(e.value)
+
+
+def test_related_for_any_text_is_limited_like_related():
+    assert kind_of("POST", "/api/related") == "related"
+    assert kind_of("POST", "/api/tasks/t/related") == "related"
+    assert kind_of("GET", "/api/related") == "read"
+
+
+def test_related_for_any_text_leaves_nothing_on_disk(make_client):
+    client = make_client()
+    r = client.post("/api/related", json={"text": "The sperm whale dives for squid.", "steer": "+whale"})
+    assert r.status_code == 200 and r.json()["lanes"]
+    assert list(client.workspaces.folder.iterdir()) == []
