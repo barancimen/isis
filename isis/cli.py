@@ -86,6 +86,7 @@ def cmd_serve(args) -> None:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
     os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args))
     os.environ["ISIS_HOSTS"] = ",".join(allowed_hosts(args.host, args.allow_host))
+    os.environ["ISIS_BUILD_NATIVE"] = "0" if args.no_build else "1"
     package = Path(__file__).parent
     print(f"isis: http://{args.host}:{args.port}", flush=True)
     uvicorn.run(
@@ -122,6 +123,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="also answer requests addressed to this host name or IP (repeatable)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", help="restart when the Python code changes")
+    p.add_argument("--no-build", action="store_true",
+                   help="don't build the Rust extension when it is missing or older than native/")
     p.add_argument("--public", action="store_true",
                    help="serve the public behind a proxy: private tasks per visitor, and limits on requests")
     p.add_argument("--base-path", default="", metavar="PATH",

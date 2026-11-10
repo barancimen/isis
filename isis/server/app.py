@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from ..engine import native
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
 from ..engine.related import RelatedConfig
@@ -150,7 +151,7 @@ class FeedbackRequest(BaseModel):
 
 
 def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: bool = True, watch: bool = True,
-               allowed_hosts: list[str] | None = None) -> FastAPI:
+               allowed_hosts: list[str] | None = None, build_native: bool = False) -> FastAPI:
     """`allowed_hosts`: the Host headers the API answers (None: any). A page on another site can
     point its own domain at 127.0.0.1 (DNS rebinding); checking the Host header stops it from
     reading the corpus or overwriting tasks through the browser.
@@ -213,6 +214,8 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             threading.Thread(target=watch_corpus, args=(stop,), daemon=True, name="isis-watch").start()
         if public and background:
             threading.Thread(target=tasks.keep_clean, args=(stop,), daemon=True, name="isis-clean").start()
+        if build_native:  # the Rust extension, when it is missing or outdated
+            native.start_build()
         yield
         stop.set()
 
@@ -407,8 +410,9 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 def app_from_env() -> FastAPI:
     """The app `isis serve` runs, configured through ISIS_CORPUS (folders separated like PATH),
     ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
-    this machine only), ISIS_PUBLIC ("1": serve the public, see public.py) and ISIS_BASE_PATH (with
-    ISIS_PUBLIC: where the site lives on its domain, such as /isis)."""
+    this machine only), ISIS_PUBLIC ("1": serve the public, see public.py), ISIS_BASE_PATH (with
+    ISIS_PUBLIC: where the site lives on its domain, such as /isis) and ISIS_BUILD_NATIVE ("1": build
+    the Rust extension when it is missing or outdated, see native.start_build)."""
     from ..engine.semantic import Embedder
 
     configure_logging()
@@ -419,4 +423,4 @@ def app_from_env() -> FastAPI:
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
     store = (Workspaces(tasks_dir, base_path=os.environ.get("ISIS_BASE_PATH", ""))
              if os.environ.get("ISIS_PUBLIC") == "1" else TaskStore(tasks_dir))
-    return create_app(engine, store, allowed_hosts=hosts)
+    return create_app(engine, store, allowed_hosts=hosts, build_native=os.environ.get("ISIS_BUILD_NATIVE") == "1")
