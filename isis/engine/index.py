@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import native
 from .chunker import MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, split_lines
 from .lexical import B, BM25, K1, Vocabulary, term_counts
 from .text import STOPWORDS, WORD, tokenize_with_surface
@@ -161,8 +162,12 @@ class Snapshot:
         todo = np.flatnonzero(~done) if rows is None else rows[~done[rows]]
         if len(todo):
             passages = self.passages  # a pattern that runs out of time raises before anything is marked done
-            counts[todo] = np.fromiter((sum(1 for m in pattern.finditer(passages[i].embed_text) if m.end() > m.start())
-                                        for i in todo.tolist()), np.float32, len(todo))
+            texts = (passages[i].embed_text for i in todo.tolist())
+            found = native.phrase_counts(pattern, texts)  # a phrase, with the Rust extension
+            if found is None:
+                found = np.fromiter((sum(1 for m in pattern.finditer(text) if m.end() > m.start()) for text in texts),
+                                    np.float32, len(todo))
+            counts[todo] = found
             done[todo] = True
         return counts
 

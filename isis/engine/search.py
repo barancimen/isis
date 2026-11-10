@@ -29,6 +29,7 @@ from typing import Any
 
 import numpy as np
 
+from . import native
 from .chunker import HEADING, document_title, web_host
 from .index import Snapshot
 from .lexical import B, K1
@@ -220,7 +221,10 @@ def compile_pattern(pattern: str) -> re.Pattern | TimedPattern:
 
 
 def phrase_pattern(phrase: str) -> re.Pattern:
-    return re.compile(r"\s+".join(map(re.escape, phrase.split())), re.IGNORECASE)
+    words = phrase.split()
+    pattern = re.compile(r"\s+".join(map(re.escape, words)), re.IGNORECASE)
+    native.remember_phrase(pattern, words)  # the Rust extension, if built, counts it in every passage
+    return pattern
 
 
 @dataclass(frozen=True)
@@ -639,8 +643,9 @@ def search(
     return hits
 
 
-def _spans(text: str, terms: set[str], patterns: list[re.Pattern]) -> list[tuple[int, int]]:
-    spans = term_spans(text, terms)
+def _spans(text: str, terms: set[str], patterns: list[re.Pattern], words: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
+    """The ranges of `text` to highlight. `words`: its term_spans, when they are known already."""
+    spans = term_spans(text, terms) if words is None else words
     for p in patterns:
         spans += [m.span() for m in p.finditer(text) if m.end() > m.start()]
     merged: list[tuple[int, int]] = []
@@ -676,12 +681,14 @@ def make_hit(
     start, end = min(p.start_line, last_line), min(p.end_line, last_line)
 
     found: dict[int, list[tuple[int, int]]] = {}
+    words = native.line_spans(lines[start:end + 1], terms)  # the passage's lines in one call, with the Rust extension
 
     def spans_on(n: int) -> list[tuple[int, int]]:
         """The highlights of a line, worked out once: the first match, the snippet and the marks
         each ask for them."""
         if n not in found:
-            found[n] = _spans(lines[n], terms, patterns)
+            known = words[n - start] if words is not None and start <= n <= end else None
+            found[n] = _spans(lines[n], terms, patterns, known)
         return found[n]
 
     def first_match_on(n: int) -> tuple[int, int, int] | None:

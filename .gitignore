@@ -13,3 +13,6 @@ venv/
 .isis/
 sample_corpus/
 calibration/.cache/
+
+# the optional Rust extension: build output
+native/target/

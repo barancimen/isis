@@ -25,6 +25,7 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
 - **Folders too large to embed.** Put an empty file named `.no-embed` in a folder (`touch big/.no-embed`): it and its subfolders are then searched by keywords only. Adding the file drops embeddings already made for that folder; removing it embeds the folder. Meaning search can't find those passages. In a hybrid search their keyword rank counts in place of the meaning rank they lack, so strong keyword matches aren't buried; **Adjustments** › *Passages with no meaning data* sets how much it counts, in both Search and Related. In Search, with it and *How important keywords are* both at 0, those passages are left out. Related shows them in Core only, and they get in on a top keyword rank alone, with no check on meaning.
 
 - **First run.** It downloads the models (about 90 MB and 67 MB) and embeds every passage with each of them in the background, the default model first. On one slow CPU core that runs at about 11 passages/s with mdbr-leaf-ir and 15 with bge-micro-v2, and much faster on a laptop. Keyword search works while it runs.
+- **Optional Rust extension.** `.venv/bin/pip install ./native` builds `isis_native` (it needs a Rust toolchain, such as `rustup` installs, and takes a few minutes). With it, a search builds its results about twice as fast, and the first search for a `"phrase"` scans the passages about ten times faster (on 20,000 passages a search takes about 27 ms where it took 35, and a new phrase about 75 ms where it took 300). Results are the same with or without it. Restart `isis serve` after installing it.
 - **Later runs.** The index is cached in `<corpus>/.isis/`, and only changed files are re-read. The server watches the folder, so edits show up in search within seconds. A folder it can't read (changed permissions, an unmounted drive, a link whose target is away) keeps its files and embeddings in the index until it can be read again, and they just don't show up in results meanwhile. If its link is removed, they go.
 - **Options:**
   - `--tasks DIR`: where task documents live (default `_tasks` in the first folder). Task folders are never indexed.
@@ -124,8 +125,10 @@ isis/engine/   chunker.py   markdown -> passages with line ranges
                search.py    typed search, phrase filter, snippets with highlights
                related.py   the task-as-query pipeline
                report.py    plain-text printing for notebooks
+               native.py    the optional Rust extension, with the Python code as fallback
 isis/server/   app.py       FastAPI app and file watcher; tasks.py: task files and preferences; public.py: public mode
 isis/cli.py    `isis index` / `isis serve`
+native/        isis_native, the optional Rust extension (pyo3, built by maturin): highlights and phrase counts
 web/           index.html, app.js, style.css, insert.js, reflow.js, filetree.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
 scripts/       fetch_sample_corpus.py, browser_check.py
 calibration/   judged queries and tasks, and the scripts that score settings against them (see CALIBRATE.md)
@@ -138,10 +141,12 @@ calibration/   judged queries and tasks, and the scripts that score settings aga
 node --test web/*.test.mjs              # insertion and reflow logic of the page
 python scripts/browser_check.py http://127.0.0.1:8765 sample_corpus   # end to end, needs playwright
 sh web/vendor/build-codemirror.sh        # rebuild the CodeMirror bundle (needs Node)
+.venv/bin/pip install ./native           # rebuild the Rust extension after changing native/src/lib.rs
 ```
 
 Limitations:
 - Tokenising drops English stopwords and never stems. An index cache from when words were stemmed is split into words again from its cached passages on the first start (no files read, no embeddings redone).
 - Outside public mode, the app assumes one user at a time.
+- The Rust extension knows a newer Unicode than Python 3.10 does (13.0), so a letter added since then can be highlighted, or matched in a phrase whatever its case, only with the extension. Everything else is held to the same answers by `tests/test_native.py`.
 - Passages are whole lines, so a very long single-line paragraph becomes one passage. Its embedding averages several windows.
 - The index cache (`<corpus>/.isis/index.json`, `index.npz` and `models/*.npz`) is plain data, so a corpus that comes with someone else's cache can't run code.

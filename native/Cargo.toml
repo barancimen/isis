@@ -1,0 +1,17 @@
+[package]
+name = "isis-native"
+version = "0.1.0"
+edition = "2021"
+description = "Optional Rust speedups for isis: snippet highlights and phrase counts"
+publish = false
+
+[lib]
+name = "isis_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = "0.30"
+regex = "1"
+
+[profile.release]
+strip = true
