@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import pydantic_core
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -87,6 +88,20 @@ def plain(x):
     if isinstance(x, float) and not math.isfinite(x):
         return None
     return x
+
+
+def _plain_scalar(x):
+    if isinstance(x, np.generic):
+        return x.item()
+    raise TypeError(f"{type(x).__name__} can't go into JSON")
+
+
+def as_json(data) -> Response:
+    """`data` as a JSON answer, encoded in one pass by pydantic_core (Rust), with the same result
+    as plain(): dataclasses as objects, tuples as lists, numpy scalars as numbers, and null for a
+    number that isn't finite. For the large answers, Search and Related: encoding them in Python
+    (plain(), then FastAPI's own pass, then json) took three times as long as ranking them."""
+    return Response(pydantic_core.to_json(data, inf_nan_mode="null", fallback=_plain_scalar), media_type="application/json")
 
 
 class NewTask(BaseModel):
@@ -277,7 +292,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                                      skip_files=[str(f) for f in hidden_files], model=model or None)
         except QueryError as e:
             raise HTTPException(400, str(e))
-        return {"hits": plain(hits), "corrected": corrected, "ms": round((time.perf_counter() - started) * 1000, 1)}
+        return as_json({"hits": hits, "corrected": corrected, "ms": round((time.perf_counter() - started) * 1000, 1)})
 
     # ---- tasks ----
 
@@ -321,7 +336,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                 )
         except QueryError as e:  # a regex that ran out of time
             raise HTTPException(400, str(e))
-        return {**plain(result), "prefs": prefs.summary()}
+        return as_json({**{f.name: getattr(result, f.name) for f in dataclasses.fields(result)}, "prefs": prefs.summary()})
 
     @app.get("/api/tasks/{name}/prefs")
     def get_prefs(name: str):
