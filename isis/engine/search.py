@@ -503,20 +503,26 @@ def lexical_scores(snapshot: Snapshot, bm25, term_ids, weights, patterns, rows=N
 MAX_RUNS = 256  # beyond this many separate runs of rows, one product over every passage is quicker
 
 
-def similarities(vectors: np.ndarray, query: np.ndarray, scope: np.ndarray | None, wanted: np.ndarray) -> np.ndarray:
-    """vectors @ query where `wanted`, and -inf elsewhere. Within `scope` (None: everywhere) only
-    its runs of rows are multiplied, as views without copying, so a search in one folder costs
-    about as much as that folder."""
+def scoped_product(vectors: np.ndarray, query: np.ndarray, scope: np.ndarray | None) -> np.ndarray:
+    """vectors @ query (one vector, or a matrix of them as columns) in the rows of `scope`, and
+    -inf in the others. Only the runs of rows in scope are multiplied, as views without copying,
+    so a search in one folder costs about as much as that folder. None: every row."""
     if scope is None:
+        return vectors @ query
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], scope.view(np.int8), [0]))))
+    if len(edges) > 2 * MAX_RUNS:
         out = vectors @ query
-    else:
-        edges = np.flatnonzero(np.diff(np.concatenate(([0], scope.view(np.int8), [0]))))
-        if len(edges) > 2 * MAX_RUNS:
-            out = vectors @ query
-        else:
-            out = np.full(len(vectors), -np.inf, np.float32)
-            for start, end in zip(edges[::2], edges[1::2]):
-                out[start:end] = vectors[start:end] @ query
+        out[~scope] = -np.inf
+        return out
+    out = np.full((len(vectors), *query.shape[1:]), -np.inf, np.float32)
+    for start, end in zip(edges[::2], edges[1::2]):
+        out[start:end] = vectors[start:end] @ query
+    return out
+
+
+def similarities(vectors: np.ndarray, query: np.ndarray, scope: np.ndarray | None, wanted: np.ndarray) -> np.ndarray:
+    """vectors @ query where `wanted` (within `scope`), and -inf elsewhere."""
+    out = scoped_product(vectors, query, scope)
     out[~wanted] = -np.inf
     return out
 

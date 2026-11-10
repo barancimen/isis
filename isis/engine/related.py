@@ -46,7 +46,7 @@ from .index import Snapshot
 from .lexical import B, K1
 from .params import Group, tunable
 from .search import (NEVER, PREFER, REQUIRE, Clause, Hit, QueryError, Steering, lexical_scores, make_hit,
-                     remembering_lines, split_query, steering, top_rows)
+                     remembering_lines, scoped_product, split_query, steering, top_rows)
 from .text import tokenize, tokenize_with_surface
 
 MAX_EXCERPT_MATCHES = 2_000  # paragraphs whose excerpt check is remembered
@@ -659,8 +659,8 @@ class SemanticSignals:
     avoided: np.ndarray | None = None  # clearly like a passage the user avoids
 
     def only_in(self, keep: np.ndarray) -> None:
-        """Rule out the other passages. Left-out folders still count for the corpus statistics, so
-        thresholds mean the same with or without them."""
+        """Rule out the other passages. The z-scores were measured against the whole corpus, so
+        thresholds mean the same with or without the left-out folders."""
         self.strongest = np.where(keep, self.strongest, -np.inf)
         self.weighted = np.where(keep, self.weighted, -np.inf)
         if self.second is not None:
@@ -672,7 +672,10 @@ def _normalized(v: np.ndarray) -> np.ndarray:
 
 
 def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs: np.ndarray, themes: list[Theme],
-                     liked: list[dict], prefs: TaskPrefs, config: RelatedConfig) -> SemanticSignals:
+                     liked: list[dict], prefs: TaskPrefs, config: RelatedConfig, scope: np.ndarray | None = None,
+                     scope_key=()) -> SemanticSignals:
+    """Every passage's meaning scores, worked out only in `scope` (None: everywhere; -inf
+    elsewhere). `scope_key` names the scope, for the scores kept between refreshes."""
     weights = np.array([u.weight for u in units], np.float32)
     like_vecs = remembered_vectors(snapshot, embedder, liked) if liked else None
     if config.query == "document":
@@ -680,13 +683,13 @@ def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs:
         document = _normalized((sizes[:, None] * unit_vecs).sum(0))
         if liked:  # a fixed pull per passage, however long the document has grown
             document = _normalized(document + config.like_weight * like_vecs.sum(0))
-        _, z_doc = zscores(snapshot, document[None, :])
+        _, z_doc = zscores(snapshot, document[None, :], scope)
         out = SemanticSignals(z_doc[:, 0], z_doc[:, 0])  # the closest paragraph is worked out for the passages shown
     else:
-        _, z = zscores(snapshot, unit_vecs)
+        _, z = zscores(snapshot, unit_vecs, scope)
         out = SemanticSignals(z.max(1), (z * weights).max(1), best_unit=(z * weights).argmax(1))
         if liked:  # each liked passage is one more paragraph to match
-            _, z_like = zscores(snapshot, like_vecs)
+            _, z_like = zscores(snapshot, like_vecs, scope)
             out.strongest = np.maximum(out.strongest, z_like.max(1))
             out.weighted = np.maximum(out.weighted, min(config.like_weight, 1.0) * z_like.max(1))
 
@@ -694,7 +697,7 @@ def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs:
     if config.negative_weight <= 0:  # no penalty: only the anti-queries need scoring
         dismissed = [d for d in dismissed if d.get("avoid")]
     if dismissed:
-        _, z_neg = zscores(snapshot, remembered_vectors(snapshot, embedder, dismissed))
+        _, z_neg = zscores(snapshot, remembered_vectors(snapshot, embedder, dismissed), scope)
         if config.negative_weight > 0:
             penalty = config.negative_weight * np.maximum(z_neg.max(1), 0)
             out.strongest, out.weighted = out.strongest - penalty, out.weighted - penalty
@@ -704,7 +707,7 @@ def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs:
 
     theme_of = np.array([u.theme for u in units])
     per_theme = [
-        theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t])
+        theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t], scope, scope_key)
         for t in range(len(themes))
     ]
     out.closest = np.max([best_cos for _, best_cos in per_theme], axis=0)
@@ -714,14 +717,22 @@ def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs:
     return out
 
 
-def zscores(snapshot: Snapshot, vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def zscores(snapshot: Snapshot, vecs: np.ndarray, scope: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Cosine similarity of every passage to each vector, and the same as robust z-scores:
     distance from the corpus median in units of (scaled) median absolute deviation. Unlike mean
     and standard deviation, these are not dragged around by a large on-topic cluster. Passages
-    without embeddings get -inf."""
-    cos = snapshot.vectors @ vecs.T
+    without embeddings, or outside `scope` (None: none are), get -inf. The median is the whole
+    corpus's either way, so a z-score means the same with folders left out."""
+    rows = snapshot.typical_rows()
+    if scope is None or len(rows) == int(snapshot.has_vector.sum()):  # a corpus small enough to use all of it
+        cos = snapshot.vectors @ vecs.T
+        typical = cos[rows]
+        if scope is not None:
+            cos[~scope] = -np.inf
+    else:
+        cos = scoped_product(snapshot.vectors, vecs.T, scope)
+        typical = snapshot.typical_vectors() @ vecs.T
     has = snapshot.has_vector
-    typical = cos[snapshot.typical_rows()]
     median = np.median(typical, axis=0)
     spread = 1.4826 * np.median(np.abs(typical - median), axis=0) + 1e-6
     z = (cos - median) / spread
@@ -781,7 +792,8 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
     return chips
 
 
-def theme_scores(snapshot: Snapshot, theme_units: list[Unit], vecs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def theme_scores(snapshot: Snapshot, theme_units: list[Unit], vecs: np.ndarray, scope: np.ndarray | None = None,
+                 scope_key=()) -> tuple[np.ndarray, np.ndarray]:
     """For one theme, every passage's best z-score and best cosine against its paragraphs. Kept
     for as long as the theme's text and the index stay the same: typing changes one theme, and
     the table of all passages against all paragraphs would not fit in memory for a large corpus."""
@@ -789,13 +801,13 @@ def theme_scores(snapshot: Snapshot, theme_units: list[Unit], vecs: np.ndarray) 
     def score():
         best_z, best_cos = None, None
         for start in range(0, len(vecs), THEME_BATCH):
-            cos, z = zscores(snapshot, vecs[start : start + THEME_BATCH])
+            cos, z = zscores(snapshot, vecs[start : start + THEME_BATCH], scope)
             z, cos = z.max(1), cos.max(1)
             best_z = z if best_z is None else np.maximum(best_z, z)
             best_cos = cos if best_cos is None else np.maximum(best_cos, cos)
         return best_z, best_cos
 
-    key = tuple(sorted(f"{u.heading}\0{u.text}" for u in theme_units))
+    key = (scope_key, *sorted(f"{u.heading}\0{u.text}" for u in theme_units))
     return snapshot.cached(snapshot.theme_scores, key, MAX_THEME_SCORES, score)
 
 
@@ -1053,13 +1065,16 @@ def related(
     themes = assign_themes(units, unit_vecs, config, snapshot)
     lap("units")
 
-    # 2: signals. Left-out folders are gone before anything is ranked, so they take no places.
+    # 2: signals. Left-out folders are gone before anything is ranked, so they take no places, and
+    # are neither compared by meaning nor scanned for patterns.
     liked = [d for d in prefs.liked if d.get("text")] if config.like_weight > 0 else []
+    keep = snapshot.outside_folders(skip_folders) if skip_folders else None
+    rows = None if keep is None else np.flatnonzero(keep)
     if semantic:
-        signals = semantic_signals(snapshot, embedder, units, unit_vecs, themes, liked, prefs, config)
+        signals = semantic_signals(snapshot, embedder, units, unit_vecs, themes, liked, prefs, config, keep,
+                                   tuple(sorted(skip_folders)))
     else:
         signals = SemanticSignals(np.full(n, -np.inf), np.full(n, -np.inf))
-    keep = snapshot.outside_folders(skip_folders) if skip_folders else None
     if keep is not None:
         signals.only_in(keep)
     lap("semantic")
@@ -1071,7 +1086,7 @@ def related(
     chips = task_terms(snapshot, units, prefs, config, steer, heading_texts(task_text))
     query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.ignored]
     bm25 = snapshot.bm25_for(config.bm25_k1, config.bm25_b)
-    lex = lexical_scores(snapshot, bm25, [i for i, _ in query], [w for _, w in query], steer.patterns)
+    lex = lexical_scores(snapshot, bm25, [i for i, _ in query], [w for _, w in query], steer.patterns, rows)
     if keep is not None:
         lex = np.where(keep, lex, 0.0)
     lex_rank = ranks(lex, lex > 0)

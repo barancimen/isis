@@ -323,7 +323,7 @@ def test_a_refresh_only_rescores_the_theme_that_changed(engine, monkeypatch):
     engine.related(task)  # the themes are now remembered
     scored, searched = [], []
     real_scores, real_closest = R.zscores, R._closest_in_words
-    monkeypatch.setattr(R, "zscores", lambda snap, vecs: scored.append(len(vecs)) or real_scores(snap, vecs))
+    monkeypatch.setattr(R, "zscores", lambda snap, vecs, *a: scored.append(len(vecs)) or real_scores(snap, vecs, *a))
     monkeypatch.setattr(R, "_closest_in_words", lambda *a: searched.append(1) or real_closest(*a))
     engine.related(task)
     assert scored == [1]  # the document vector, and no paragraph
@@ -379,3 +379,35 @@ def test_dismissing_a_liked_passage_takes_back_its_add():
     prefs.like("core", "a.md", "Some text", 1, 2)
     prefs.dismiss("core", "a.md", " some  TEXT ")  # the same passage, however it is spaced
     assert prefs.liked == [] and prefs.feedback == {"core": [0, 1]}
+
+
+@pytest.mark.parametrize("sampled", [False, True], ids=["small corpus", "typical rows sampled"])
+def test_suggestions_in_some_folders_only_look_at_them(tmp_path, monkeypatch, sampled):
+    rng = random.Random(4)
+    files = {f"{topic}-{f}.md": "\n\n".join(paragraph(rng, topic) for _ in range(4)) + "\n" for topic in TOPICS for f in range(5)}
+    a, b = tmp_path / "a", tmp_path / "b"
+    for root in (a, b):  # alike, so a pattern's share of passages is the same in one as in both
+        root.mkdir()
+        for name, text in files.items():
+            (root / name).write_text(text)
+    e = Engine([a, b], embedder=HashEmbedder(dim=1024), target_words=0)
+    e.refresh()
+    if sampled:
+        monkeypatch.setattr(I, "SAMPLE_ABOVE", 20)
+        monkeypatch.setattr(I, "TYPICAL_SAMPLE", 50)
+    task = f"{' '.join(SEA_TASK)}.\n\n{' '.join(BIRD_TASK)}.\n"
+    prefs = TaskPrefs(steer="/harpoon|beak/")
+    config = RelatedConfig(z_strong=1.0, z_weak=-1.0)  # a small corpus, all on topic: let more through
+    shown = lambda result: [(l.name, h.path, h.start_line, round(h.score, 5)) for l in result.lanes for h in l.items]
+
+    scoped = shown(e.related(task, prefs=prefs, config=config, skip_folders=["b"]))
+    start, end = e.snapshot.folder_rows()["b"]
+    for counts, done in e.snapshot._pattern_counts.values():
+        assert not done[start:end].any()  # the steer line's pattern was not looked for in b
+
+    real_zscores, real_lexical = R.zscores, R.lexical_scores  # as when everything was scored, then b dropped
+    monkeypatch.setattr(R, "zscores", lambda snap, vecs, scope=None: real_zscores(snap, vecs))
+    monkeypatch.setattr(R, "lexical_scores", lambda *a: real_lexical(*a[:5]))
+    e.snapshot.theme_scores.clear()
+    assert scoped and all(path.startswith("a/") for _, path, _, _ in scoped)
+    assert shown(e.related(task, prefs=prefs, config=config, skip_folders=["b"])) == scoped

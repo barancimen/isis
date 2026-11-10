@@ -134,6 +134,7 @@ class Snapshot:
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
     _typical: dict = field(default_factory=dict, repr=False)
+    _typical_vectors: dict = field(default_factory=dict, repr=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # requests share snapshots
     # The same index seen through each model, by model id. They share everything but the vectors
     # and what is worked out from them.
@@ -188,6 +189,10 @@ class Snapshot:
             return np.sort(np.random.default_rng(0).choice(rows, TYPICAL_SAMPLE, replace=False))
 
         return self.cached(self._typical, "rows", 1, choose)
+
+    def typical_vectors(self) -> np.ndarray:
+        """The vectors of typical_rows, kept, for comparing a few folders without the others."""
+        return self.cached(self._typical_vectors, "vectors", 1, lambda: self.vectors[self.typical_rows()])
 
     def folder_rows(self) -> dict[str, tuple[int, int]]:
         """The rows of each corpus folder (the first part of a path): one block each, as passages
@@ -678,7 +683,7 @@ class Engine:
             else:  # its own vectors, and its own caches of what depends on them
                 v, has = of(e)
                 snapshot.views[_model_id(e)] = replace(snapshot, vectors=v, has_vector=has, excerpt_matches={},
-                                                       theme_scores={}, _typical={})
+                                                       theme_scores={}, _typical={}, _typical_vectors={})
         return snapshot
 
     def view(self, embedder) -> Snapshot:
