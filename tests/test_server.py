@@ -143,7 +143,7 @@ def test_steer_line_and_avoided_passages(client):
     texts = lambda: [h["text"] for lane in client.post("/api/tasks/t/related", json=task).json()["lanes"] for h in lane["items"]]
     assert any("Ambergris" in t for t in texts())
 
-    client.post("/api/tasks/t/terms", json={"term": "ambergri", "action": "ignore"})
+    client.post("/api/tasks/t/terms", json={"term": "ambergris", "action": "ignore"})
     prefs = client.post("/api/tasks/t/terms", json={"term": "Ambergris", "action": "exclude"}).json()
     assert prefs["steer"] == "-Ambergris" and prefs["ignored"] == []  # excluding takes the word out of the ignored
     assert texts() and not any("ambergris" in t.lower() for t in texts())

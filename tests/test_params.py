@@ -56,7 +56,7 @@ def test_api_lists_params_and_accepts_overrides(client):
     assert client.get("/api/search", params={"q": "whale", "params": "{nope"}).status_code == 400
 
     client.post("/api/tasks", json={"name": "t"})
-    small = client.post("/api/tasks/t/related", json={"text": "The sperm whale and ambergris.", "params": {"total_slots": 4}})
+    small = client.post("/api/tasks/t/related", json={"text": "The sperm whale and ambergris.", "params": {"total_slots": 4, "z_weak": -1}})
     assert small.status_code == 200 and small.json()["stats"]["slots"]
     assert sum(small.json()["stats"]["slots"].values()) <= 4
 

@@ -1,11 +1,9 @@
-"""Tokenising for lexical search: lowercase words, English stopwords dropped, Snowball-stemmed."""
+"""Tokenising for lexical search: lowercase words, English stopwords dropped. Words are not
+stemmed: a search for "conditional" finds "conditional", not "condition" or "conditions"."""
 
 from __future__ import annotations
 
 import re
-import threading
-
-import Stemmer
 
 WORD = re.compile(r"[^\W_]+")
 
@@ -19,15 +17,6 @@ STOPWORDS = frozenset(
     whom why will with would you your yours yourself yourselves""".split()
 )
 
-_local = threading.local()  # PyStemmer objects are not thread-safe
-
-
-def _stemmer() -> Stemmer.Stemmer:
-    stemmer = getattr(_local, "stemmer", None)
-    if stemmer is None:
-        stemmer = _local.stemmer = Stemmer.Stemmer("english")
-    return stemmer
-
 
 def _words(text: str) -> list[tuple[int, int, str]]:
     """(start, end, lowercase word) for every word that counts as a search term."""
@@ -39,29 +28,19 @@ def _words(text: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def _stems(words: list[tuple[int, int, str]]) -> list[str]:
-    return _stemmer().stemWords([w for _, _, w in words])
-
-
-def stem_words(words: list[str]) -> list[str]:
-    """The search term of each lowercase word."""
-    return _stemmer().stemWords(words)
-
-
 def tokenize(text: str) -> list[str]:
     """Search terms in `text`, in order."""
-    return _stems(_words(text))
+    return [w for _, _, w in _words(text)]
 
 
 def tokenize_with_surface(text: str) -> list[tuple[str, str]]:
-    """(term, the word as written) pairs, used to show readable labels for stemmed terms."""
-    words = _words(text)
-    return [(term, word) for term, (_, _, word) in zip(_stems(words), words)]
+    """(term, the word as written) pairs. A term is the word in lowercase, so the two are the same
+    today; callers keep both so that the index can map written words to terms."""
+    return [(w, w) for _, _, w in _words(text)]
 
 
 def term_spans(text: str, terms: set[str]) -> list[tuple[int, int]]:
     """Character ranges of the words in `text` whose term is in `terms`, for highlighting."""
     if not terms:
         return []
-    words = _words(text)
-    return [(s, e) for (s, e, _), t in zip(words, _stems(words)) if t in terms]
+    return [(s, e) for s, e, w in _words(text) if w in terms]

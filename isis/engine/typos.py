@@ -1,9 +1,7 @@
 """The corpus words within a typo or two of a word, for typo-tolerant search.
 
-Every distinct word of the corpus is kept as written (lowercased), with the search term it stems
-to. Typos are measured on these words, not on stems: a typo near the end of a word changes how it
-stems, so "informaton" is four letters from the stem of "information" ("inform") but one typo
-from the word.
+Every distinct word of the corpus is kept as written (lowercased), with its search term (today
+the same word: terms are not stemmed).
 
 Looking up a word is a scan of the whole list in two steps. A filter in numpy keeps only the
 words that could be close, and rapidfuzz (C++) counts the typos in those. A typo (a wrong,

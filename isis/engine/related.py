@@ -285,7 +285,7 @@ class TaskPrefs:
     """What the user has told us about one task. Stored next to the task document."""
 
     steer: str = ""  # clauses as in a search query: x prefer, +x require, -x never show
-    ignored: list[str] = field(default_factory=list)  # stems of task keywords not to search for
+    ignored: list[str] = field(default_factory=list)  # task keywords (terms) not to search for
     dismissed: list[dict] = field(default_factory=list)  # {"path", "text", "lane", "start_line", "end_line", "avoid"?}
     feedback: dict = field(default_factory=dict)  # lane -> [adds, dismisses]
     liked: list[dict] = field(default_factory=list)  # "more like this": {"path", "text", "lane", "start_line", "end_line"}
@@ -334,47 +334,47 @@ class TaskPrefs:
         clauses = _complete_clauses(text)
         steering(clauses)
         self._set_clauses(clauses)
-        named = {stem for c in clauses for stem in c.stems()}
+        named = {term for c in clauses for term in c.terms()}
         self.ignored = [t for t in self.ignored if t not in named]
 
     def _set_clauses(self, clauses: list[Clause]) -> None:
         self.steer = " ".join(map(str, clauses))
 
-    def _without(self, stem: str, ops) -> list[Clause]:
-        return [c for c in self.clauses() if not (c.kind == "word" and c.op in ops and c.stems() == [stem])]
+    def _without(self, term: str, ops) -> list[Clause]:
+        return [c for c in self.clauses() if not (c.kind == "word" and c.op in ops and c.terms() == [term])]
 
     def _put_word(self, word: str, op: str, instead_of: tuple[str, ...]) -> None:
         """Put a word on the steer line with this operator, in place of the operators `instead_of`.
         A word it can't search for (a stopword, or several words) is left out."""
-        stems = tokenize(word)
-        if len(stems) != 1:
+        terms = tokenize(word)
+        if len(terms) != 1:
             return
-        clauses = self._without(stems[0], instead_of)
-        if not any(c.kind == "word" and c.stems() == stems for c in clauses):
+        clauses = self._without(terms[0], instead_of)
+        if not any(c.kind == "word" and c.terms() == terms for c in clauses):
             clauses.append(Clause(op, "word", word))
         self._set_clauses(clauses)
-        self.unignore(stems[0])
+        self.unignore(terms[0])
 
     def boost(self, word: str) -> None:
         """Prefer passages with this word: it joins the keyword query at full weight."""
         self._put_word(word, PREFER, (NEVER,))
 
-    def unboost(self, stem: str) -> None:
-        self._set_clauses(self._without(stem, (PREFER, REQUIRE)))
+    def unboost(self, term: str) -> None:
+        self._set_clauses(self._without(term, (PREFER, REQUIRE)))
 
     def exclude(self, word: str) -> None:
-        """Never show passages containing this word (in any form sharing its stem)."""
+        """Never show passages containing this word."""
         self._put_word(word, NEVER, (PREFER, REQUIRE))
 
-    def ignore(self, stem: str) -> None:
+    def ignore(self, term: str) -> None:
         """Stop searching for one of the task's own keywords. Passages containing it can still be
         suggested (to rule them out, exclude the word instead)."""
-        self.unboost(stem)
-        if stem not in self.ignored:
-            self.ignored.append(stem)
+        self.unboost(term)
+        if term not in self.ignored:
+            self.ignored.append(term)
 
-    def unignore(self, stem: str) -> None:
-        self.ignored = [t for t in self.ignored if t != stem]
+    def unignore(self, term: str) -> None:
+        self.ignored = [t for t in self.ignored if t != term]
 
     # ---- feedback on suggestions ----
 
@@ -461,7 +461,7 @@ class Unit:
 
 @dataclass
 class TermChip:
-    term: str  # stemmed, as used by the index
+    term: str  # as used by the index: the word in lowercase
     label: str  # the word as it appears in the task
     weight: float
     boosted: bool = False  # from the steer line: searched for at full weight

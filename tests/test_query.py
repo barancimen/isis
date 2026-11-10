@@ -106,7 +106,7 @@ def test_prefer_require_and_never(engine):
     assert paths(engine.search('"white whale"')) == ["ships/pequod.md"]  # a phrase alone: exact matches only
     assert engine.search('"whale white"') == []
     hits = engine.search("whale /white/")  # prefer: matches first, the rest still found
-    assert "white whale" in hits[0].text and len(hits) == 4
+    assert "white whale" in hits[0].text and len(hits) == 2
     assert [h.text for h in engine.search("whale +/white/")] == [hits[0].text]  # require
     assert {h.path for h in engine.search("+whale")} == {"whales.md", "ships/pequod.md"}
     assert all("Ambergris" not in h.text for h in engine.search("+whale -ambergris"))
@@ -135,7 +135,8 @@ def test_exclusions_drop_passages_in_both_modes(engine):
         assert "whales.md" not in paths(engine.search("whale -squid -ambergris", mode=mode))
         assert "ships/pequod.md" not in paths(engine.search('whale -"white whale" -/Pequod/', mode=mode))
         assert all("Ahab" not in h.text for h in engine.search("whale -/Ahab/", mode=mode))
-    assert "ships/pequod.md" not in paths(engine.search("whale -whaling"))  # by stem: "whaling" drops "whale" too
+    texts = [h.text for h in engine.search("whale -whaling")]  # whaling is another word, so whale stays
+    assert "Ahab was her captain, and he hunted the white whale." in texts and not any("whaling" in t for t in texts)
     assert engine.search("-whale") == []  # nothing to look for
 
 
@@ -148,7 +149,7 @@ def test_invalid_patterns_are_reported(engine):
 
 def test_steering_sorts_clauses_by_use():
     steer = steering(split_query('Whales +harpoon "white whale" +/beak/ -of -squid -/Ahab/'))
-    assert dict(steer.words) == {"whale": 1, "harpoon": 1}
+    assert dict(steer.words) == {"whales": 1, "harpoon": 1}
     assert [p.pattern for p in steer.patterns] == [r"white\s+whale", "beak"]
     assert steer.filters.required_terms == {"harpoon"} and [p.pattern for p in steer.filters.required] == ["beak"]
     assert steer.filters.excluded_terms == {"squid"} and len(steer.filters.excluded) == 2  # "of" is a stopword
@@ -296,3 +297,9 @@ def test_a_cache_from_before_sites_finds_them(site_engine, tmp_path):
     cache.write_text(json.dumps(meta))
     engine = Engine(tmp_path / "sites", index_dir=tmp_path / "index", target_words=0)
     assert sorted(set(paths(engine.search("whale site:github.com")))) == ["gist.md", "hub.md"]
+
+
+def test_a_word_finds_only_itself_not_other_forms(tmp_path):
+    engine = typo_corpus(tmp_path, **{"a.md": "A conditional clause.", "b.md": "In good condition.", "c.md": "Three conditions."})
+    assert paths(engine.search("conditional")) == ["a.md"]
+    assert paths(engine.search("Condition")) == ["b.md"]  # case never counts

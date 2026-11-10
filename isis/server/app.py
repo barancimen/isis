@@ -110,7 +110,7 @@ class RelatedRequest(BaseModel):
 
 
 class TermRequest(BaseModel):
-    term: str  # boost and exclude: the word as shown on its chip; unboost, ignore, unignore: its stem
+    term: str  # boost and exclude: the word as shown on its chip; unboost, ignore, unignore: its term
     action: Literal["boost", "unboost", "ignore", "unignore", "exclude"]
 
 
@@ -120,7 +120,7 @@ class SteerRequest(BaseModel):
 
 class SettingsRequest(BaseModel):
     steer: str = ""
-    ignored: list[str] = []  # stems
+    ignored: list[str] = []  # terms
     excluded_docs: list[str] = []
 
 

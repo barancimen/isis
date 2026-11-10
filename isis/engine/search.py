@@ -6,8 +6,8 @@ spacing ignored) or a /regex/ (Python syntax; case-insensitive unless it has a c
            a phrase or regex is scored the same way, as one more word. Without any + clause, a
            passage must match at least one of these to be found.
     +x     require: only passages matching x are found (and x counts for the ranking too).
-    -x     never: passages matching x are dropped. A word is matched by its stem, so -whale also
-           drops "whales" and "whaling".
+    -x     never: passages matching x are dropped.
+A word matches that word only, in any case: "whale" doesn't find "whales" (words are not stemmed).
 A partly typed last word is expanded to the corpus terms it starts. correct_query fixes misspelled
 plain words before a query from the page gets here. Words to prefer or require also match corpus
 words a typo or two away, for typos in the documents (see typo_terms). The + and - clauses filter
@@ -231,7 +231,7 @@ class Clause:
     def __str__(self) -> str:
         return self.op + {"phrase": f'"{self.value}"', "regex": f"/{self.value}/", "site": f"site:{self.value}"}.get(self.kind, self.value)
 
-    def stems(self) -> list[str]:
+    def terms(self) -> list[str]:
         return tokenize(self.value) if self.kind == "word" else []
 
     def pattern(self) -> re.Pattern | None:
@@ -241,7 +241,7 @@ class Clause:
             return compile_pattern(self.value)
         if self.kind == "phrase":
             return phrase_pattern(self.value) if self.value.split() else None
-        if self.kind == "word" and len(self.stems()) != 1:
+        if self.kind == "word" and len(self.terms()) != 1:
             return re.compile(rf"(?<!\w){re.escape(self.value)}(?!\w)", re.IGNORECASE)
         return None
 
@@ -272,7 +272,7 @@ class Filters:
     """Hard constraints: terms and patterns a passage must contain, and ones it must not, and the
     websites its document must come from (any of them) or must not."""
 
-    required_terms: set[str] = field(default_factory=set)  # stems
+    required_terms: set[str] = field(default_factory=set)
     required: list[re.Pattern] = field(default_factory=list)
     excluded_terms: set[str] = field(default_factory=set)
     excluded: list[re.Pattern] = field(default_factory=list)
@@ -317,8 +317,8 @@ class Filters:
 class Steering:
     """What a list of clauses asks for, sorted by how each part is used."""
 
-    words: Counter = field(default_factory=Counter)  # stems to rank by (prefer and require), with counts
-    surfaces: dict = field(default_factory=dict)  # stem -> the word as written
+    words: Counter = field(default_factory=Counter)  # terms to rank by (prefer and require), with counts
+    surfaces: dict = field(default_factory=dict)  # term -> the word as written
     patterns: list[re.Pattern] = field(default_factory=list)  # phrases and regexes to rank by
     filters: Filters = field(default_factory=Filters)
     text: str = ""  # what the meaning side embeds: the words and phrases to prefer or require
@@ -338,21 +338,21 @@ def steering(clauses: list[Clause]) -> Steering:
         if c.kind == "site":
             (out.filters.excluded_sites if c.op == NEVER else out.filters.sites).add(web_host(c.value))
             continue
-        stems = c.stems()
+        own = c.terms()
         if c.op == NEVER:
-            if c.kind == "word" and len(stems) == 1:
-                out.filters.excluded_terms.add(stems[0])
+            if c.kind == "word" and len(own) == 1:
+                out.filters.excluded_terms.add(own[0])
             elif (p := c.pattern()) is not None:
                 out.filters.excluded.append(p)
             continue
         if c.kind == "word":
-            for stem, surface in tokenize_with_surface(c.value):
-                out.words[stem] += 1
-                out.surfaces.setdefault(stem, surface)
+            for term, surface in tokenize_with_surface(c.value):
+                out.words[term] += 1
+                out.surfaces.setdefault(term, surface)
             text.append(c.value)
             if c.op == REQUIRE:
-                if len(stems) == 1:
-                    out.filters.required_terms.add(stems[0])
+                if len(own) == 1:
+                    out.filters.required_terms.add(own[0])
                 elif (p := c.pattern()) is not None:
                     out.filters.required.append(p)
             continue
@@ -395,11 +395,11 @@ def parse_query(snapshot: Snapshot, query: str, typo_weight: float = 0.0) -> Que
     steer = steering(clauses)
     weights: dict[int, float] = {}
     terms: set[str] = set()
-    for stem, count in steer.words.items():
-        tid = snapshot.term_id(stem)
+    for term, count in steer.words.items():
+        tid = snapshot.term_id(term)
         if tid is not None:
             weights[tid] = float(count)
-            terms.add(stem)
+            terms.add(term)
     typing = None  # a partly typed last word
     last = clauses[-1] if clauses else None
     if query and not query[-1].isspace() and last is not None and last.kind == "word" and last.op != NEVER:
@@ -410,13 +410,13 @@ def parse_query(snapshot: Snapshot, query: str, typo_weight: float = 0.0) -> Que
                 weights.setdefault(snapshot.term_id(t), 1.0)
                 terms.add(t)
     if typo_weight > 0:
-        for stem, count in steer.words.items():
-            if stem == typing:
+        for term, count in steer.words.items():
+            if term == typing:
                 continue
-            for tid, weight in typo_terms(snapshot, stem, steer.surfaces[stem], typo_weight).items():
+            for tid, weight in typo_terms(snapshot, term, steer.surfaces[term], typo_weight).items():
                 weights[tid] = max(weights.get(tid, 0.0), count * weight)
                 terms.add(snapshot.vocab.terms[tid])
-    unknown = any(snapshot.term_id(stem) is None and len(word) >= MIN_PREFIX for stem, word in steer.surfaces.items())
+    unknown = any(snapshot.term_id(term) is None and len(word) >= MIN_PREFIX for term, word in steer.surfaces.items())
     return Query(list(weights), list(weights.values()), terms, steer.filters, steer.text, steer.patterns, steer.highlight, unknown)
 
 
@@ -441,16 +441,16 @@ def near_words(snapshot: Snapshot, word: str) -> list[tuple[str, int, int]]:
     return snapshot.cached(snapshot.near_words, word, 256, find)
 
 
-def typo_terms(snapshot: Snapshot, stem: str, word: str, typo_weight: float) -> dict[int, float]:
+def typo_terms(snapshot: Snapshot, term: str, word: str, typo_weight: float) -> dict[int, float]:
     """Term id -> weight for the terms of the corpus words a typo or two from `word` (whose term is
-    `stem`), and for `stem` itself if it is in the corpus.
+    `term`), and for `term` itself if it is in the corpus.
 
     In BM25 a rare word weighs more, and a typo is about as rare as words get, so a passage with a
     typo would rank above those with the word spelt right. As in Lucene's fuzzy queries, every
     term here is weighed as if it were as common as the most common of them. A term then counts
     `typo_weight` times as much per typo."""
     df, idf = snapshot.bm25.doc_freq, snapshot.bm25.idf
-    tid = snapshot.term_id(stem)
+    tid = snapshot.term_id(term)
     own = int(df[tid]) if tid is not None else 0
     best: dict[int, int] = {}
     for _, term, typos in near_words(snapshot, word):

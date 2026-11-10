@@ -203,7 +203,7 @@ def _term_vector(term: str, dim: int) -> np.ndarray:
 
 
 class HashEmbedder:
-    """Stand-in for tests and model-free experiments: a random projection of the bag of stemmed
+    """Stand-in for tests and model-free experiments: a random projection of the bag of
     words. Passages that share vocabulary get similar vectors; it knows nothing about meaning."""
 
     def __init__(self, dim: int = 64):

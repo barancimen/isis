@@ -85,20 +85,24 @@ def test_terms_follow_the_task_the_steer_line_and_ignored_words(engine):
     prefs = TaskPrefs(steer="granite harpoon -ocean", ignored=["whale"])
     chips = {c.term: c for c in engine.related(task, prefs=prefs).terms}
     assert chips["whale"].ignored and chips["whale"].weight == 0
-    assert chips["granit"].boosted and chips["granit"].label == "granite" and chips["granit"].weight == 1.0
+    assert chips["granite"].boosted and chips["granite"].label == "granite" and chips["granite"].weight == 1.0
     assert chips["harpoon"].boosted and chips["harpoon"].weight == 1.0  # boosted to full weight
     assert "ocean" not in chips  # excluded words are not searched for
 
 
 def test_chip_shortcuts_edit_the_steer_line():
     prefs = TaskPrefs(steer="+whales /beak/", ignored=["squid"])
-    prefs.boost("whale")  # already required: unchanged
+    prefs.boost("Whales")  # already required: unchanged
     prefs.boost("squid")
     assert prefs.steer == "+whales /beak/ squid" and prefs.ignored == []
-    prefs.exclude("whaling")
-    assert prefs.steer == "/beak/ squid -whaling"
+    prefs.exclude("whales")
+    assert prefs.steer == "/beak/ squid -whales"
+    prefs.exclude("whaling")  # another word, not another form of it
+    assert prefs.steer == "/beak/ squid -whales -whaling"
+    prefs.boost("whaling")
+    assert prefs.steer == "/beak/ squid -whales whaling"
     prefs.ignore("squid")
-    assert prefs.steer == "/beak/ -whaling" and prefs.ignored == ["squid"]
+    assert prefs.steer == "/beak/ -whales whaling" and prefs.ignored == ["squid"]
 
 
 def test_dismissed_passages_stay_away(engine):
@@ -353,9 +357,9 @@ def test_large_corpora_estimate_typical_similarity_from_a_fixed_sample(engine, m
 
 @pytest.mark.parametrize("line", ["whales", "+whales", "-whales"])
 def test_naming_a_word_on_the_steer_line_stops_ignoring_it(line):
-    prefs = TaskPrefs(ignored=["whale", "harpoon"])
+    prefs = TaskPrefs(ignored=["whales", "whale", "harpoon"])
     prefs.set_steer(line)
-    assert prefs.ignored == ["harpoon"]
+    assert prefs.ignored == ["whale", "harpoon"]
 
 
 def test_excerpt_weight_zero_on_a_task_of_excerpts_still_answers(engine):

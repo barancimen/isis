@@ -8,7 +8,7 @@ MICRO = "TaylorAI/bge-micro-v2"
 
 def test_hash_embedder_is_normalised_and_follows_vocabulary():
     e = HashEmbedder(dim=64)
-    v = e.embed(["the whale dives", "whales diving", "stock market prices", ""])
+    v = e.embed(["the whale dives", "whale dives", "stock market prices", ""])
     assert v.shape == (4, 64)
     assert np.allclose(np.linalg.norm(v[:3], axis=1), 1, atol=1e-5)
     assert v[0] @ v[1] > 0.99 and abs(v[0] @ v[2]) < 0.5 and not v[3].any()

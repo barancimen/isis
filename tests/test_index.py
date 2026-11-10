@@ -9,6 +9,7 @@ import pytest
 
 from conftest import paths, write_corpus
 from isis.engine.index import Engine, corpus_exclude
+from isis.engine.search import SearchConfig
 from isis.engine.semantic import HashEmbedder
 
 
@@ -464,3 +465,20 @@ def test_a_cache_split_the_old_way_is_read_again_keeping_embeddings(tmp_path, mo
     e.refresh()
     assert e.search("stoatword")
     assert sorted(embedder.seen) == ["Stoatword opens this note.\n---", "Troutword is new."]  # the others kept theirs
+
+
+def test_a_cache_of_stemmed_terms_is_split_into_words_again_without_reading_or_embedding(corpus, tmp_path, monkeypatch):
+    index = tmp_path / "index"
+    Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    meta = json.loads((index / "index.json").read_text())
+    del meta["terms"]  # as written when terms were stems
+    meta["vocab"] = [{"whale": "whal", "whales": "whal", "whaling": "whal"}.get(t, t) for t in meta["vocab"]]
+    meta["words"] = [w for w in meta["words"] if not w.startswith("whal")]
+    (index / "index.json").write_text(json.dumps(meta))
+
+    monkeypatch.setattr(Engine, "_read", lambda *a: pytest.fail("a file was read again"))
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    assert paths(e.search("whaling")) == ["ships/pequod.md"] and not e.search("whal ", config=SearchConfig(typo_weight=0))  # no old stem
+    assert "whaling" in e.snapshot.words.words
+    assert e.refresh()["embedded"] == 0  # and saves the new terms
+    assert json.loads((index / "index.json").read_text())["terms"] == 2
