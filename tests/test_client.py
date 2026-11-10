@@ -140,3 +140,28 @@ def test_no_server(capsys):
         port = s.getsockname()[1]
     code, _, err = run(capsys, "search", "whale", "--server", f"http://127.0.0.1:{port}")
     assert code == 2 and "isis found no server" in err and "isis serve" in err
+
+
+def test_an_older_server_is_named_as_such(capsys, tmp_path):
+    """A server from before `isis related` answers its endpoint with the page's files: 405."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Old(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(405)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"detail": "Method Not Allowed"}')
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Old)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        (tmp_path / "notes.md").write_text(TASK)
+        code, _, err = run(capsys, "related", str(tmp_path / "notes.md"), "--server", f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert code == 2 and "older than this command" in err

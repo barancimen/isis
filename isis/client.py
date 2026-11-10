@@ -48,7 +48,7 @@ def fetch(server: str, method: str, path: str, query: dict | None = None, body: 
             detail = json.loads(e.read().decode("utf-8")).get("detail")
         except (ValueError, AttributeError):
             detail = None
-        if e.code == 404 and path == "/api/related" and detail == "Not Found":
+        if path == "/api/related" and e.code in (404, 405):  # a server from before this command: the page's files answer
             raise Failure(f"the server at {server} is older than this command. Restart it with the current isis.") from None
         raise Failure(str(detail) if detail else f"the server at {server} answered {e.code} {e.reason}") from None
     except (urllib.error.URLError, socket.timeout, ConnectionError) as e:

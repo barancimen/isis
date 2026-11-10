@@ -37,6 +37,7 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
   - `--reload`: restart when the Python code changes, handy while you tune the algorithm.
   - `--no-build`: don't build the Rust extension, even if it is missing or old.
 - `isis index DIR...` builds the index without starting the server.
+- `isis search` and `isis related` ask a running server from the terminal (see Command line below).
 
 **Nothing leaves the machine.** Once the model is cached (after the first run), isis makes no network requests at all: model files are read from the local Hugging Face cache without asking the network, Hugging Face telemetry is off, the page loads nothing from outside (no fonts, CDNs or analytics; FastAPI's `/docs` pages, which load from a CDN, are turned off), and the search fields have spellcheck off so a browser's cloud spellcheck never sees them. The only downloads are `pip install`, the model on the first run, `scripts/fetch_sample_corpus.py`, and building the Rust extension (maturin and the Rust libraries it uses), which `isis serve` does only when the extension is missing or old. To be certain, set `HF_HUB_OFFLINE=1`, which also stops that build, or run it without network access.
 
@@ -54,6 +55,38 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 - **Busy limit.** Two searches or Related refreshes run at once. Others wait up to 3 s, then get a 503.
 - **Browser headers.** The cookie is always `Secure`, so the site works only over HTTPS (browsers also accept it on localhost). Every answer has a content security policy, and API answers have `Cache-Control: no-store`.
 - **Regexes.** They run through the `regex` library, with 3 s for each request. Syntax is still checked by `re`, so what is valid stays the same. Patterns over 300 characters or with counted repeats multiplying past 2,000 are refused, because `regex` expands repeats when it compiles and `(x{65535}){65535}` would use all the memory. Fuzzy syntax such as `{e<=1}` is refused too, as `re` reads it as plain text.
+
+## Command line
+
+`isis search` and `isis related` ask a running `isis serve` from the terminal, like ripgrep. Each call is on its own: it sends its query or task document, its word rules and its settings, and the server stores nothing, so the page and its settings stay as they are. The server already holds the index and the models, so a call only waits for the answer (Related for a short task takes about 0.15 s on the sample corpus). The client uses only the standard library and starts in 0.1 s.
+
+```sh
+isis search whale /harpoon\w*/ -ship            # the page's query syntax; several words need no quotes
+isis search '"natural selection"' -n 5 -o hits.md
+isis related notes.md                            # passages related to a task document
+cat notes.md | isis related - +squid -o found.json
+isis search whale -p '{"k1": 1.5, "rrf_k": 30}'  # settings for this call only
+```
+
+Each result is one line: `[path:line]` and then the whole passage, its line breaks turned into spaces, with the matches highlighted in a terminal (`NO_COLOR` turns colors off). The line is the passage's first, so `path:line` opens it in an editor. Related puts the name of each group before its results.
+
+| Option | Does |
+|---|---|
+| `QUERY...` (search) | Words, `"phrases"`, `/regex/`, `+x` (required), `-x` (excluded) and `site:host`, as in the page. A clause like `-ship` can go anywhere. Only the options below count as options. |
+| `FILE [RULES...]` (related) | The task document, or `-` for stdin, then word rules in the same syntax, as on the page's word rules line. |
+| `-n N` | How many results (10). For Related it sets *Number of results*, which can't go below 4, and the list is cut to N. |
+| `-p JSON` | Settings for this call, inline or as `@file.json`. The names are those of `/api/params`, which the page's Adjustments show. An unknown name or a value out of range is refused, with the list of names. |
+| `-o FILE` | Also save the results. `.json` saves the server's whole answer, `.md` Markdown with the matches in bold, anything else the plain lines. |
+| `-q` | Print nothing (with `-o`). |
+| `-l` | Print only the documents, once each, best first. |
+| `--json` | Print the server's answer as JSON. |
+| `--folder NAME` | Only this corpus folder (repeatable). |
+| `--keywords` (search) | Keywords only. By default meaning is mixed in, as in the page. |
+| `--as-typed` (search) | No spelling correction. A corrected search says what it searched for, on stderr. |
+| `--model ID` | The embedding model (the server's default). |
+| `--server URL` | Where `isis serve` runs: `http://127.0.0.1:8000`, or `ISIS_SERVER`. A server under a path works, as in `https://example.org/isis`. |
+
+The exit code is 0 with results, 1 without and 2 on an error, as in ripgrep. Related for any text is `POST /api/related` (`text`, `steer`, `params`, `skip_folders`, `model`), which public mode limits like Related for a task.
 
 ## Using it
 
@@ -128,7 +161,7 @@ isis/engine/   chunker.py   markdown -> passages with line ranges
                report.py    plain-text printing for notebooks
                native.py    the optional Rust extension, with the Python code as fallback
 isis/server/   app.py       FastAPI app and file watcher; tasks.py: task files and preferences; public.py: public mode
-isis/cli.py    `isis index` / `isis serve`
+isis/cli.py    `isis index` / `isis serve`; client.py: `isis search` / `isis related`, which ask a running server
 native/        isis_native, the optional Rust extension (pyo3, built by maturin): highlights and phrase counts
 web/           index.html, app.js, style.css, insert.js, reflow.js, filetree.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
 scripts/       fetch_sample_corpus.py, browser_check.py
