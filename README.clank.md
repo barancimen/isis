@@ -58,30 +58,30 @@ The server has no authentication. Keep the default `--host 127.0.0.1`, and use a
 
 ## Command line
 
-`isis search` and `isis related` ask a running `isis serve` from the terminal, like ripgrep. Each call is on its own: it sends its query or task document, its word rules and its settings, and the server stores nothing, so the page and its settings stay as they are. The server already holds the index and the models, so a call only waits for the answer (Related for a short task takes about 0.15 s on the sample corpus). The client uses only the standard library and starts in 0.1 s.
+`isis search` and `isis related` ask a running `isis serve` from the terminal, like ripgrep. Each call is on its own: it sends its query or task document, its word rules and its settings, and the server stores nothing, so the page and its settings stay as they are. They ask exactly what the page asks, so the same query or task text with the same settings gives the same results, in the same order. Only a task's stored preferences (ignored keywords, hidden or liked passages, hidden documents) are the page's alone. The server already holds the index and the models, so a call only waits for the answer (Related for a short task takes about 0.15 s on the sample corpus). The client uses only the standard library and starts in 0.1 s.
 
 ```sh
-isis search whale /harpoon\w*/ -ship            # the page's query syntax; several words need no quotes
+isis search 'whale /harpoon\w*/ -ship'          # the query in quotes, written as in the page
 isis search '"natural selection"' -n 5 -o hits.md
 isis related notes.md                            # passages related to a task document
-cat notes.md | isis related - +squid -o found.json
-isis search whale -p '{"k1": 1.5, "rrf_k": 30}'  # settings for this call only
+cat notes.md | isis related - '+squid -ship' -o found.json
+isis search 'whale' -p '{"k1": 1.5, "rrf_k": 30}'  # settings for this call only
 ```
 
 Each result is one line: `[path:line]` and then the whole passage, its line breaks turned into spaces, with the matches highlighted in a terminal (`NO_COLOR` turns colors off). The line is the passage's first, so `path:line` opens it in an editor. Related puts the name of each group before its results.
 
 | Option | Does |
 |---|---|
-| `QUERY...` (search) | Words, `"phrases"`, `/regex/`, `+x` (required), `-x` (excluded) and `site:host`, as in the page. A clause like `-ship` can go anywhere. Only the options below count as options. |
-| `FILE [RULES...]` (related) | The task document, or `-` for stdin, then word rules in the same syntax, as on the page's word rules line. |
-| `-n N` | How many results (10). For Related it sets *Number of results*, which can't go below 4, and the list is cut to N. |
+| `'QUERY'` (search) | One argument in quotes, written as in the page: words, `"phrases"`, `/regex/`, `+x` (required), `-x` (excluded) and `site:host`. It is sent as written, so a last word that no passage contains matches the words it starts, as while typing in the page. A `-word` or a second word outside the quotes is refused, so nothing is read two ways (a query that starts with a dash and has no space goes after `--`). |
+| `FILE ['RULES']` (related) | The task document, or `-` for stdin, then the word rules as one argument in quotes, as on the page's word rules line. |
+| `-n N` | Show only the first N results. Search asks for 50, as the page does, and Related shows all its results. Neither changes what is found: for more or fewer Related results, set `total_slots` with `-p`, as the page's *Number of results* does. |
 | `-p JSON` | Settings for this call, inline or as `@file.json`. The names are those of `/api/params`, which the page's Adjustments show. An unknown name or a value out of range is refused, with the list of names. |
 | `-o FILE` | Also save the results. `.json` saves the server's whole answer, `.md` Markdown with the matches in bold, anything else the plain lines. |
 | `-q` | Print nothing (with `-o`). |
 | `-l` | Print only the documents, once each, best first. |
 | `--json` | Print the server's answer as JSON. |
 | `--folder NAME` | Only this corpus folder (repeatable). |
-| `--keywords` (search) | Keywords only. By default meaning is mixed in, as in the page. |
+| `--keywords` (search) | Keywords only, as the page's Meaning button when it is off (`meaning_weight` 0). |
 | `--as-typed` (search) | No spelling correction. A corrected search says what it searched for, on stderr. |
 | `--model ID` | The embedding model (the server's default). |
 | `--server URL` | Where `isis serve` runs: `http://127.0.0.1:8000`, or `ISIS_SERVER`. A server under a path works, as in `https://example.org/isis`. |
@@ -125,7 +125,7 @@ The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and
    - *Small topics* (`gaps`): related to themes with few collected excerpts.
 5. **Selection.**
    - Each lane is filled by MMR, so results differ from each other and from what you have collected, with at most two passages per file.
-   - Slots per lane are drawn by Thompson sampling from your add/dismiss counts.
+   - Slots per lane are drawn by Thompson sampling from your add/dismiss counts. The draw is seeded the same way for every task and for `isis related`, so the same text gives the same results anywhere until feedback moves it.
 
 The defaults were calibrated on the sample corpus with bge-micro-v2, against blind relevance judgments: 1,026 search results for 38 queries, and about 970 Related suggestions for 19 task documents (5 of them long, the size of a document after a session of collecting). That lowered BM25's length normalisation (b 0.35), raised the meaning thresholds of the Related filter (3.25 alone, 1.75 with a top keyword match), weighted your own notes above pasted excerpts, and turned the dismissal push off (it pushed relevant passages down as often as junk). The similarity scores of this model are compressed (robust z rarely passes 4); a different model or corpus may want different thresholds, so measure before changing them. With mdbr-leaf-ir, now the default, search scores 0.742 on the same judgments against 0.708, and the Related thresholds have not been recalibrated for it (see CALIBRATE.md).
 

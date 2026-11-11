@@ -5,7 +5,12 @@ stores nothing. The server already holds the index and the models, so a call onl
 answer. This module uses the standard library alone, so it starts in a fraction of a second.
 
 Each result is one line: [path:line] and the whole passage, its line breaks turned into spaces,
-with the matches highlighted when printing to a terminal."""
+with the matches highlighted when printing to a terminal.
+
+It asks exactly what the page asks, so the same query or text with the same settings gives the
+same results: Search is always hybrid with the page's limit, and Meaning off is meaning_weight 0.
+The query, and Related's word rules, are one argument each, in quotes. A -word outside quotes is
+an error rather than a guess."""
 
 from __future__ import annotations
 
@@ -20,11 +25,9 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_SERVER = "http://127.0.0.1:8000"
-DEFAULT_LIMIT = 10
-RELATED_SLOTS = (4, 80)  # the range of the Related setting total_slots
+SEARCH_LIMIT = 50  # as in the page (SEARCH_LIMIT in web/app.js)
 TIMEOUT = 300  # seconds; the first Related call of a long task embeds all of it
-VALUE_OPTIONS = {"-n", "--limit", "-p", "--params", "-o", "--output", "--folder", "--model", "--server"}
-FLAG_OPTIONS = {"-q", "--quiet", "-l", "--files", "--json", "--keywords", "--as-typed", "-h", "--help"}
+SHORT_OPTIONS = {"-n", "-p", "-o", "-q", "-l", "-h"}
 LOCATION, LINE, MATCH, HEADING, RESET = "\x1b[35m", "\x1b[32m", "\x1b[1;31m", "\x1b[1m", "\x1b[0m"
 
 
@@ -66,8 +69,8 @@ def _parser(command: str) -> argparse.ArgumentParser:
             prog="isis search", description="Search the corpus of a running isis server.",
             epilog='Write the query as in the page, with words, "phrases", /regex/, +required, -excluded and site:host. '
             'Settings are the names of the sliders in Adjustments.')
-        p.add_argument("query", nargs="+", help="what to look for (several words need no quotes)")
-        p.add_argument("--keywords", action="store_true", help="keywords only, no meaning")
+        p.add_argument("query", help="what to look for, in quotes")
+        p.add_argument("--keywords", action="store_true", help="keywords only, as Meaning off in the page")
         p.add_argument("--as-typed", action="store_true", help="don't correct misspelled words")
     else:
         p = argparse.ArgumentParser(
@@ -75,8 +78,9 @@ def _parser(command: str) -> argparse.ArgumentParser:
             epilog='Write word rules as in the page, with words, "phrases", /regex/, +required and -excluded. '
             'Settings are the names of the sliders in Adjustments.')
         p.add_argument("file", help="the task document, or - to read it from stdin")
-        p.add_argument("rules", nargs="*", help="word rules, such as +squid -ship /harpoon\\w*/")
-    p.add_argument("-n", "--limit", type=int, default=DEFAULT_LIMIT, metavar="N", help=f"how many results (default {DEFAULT_LIMIT})")
+        p.add_argument("rules", nargs="?", default="", help="word rules in quotes, such as '+squid -ship /harpoon\\w*/'")
+    shown = f"default {SEARCH_LIMIT}, as in the page" if command == "search" else "default all, as in the page"
+    p.add_argument("-n", "--limit", type=int, metavar="N", help=f"show only the first N results ({shown})")
     p.add_argument("-p", "--params", metavar="JSON", help="settings for this call, as JSON or @file.json")
     p.add_argument("-o", "--output", metavar="FILE", help="also save the results (.json, .md or plain text)")
     p.add_argument("-q", "--quiet", action="store_true", help="print nothing (with -o)")
@@ -89,26 +93,25 @@ def _parser(command: str) -> argparse.ArgumentParser:
     return p
 
 
-def clauses_last(args: list[str]) -> list[str]:
-    """The arguments with every positional one after "--". A query clause such as -ship starts
-    with a dash, and argparse would take it for an option (-open even for -o pen). Only the
-    options defined here are options. Any other argument with one leading dash is a clause."""
-    options, positional, i = [], [], 0
-    while i < len(args):
-        a = args[i]
+def check_arguments(command: str, args: list[str]) -> None:
+    """Refuse what could be read two ways. Unquoted, `whale -ship` would make -ship an option, and
+    argparse would even read -open as -o pen and save to a file named pen. So an argument with one
+    dash must be one of the short options as written, and the query or the rules are one argument."""
+    quoted = "isis search 'whale -ship'" if command == "search" else "isis related notes.md '+squid -ship'"
+    for a in args:
         if a == "--":
-            positional += args[i + 1:]
             break
-        if a in VALUE_OPTIONS:
-            options += args[i:i + 2]
-            i += 2
-            continue
-        if a in FLAG_OPTIONS or (a.startswith("--") and len(a) > 2):  # an unknown --option is still an error
-            options.append(a)
-        else:
-            positional.append(a)
-        i += 1
-    return options + ["--"] + positional
+        if a.startswith("-") and not a.startswith("--") and a != "-" and a not in SHORT_OPTIONS and not any(c.isspace() for c in a):
+            raise Failure(f"{a} isn't an option. Put the {'query' if command == 'search' else 'word rules'} in quotes, as in {quoted}")
+
+
+def too_many(command: str, extra: list[str]) -> Failure:
+    unknown = [x for x in extra if x.startswith("--")]
+    if unknown:
+        return Failure(f"there is no option {unknown[0]}. See isis {command} -h")
+    quoted = "isis search 'whale ship'" if command == "search" else "isis related notes.md '+squid -ship'"
+    what = "query" if command == "search" else "word rules"
+    return Failure(f"put the whole {what} in quotes, as in {quoted} ({' '.join(extra)} was left over)")
 
 
 def _read_json(text: str) -> dict:
@@ -228,10 +231,12 @@ def save(path: str, answer: dict, groups: list[tuple[str, list[dict]]], files: b
 
 
 def run_search(a, params: dict) -> tuple[dict, list[tuple[str, list[dict]]]]:
+    if a.keywords:  # what the page's Meaning button does when it is off
+        params = {**params, "meaning_weight": 0}
     query = {
-        "q": " ".join(a.query) + " ",  # a final space, or the last word would count as half typed
-        "mode": "lexical" if a.keywords else "hybrid",
-        "limit": a.limit,
+        "q": a.query,  # as written, as the page sends it
+        "mode": "hybrid",  # always, as in the page
+        "limit": SEARCH_LIMIT if a.limit is None else a.limit,
         "params": json.dumps(params),
         "skip": json.dumps(skipped_folders(a.server, a.folder)),
         "as_typed": "true" if a.as_typed else "false",
@@ -249,15 +254,15 @@ def run_related(a, params: dict) -> tuple[dict, list[tuple[str, list[dict]]]]:
         text = sys.stdin.read() if a.file == "-" else Path(a.file).read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         raise Failure(f"could not read {a.file} ({e.strerror or e})") from None
-    params = {"total_slots": min(max(a.limit, RELATED_SLOTS[0]), RELATED_SLOTS[1]), **params}
-    body = {"text": text, "steer": " ".join(a.rules), "params": params,
+    body = {"text": text, "steer": a.rules, "params": params,  # how many results is total_slots, as in the page
             "skip_folders": skipped_folders(a.server, a.folder), "model": a.model}
     answer = fetch(a.server, "POST", "/api/related", body=body)
-    groups, left = [], a.limit
+    groups, left = [], a.limit  # -n only cuts what is shown, in the page's order
     for lane in answer.get("lanes") or []:
         items = lane.get("items") or []
-        groups.append((lane.get("title", ""), items[:max(left, 0)]))
-        left -= len(items)
+        if left is not None:
+            items, left = items[:max(left, 0)], left - len(items)
+        groups.append((lane.get("title", ""), items))
     if not any(hits for _, hits in groups):
         note = next((lane.get("note") for lane in answer.get("lanes") or [] if lane.get("note")), "")
         if note:
@@ -267,9 +272,12 @@ def run_related(a, params: dict) -> tuple[dict, list[tuple[str, list[dict]]]]:
 
 def main(argv: list[str]) -> int:
     command, rest = argv[0], argv[1:]
-    a = _parser(command).parse_args(clauses_last(rest))
     try:
-        if a.limit < 1:
+        check_arguments(command, rest)
+        a, extra = _parser(command).parse_known_args(rest)
+        if extra:
+            raise too_many(command, extra)
+        if a.limit is not None and a.limit < 1:
             raise Failure("-n needs a number of 1 or more")
         params = _read_json(a.params) if a.params else {}
         if params:

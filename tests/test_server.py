@@ -368,3 +368,13 @@ def test_related_for_any_text_stores_nothing(client, corpus):
     r = client.post("/api/related", json={"text": "whales", "steer": "/(/"})
     assert r.status_code == 400 and "invalid pattern" in r.json()["detail"]
     assert not any((corpus / "_tasks").iterdir())
+
+
+def test_related_does_not_depend_on_the_task_name(client):
+    """The same text gives the same results in every task, as on the command line."""
+    text = "The sperm whale dives for squid.\n\nThe finches of the Galapagos differ in their beaks.\n"
+    answers = []
+    for name in ("a", "Another name"):
+        client.post("/api/tasks", json={"name": name})
+        answers.append(client.post(f"/api/tasks/{name}/related", json={"text": text}).json()["lanes"])
+    assert answers[0] == answers[1] == client.post("/api/related", json={"text": text}).json()["lanes"]

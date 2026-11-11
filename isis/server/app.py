@@ -36,6 +36,10 @@ LOOPBACK = ("localhost", "127.0.0.1", "::1")
 WATCH_RETRY = 30  # seconds
 PAGE_SETTLE_SECONDS = 5
 PAGE_VERSION_SLOT = '<meta name="page-version" content="">'
+# Seeds the draw that shares Related's results between its groups. It is the same for every task
+# and for `isis related`, so the same text and settings give the same results in the page and on
+# the command line. Feedback still moves it, as the draw adds the number of feedback events.
+RELATED_SEED = 0
 
 
 class PageVersion:
@@ -328,7 +332,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         tasks.delete(name)
         return {"ok": True}
 
-    def run_related(body: RelatedRequest, prefs: TaskPrefs, seed: int) -> dict:
+    def run_related(body: RelatedRequest, prefs: TaskPrefs) -> dict:
         try:
             with time_limit():
                 result = engine.related(
@@ -336,7 +340,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                     prefs=prefs,
                     config=configure(RelatedConfig, body.params),
                     skip_folders=body.skip_folders,
-                    seed=seed,
+                    seed=RELATED_SEED,
                     model=body.model or None,
                 )
         except QueryError as e:  # a regex that ran out of time
@@ -346,19 +350,20 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
     @app.post("/api/tasks/{name}/related")
     def related(name: str, body: RelatedRequest):
         prefs = tasks.prefs(name)
-        return as_json({**run_related(body, prefs, zlib.crc32(name.encode())), "prefs": prefs.summary()})
+        return as_json({**run_related(body, prefs), "prefs": prefs.summary()})
 
     @app.post("/api/related")
     def related_to_text(body: StatelessRelatedRequest):
         """Related for any text, with word rules and settings given in the request and nothing
-        stored: what `isis related` asks for."""
+        stored: what `isis related` asks for. The same text, rules and settings give what a task
+        without other preferences shows in the page."""
         prefs = TaskPrefs()
         try:
             with time_limit():
                 prefs.set_steer(body.steer)
         except QueryError as e:
             raise HTTPException(400, str(e))
-        return as_json(run_related(body, prefs, 0))
+        return as_json(run_related(body, prefs))
 
     @app.get("/api/tasks/{name}/prefs")
     def get_prefs(name: str):

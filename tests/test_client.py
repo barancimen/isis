@@ -82,15 +82,41 @@ def test_limit_files_and_json(app, capsys):
     assert json.loads(out)["hits"]
 
 
-def test_clauses_with_a_dash_are_clauses_not_options(app, capsys, tmp_path):
+def test_the_query_goes_in_quotes(app, capsys, tmp_path):
     _, out, _ = run(capsys, "search", "pequod", "--keywords")
     assert "[ships/pequod.md:3]" in out and "[ships/pequod.md:5]" in out  # 3 is "The Pequod was a whaling ship."
-    _, out, _ = run(capsys, "search", "pequod", "-ship", "--keywords")
+    _, out, _ = run(capsys, "search", "pequod -ship", "--keywords")
     assert "[ships/pequod.md:3]" not in out and "[ships/pequod.md:5]" in out
-    run(capsys, "search", "whale", "-open")
-    assert not (tmp_path / "pen").exists()  # not read as -o pen
+    for argv in (("whale", "-ship"), ("whale", "-open"), ("-ship",)):
+        code, out, err = run(capsys, "search", *argv)
+        assert code == 2 and out == "" and "isn't an option" in err and "in quotes" in err
+    assert not (tmp_path / "pen").exists()  # never read as -o pen
+    code, _, err = run(capsys, "search", "whale", "ship")
+    assert code == 2 and "put the whole query in quotes" in err
+    code, _, err = run(capsys, "related", "notes.md", "+squid", "-ship")
+    assert code == 2 and "word rules in quotes" in err
+    code, _, err = run(capsys, "search", "whale", "--colour")
+    assert code == 2 and "there is no option --colour" in err
+    code, out, _ = run(capsys, "search", "--", "-ship")  # after --, a quoted clause alone: only an exclusion
+    assert (code, out) == (1, "")
     code, out, _ = run(capsys, "search", "zzzqqq", "--keywords")
     assert (code, out) == (1, "")  # nothing found, as in ripgrep
+
+
+def test_the_same_results_as_the_page(app, capsys, tmp_path):
+    page = app.get("/api/search", params={"q": "whale squid", "mode": "hybrid", "limit": 50}).json()
+    assert json.loads(run(capsys, "search", "whale squid", "--json")[1])["hits"] == page["hits"]
+    page = app.get("/api/search", params={"q": "whale squid", "mode": "hybrid", "limit": 50,
+                                          "params": json.dumps({"meaning_weight": 0})}).json()
+    assert json.loads(run(capsys, "search", "whale squid", "--keywords", "--json")[1])["hits"] == page["hits"]
+    page = app.get("/api/search", params={"q": "whal", "mode": "hybrid", "limit": 50}).json()  # a half-typed word
+    assert json.loads(run(capsys, "search", "whal", "--json")[1])["hits"] == page["hits"]
+
+    (tmp_path / "notes.md").write_text(TASK)
+    app.post("/api/tasks", json={"name": "Some task"})
+    page = app.post("/api/tasks/Some task/related", json={"text": TASK, "params": {"z_strong": 1.0}}).json()
+    mine = json.loads(run(capsys, "related", "notes.md", "-p", '{"z_strong": 1.0}', "--json")[1])
+    assert mine["lanes"] == page["lanes"] and any(lane["items"] for lane in mine["lanes"])
 
 
 def test_settings_are_checked(app, capsys, tmp_path):
@@ -112,7 +138,7 @@ def test_related_from_a_file_or_stdin_with_word_rules(app, capsys, tmp_path, mon
     (tmp_path / "notes.md").write_text(TASK)
     code, out, _ = run(capsys, "related", "notes.md")
     assert code == 0 and "Best results" in out.splitlines()
-    _, out, _ = run(capsys, "related", "notes.md", "+squid", "-n", "1")
+    _, out, _ = run(capsys, "related", "notes.md", "+squid -ship", "-n", "1")
     results = [line for line in out.splitlines() if line.startswith("[")]
     assert len(results) == 1 and "squid" in results[0].lower()
     monkeypatch.setattr("sys.stdin", io.StringIO(TASK))
