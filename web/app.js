@@ -702,7 +702,7 @@ function renderTaskTabs() {
     if (!names.length) list.append(h("li", { class: "tasks-empty" }, "No tasks yet. Click + to create one."));
     for (const name of names) {
       list.append(
-        h("li", { class: "task-tab", role: "presentation", draggable: "true", "data-name": name },
+        h("li", { class: "task-tab", role: "presentation", "data-name": name },
           h("button", { class: "name", role: "tab", title: name }, name),
         ),
       );
@@ -729,7 +729,6 @@ function startRename(name) {
     if (done) return;
     done = true;
     const newName = input.value.trim();
-    li.draggable = true;
     input.replaceWith(button);
     let focus = name;
     if (rename && newName && newName !== name) {
@@ -747,7 +746,6 @@ function startRename(name) {
     else if (e.key === "Escape") finish(false);
   });
   input.addEventListener("blur", () => finish(true));
-  li.draggable = false; // so the mouse can select text in the box
   button.replaceWith(input);
   input.focus();
   input.select();
@@ -809,56 +807,79 @@ function bindTaskTabs() {
   });
   list.addEventListener("keydown", onTabKey);
 
-  // Dragging. A line shows where the task will go.
-  let dragging = null;
-  let target = null; // { li, after }
-  const clearMark = () => list.querySelectorAll(".drop-before, .drop-after").forEach((li) => li.classList.remove("drop-before", "drop-after"));
-  list.addEventListener("dragstart", (e) => {
-    const li = e.target.closest?.(".task-tab");
-    if (!li?.draggable) return;
-    dragging = li.dataset.name;
-    li.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("application/x-isis-task", dragging); // not text, so an editor won't take it
-  });
-  list.addEventListener("dragover", (e) => {
-    if (!dragging) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
+  // Dragging, done by hand rather than with the browser's drag and drop, whose picture of the
+  // moving tab can't be styled. A copy of the tab follows the mouse, and a line shows where it
+  // will go. Escape or letting go outside the task list calls it off.
+  const line = h("div", { class: "drop-line", hidden: true });
+  let drag = null; // { name, li, x, y, dx, dy, ghost, before }
+  let justDragged = false;
+  const stop = () => {
+    drag?.ghost?.remove();
+    drag?.li.classList.remove("dragging");
+    document.body.classList.remove("dragging-task");
+    line.hidden = true;
+    drag = null;
+  };
+  const place = (e) => {
+    const listBox = list.getBoundingClientRect();
+    const inside = e.target.closest?.("#tasks") || (e.clientX >= listBox.left && e.clientX <= listBox.right && e.clientY >= listBox.top && e.clientY <= listBox.bottom);
     const tabs = [...list.querySelectorAll(".task-tab")];
-    let li = e.target.closest?.(".task-tab");
-    let after;
-    if (li) {
-      const box = li.getBoundingClientRect();
-      after = e.clientY > box.top + box.height / 2;
-    } else {
-      li = tabs.at(-1); // below the last tab
-      after = true;
+    if (!inside || !tabs.length) {
+      drag.before = undefined;
+      line.hidden = true;
+      return;
     }
-    if (target?.li === li && target.after === after) return;
-    clearMark();
-    target = li ? { li, after } : null;
-    li?.classList.add(after ? "drop-after" : "drop-before");
+    if (e.clientY < listBox.top + 24) list.scrollTop -= 8;
+    else if (e.clientY > listBox.bottom - 24) list.scrollTop += 8;
+    const next = tabs.find((li) => { const box = li.getBoundingClientRect(); return e.clientY < box.top + box.height / 2; });
+    drag.before = next?.dataset.name ?? null;
+    const edge = next ? next.getBoundingClientRect().top : tabs.at(-1).getBoundingClientRect().bottom;
+    line.style.top = `${Math.max(0, edge - listBox.top + list.scrollTop - 1)}px`; // centred on the edge, but not cut off above the first tab
+    line.hidden = false;
+  };
+  list.addEventListener("pointerdown", (e) => {
+    const button = e.target.closest(".task-tab > .name");
+    if (!button || e.button !== 0) return;
+    drag = { name: button.parentElement.dataset.name, li: button.parentElement, x: e.clientX, y: e.clientY, ghost: null, before: undefined };
   });
-  list.addEventListener("dragleave", (e) => {
-    if (dragging && !list.contains(e.relatedTarget)) {
-      clearMark();
-      target = null;
+  window.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    if (!drag.ghost) {
+      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 5) return; // still a click
+      const box = drag.li.getBoundingClientRect();
+      drag.dx = drag.x - box.left;
+      drag.dy = drag.y - box.top;
+      drag.ghost = h("div", { class: `task-ghost${drag.li.classList.contains("active") ? " active" : ""}` }, drag.name);
+      drag.ghost.style.width = `${box.width}px`;
+      drag.ghost.style.height = `${box.height}px`;
+      document.body.append(drag.ghost);
+      drag.li.classList.add("dragging");
+      document.body.classList.add("dragging-task");
+      list.append(line);
     }
+    drag.ghost.style.transform = `translate(${e.clientX - drag.dx}px, ${e.clientY - drag.dy}px)`;
+    place(e);
   });
-  list.addEventListener("drop", (e) => {
-    if (!dragging || !target) return;
-    e.preventDefault();
-    const before = target.after ? (target.li.nextElementSibling?.dataset.name ?? null) : target.li.dataset.name;
-    const name = dragging;
-    moveTask(name, before).catch(fail);
+  window.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const { name, ghost, before } = drag;
+    stop();
+    if (!ghost) return;
+    justDragged = true; // the click that ends a drag doesn't switch tasks
+    setTimeout(() => (justDragged = false), 0);
+    if (before !== undefined) moveTask(name, before).catch(fail);
   });
-  list.addEventListener("dragend", () => {
-    list.querySelector(".dragging")?.classList.remove("dragging");
-    clearMark();
-    dragging = null;
-    target = null;
-  });
+  window.addEventListener("pointercancel", stop);
+  window.addEventListener("blur", stop);
+  window.addEventListener("keydown", (e) => {
+    if (drag?.ghost && e.key === "Escape") {
+      e.preventDefault();
+      stop();
+    }
+  }, true);
+  list.addEventListener("click", (e) => {
+    if (justDragged) e.stopImmediatePropagation();
+  }, true);
 }
 
 async function loadTasks() {
