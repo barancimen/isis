@@ -77,6 +77,17 @@ def test_new_tasks_go_at_the_end_of_the_list(client, corpus):
     assert names() == sorted(names(), key=str.lower)
 
 
+def test_tasks_can_be_moved(client):
+    names = lambda tasks: [t["name"] for t in tasks]
+    for name in ("a", "b", "c"):
+        client.post("/api/tasks", json={"name": name})
+    assert names(client.post("/api/tasks/c/move", json={"before": "a"}).json()) == ["c", "a", "b"]
+    assert names(client.post("/api/tasks/c/move", json={"before": None}).json()) == ["a", "b", "c"]
+    assert names(client.post("/api/tasks/a/move", json={"before": "c"}).json()) == ["b", "a", "c"]
+    assert names(client.get("/api/tasks").json()) == ["b", "a", "c"]
+    assert client.post("/api/tasks/nope/move", json={}).status_code == 404
+
+
 def test_names_cannot_escape_the_tasks_folder(client, corpus):
     name = client.post("/api/tasks", json={"name": "../../evil"}).json()["name"]
     assert (corpus / "_tasks" / f"{name}.md").exists() and "/" not in name

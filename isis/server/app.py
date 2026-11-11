@@ -122,6 +122,10 @@ class RenameTask(BaseModel):
     new_name: str
 
 
+class MoveTask(BaseModel):
+    before: str | None = None  # the task to go in front of; None for the end of the list
+
+
 class RelatedRequest(BaseModel):
     text: str
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
@@ -326,6 +330,10 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
     @app.post("/api/tasks/{name}/rename")
     def rename_task(name: str, body: RenameTask):
         return tasks.rename(name, body.new_name)
+
+    @app.post("/api/tasks/{name}/move")
+    def move_task(name: str, body: MoveTask):
+        return tasks.move(name, body.before)
 
     @app.delete("/api/tasks/{name}")
     def delete_task(name: str):

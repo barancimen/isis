@@ -176,6 +176,16 @@ class TaskStore:
                 meta.rename(self._meta_path(target.stem))
             return self.read(target.stem)
 
+    def move(self, name: str, before: str | None = None) -> list[dict]:
+        """Put a task just before another in the list, or at its end. Returns the new list."""
+        with self._lock:
+            path = self._existing(name)
+            names = [n for n in self._names() if n != path.stem]
+            place = names.index(before) if before in names else len(names)
+            names.insert(place, path.stem)
+            self._save_order(names)
+            return self.list()
+
     def delete(self, name: str) -> None:
         with self._lock:
             path = self._existing(name)

@@ -690,25 +690,175 @@ const state = {
 
 // ---------- tasks ----------
 
+// The tabs are updated in place while the list of names stays the same, so a double-click
+// lands on the tab its first click switched to.
 function renderTaskTabs() {
   const list = $("#task-tabs");
-  list.replaceChildren();
-  if (!state.tasks.length) {
-    list.append(h("li", { class: "tasks-empty" }, "No tasks yet. Click + to create one."));
-    return;
-  }
-  for (const { name } of state.tasks) {
-    const active = name === state.task;
-    list.append(
-      h("li", { class: `task-tab${active ? " active" : ""}`, role: "presentation" },
-        h("button", { class: "name", role: "tab", "aria-selected": String(active), title: name, onclick: () => switchTask(name).catch(fail) }, name),
-        h("span", { class: "tab-actions" },
-          h("button", { title: "Rename this task", "aria-label": `Rename ${name}`, onclick: () => renameTask(name).catch(fail) }, "✎"),
-          h("button", { title: "Delete this task", "aria-label": `Delete ${name}`, onclick: () => deleteTask(name).catch(fail) }, "×"),
+  const names = state.tasks.map((t) => t.name);
+  const tabs = [...list.querySelectorAll(".task-tab")];
+  const same = tabs.length === names.length && tabs.every((li, i) => li.dataset.name === names[i]);
+  if (!same) {
+    list.replaceChildren();
+    if (!names.length) list.append(h("li", { class: "tasks-empty" }, "No tasks yet. Click + to create one."));
+    for (const name of names) {
+      list.append(
+        h("li", { class: "task-tab", role: "presentation", draggable: "true", "data-name": name },
+          h("button", { class: "name", role: "tab", title: name }, name),
         ),
-      ),
-    );
+      );
+    }
   }
+  for (const li of list.querySelectorAll(".task-tab")) {
+    const active = li.dataset.name === state.task;
+    li.classList.toggle("active", active);
+    li.querySelector(".name")?.setAttribute("aria-selected", String(active));
+  }
+}
+
+const tabFor = (name) => [...document.querySelectorAll("#task-tabs .task-tab")].find((li) => li.dataset.name === name);
+const focusTab = (name) => tabFor(name)?.querySelector(".name")?.focus();
+
+// Double-click or F2 turns the name into a box. Enter or leaving the box renames and Escape doesn't.
+function startRename(name) {
+  const li = tabFor(name);
+  const button = li?.querySelector(".name");
+  if (!button) return;
+  const input = h("input", { class: "rename", value: name, spellcheck: "false", "aria-label": `New name for ${name}` });
+  let done = false;
+  const finish = async (rename) => {
+    if (done) return;
+    done = true;
+    const newName = input.value.trim();
+    li.draggable = true;
+    input.replaceWith(button);
+    let focus = name;
+    if (rename && newName && newName !== name) {
+      try {
+        focus = await renameTask(name, newName);
+      } catch (e) {
+        fail(e);
+      }
+    }
+    focusTab(focus);
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") finish(true);
+    else if (e.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  li.draggable = false; // so the mouse can select text in the box
+  button.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+// Puts a task just in front of `before`, or at the end of the list when that is null.
+async function moveTask(name, before) {
+  const moving = state.tasks.find((t) => t.name === name);
+  if (!moving || before === name) return;
+  const rest = state.tasks.filter((t) => t.name !== name);
+  const at = rest.findIndex((t) => t.name === before);
+  rest.splice(at < 0 ? rest.length : at, 0, moving);
+  if (rest.every((t, i) => t === state.tasks[i])) return;
+  state.tasks = rest; // at once, so the tab doesn't jump back while the server answers
+  renderTaskTabs();
+  try {
+    state.tasks = await api("POST", `api/tasks/${enc(name)}/move`, { before });
+    renderTaskTabs();
+  } catch (e) {
+    await loadTasks().catch(() => {});
+    throw e;
+  }
+}
+
+function onTabKey(e) {
+  const li = e.target.closest(".task-tab");
+  if (!li || e.target.tagName !== "BUTTON") return;
+  const name = li.dataset.name;
+  const names = state.tasks.map((t) => t.name);
+  const at = names.indexOf(name);
+  if (e.key === "F2") {
+    e.preventDefault();
+    startRename(name);
+  } else if (e.key === "Delete" || e.key === "Backspace") { // a Mac's delete key is Backspace
+    e.preventDefault();
+    deleteTask(name).then(() => focusTab(tabFor(name) ? name : state.task)).catch(fail); // the same tab if the delete was called off
+  } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && e.altKey) {
+    e.preventDefault();
+    const before = e.key === "ArrowUp" ? names[at - 1] : names[at + 2] ?? null;
+    if (at === 0 && e.key === "ArrowUp") return;
+    moveTask(name, before).then(() => focusTab(name)).catch(fail);
+  } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    e.preventDefault();
+    const next = names[at + (e.key === "ArrowUp" ? -1 : 1)];
+    if (next) focusTab(next);
+  }
+}
+
+function bindTaskTabs() {
+  const list = $("#task-tabs");
+  const nameAt = (e) => (e.target.closest?.(".task-tab:not(:has(input))") ?? null)?.dataset.name;
+  list.addEventListener("click", (e) => {
+    const name = nameAt(e);
+    if (name && e.target.closest(".name")) switchTask(name).catch(fail);
+  });
+  list.addEventListener("dblclick", (e) => {
+    const name = nameAt(e);
+    if (name) startRename(name);
+  });
+  list.addEventListener("keydown", onTabKey);
+
+  // Dragging. A line shows where the task will go.
+  let dragging = null;
+  let target = null; // { li, after }
+  const clearMark = () => list.querySelectorAll(".drop-before, .drop-after").forEach((li) => li.classList.remove("drop-before", "drop-after"));
+  list.addEventListener("dragstart", (e) => {
+    const li = e.target.closest?.(".task-tab");
+    if (!li?.draggable) return;
+    dragging = li.dataset.name;
+    li.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("application/x-isis-task", dragging); // not text, so an editor won't take it
+  });
+  list.addEventListener("dragover", (e) => {
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const tabs = [...list.querySelectorAll(".task-tab")];
+    let li = e.target.closest?.(".task-tab");
+    let after;
+    if (li) {
+      const box = li.getBoundingClientRect();
+      after = e.clientY > box.top + box.height / 2;
+    } else {
+      li = tabs.at(-1); // below the last tab
+      after = true;
+    }
+    if (target?.li === li && target.after === after) return;
+    clearMark();
+    target = li ? { li, after } : null;
+    li?.classList.add(after ? "drop-after" : "drop-before");
+  });
+  list.addEventListener("dragleave", (e) => {
+    if (dragging && !list.contains(e.relatedTarget)) {
+      clearMark();
+      target = null;
+    }
+  });
+  list.addEventListener("drop", (e) => {
+    if (!dragging || !target) return;
+    e.preventDefault();
+    const before = target.after ? (target.li.nextElementSibling?.dataset.name ?? null) : target.li.dataset.name;
+    const name = dragging;
+    moveTask(name, before).catch(fail);
+  });
+  list.addEventListener("dragend", () => {
+    list.querySelector(".dragging")?.classList.remove("dragging");
+    clearMark();
+    dragging = null;
+    target = null;
+  });
 }
 
 async function loadTasks() {
@@ -856,9 +1006,8 @@ async function newTask() {
   return task.name;
 }
 
-async function renameTask(name) {
-  const newName = prompt("New name for this task", name);
-  if (!newName || newName.trim() === name) return;
+// Returns the name the task has now, which the server may have cleaned up.
+async function renameTask(name, newName) {
   await saveTask(name);
   const task = await api("POST", `api/tasks/${enc(name)}/rename`, { new_name: newName });
   const doc = state.docs.get(name);
@@ -876,6 +1025,7 @@ async function renameTask(name) {
     $("#task-name").textContent = task.name;
   }
   await loadTasks();
+  return task.name;
 }
 
 async function deleteTask(name) {
@@ -2327,6 +2477,7 @@ function bind() {
   rememberOpen($("#related-feedback"), "feedback");
   bindResizers();
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
+  bindTaskTabs();
   $("#reader-add").addEventListener("click", addReaderSelection);
   $("#conflict-load").addEventListener("click", () => resolveConflict(false).catch(fail));
   $("#conflict-keep").addEventListener("click", () => resolveConflict(true).catch(fail));
