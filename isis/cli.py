@@ -12,12 +12,29 @@ from pathlib import Path
 EVERY_INTERFACE = ("0.0.0.0", "::", "")
 
 
-def folders_of(corpus: list[str]) -> list[Path]:
+def folders_of(corpus: list[str], osiris: list[str] = ()) -> list[Path]:
+    """The corpus folders: those named, and then any osiris archive not among them."""
     folders = [Path(d).resolve() for d in corpus]
     for d in folders:
         if not d.is_dir():
             sys.exit(f"isis: not a folder: {d}")
-    return folders
+    return list(dict.fromkeys([*folders, *archives_of(osiris)]))
+
+
+def archives_of(osiris: list[str]) -> dict[Path, Path | None]:
+    """The osiris archives given with --osiris: each one's folder of documents, and its manifest."""
+    from .engine.osiris import MANIFEST, archive_folders
+
+    found = {}
+    for d in osiris:
+        if not Path(d).is_dir():
+            sys.exit(f"isis: not a folder: {d}")
+        md, manifest = archive_folders(Path(d))
+        if manifest is None:
+            print(f"isis: no {MANIFEST} next to {md}: each document's kind comes from its source alone, "
+                  "so a page osiris fetched again another way counts as a web page", flush=True)
+        found[md] = manifest
+    return found
 
 
 def cmd_index(args) -> None:
@@ -26,10 +43,10 @@ def cmd_index(args) -> None:
 
     from .engine.index import corpus_exclude
 
-    folders = folders_of(args.corpus)
+    folders = folders_of(args.corpus, args.osiris)
     tasks_dir = Path(args.tasks).resolve() if args.tasks else folders[0] / "_tasks"
     embedders = [] if args.no_model else [Embedder(m) for m in models(args)]
-    engine = Engine(folders, embedder=embedders, exclude=corpus_exclude(folders, tasks_dir))
+    engine = Engine(folders, embedder=embedders, exclude=corpus_exclude(folders, tasks_dir), osiris=archives_of(args.osiris))
     engine.refresh()  # it reports its progress
 
 
@@ -64,7 +81,7 @@ def check_public(args) -> None:
     if not args.tasks:
         sys.exit("isis: --public needs --tasks FOLDER, outside the corpus")
     tasks = Path(args.tasks).resolve()
-    if any(d == tasks or d in tasks.parents or tasks in d.parents for d in folders_of(args.corpus)):
+    if any(d == tasks or d in tasks.parents or tasks in d.parents for d in folders_of(args.corpus, args.osiris)):
         sys.exit("isis: --public needs a --tasks folder outside the corpus")
     if args.base_path and not re.fullmatch(r"(/[A-Za-z0-9._~-]+)+", args.base_path):
         sys.exit("isis: --base-path looks like /isis, with no final slash")
@@ -83,7 +100,8 @@ def cmd_serve(args) -> None:
         check_public(args)
         os.environ["ISIS_PUBLIC"] = "1"
         os.environ["ISIS_BASE_PATH"] = args.base_path
-    os.environ["ISIS_CORPUS"] = os.pathsep.join(map(str, folders_of(args.corpus)))
+    os.environ["ISIS_CORPUS"] = os.pathsep.join(map(str, folders_of(args.corpus, args.osiris)))
+    os.environ["ISIS_OSIRIS"] = os.pathsep.join(f"{md}|{manifest or ''}" for md, manifest in archives_of(args.osiris).items())
     if args.tasks:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
     os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args))
@@ -119,7 +137,11 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("corpus", nargs="+", help="one or more folders of markdown files")
+        p.add_argument("corpus", nargs="*", help="one or more folders of markdown files")
+        p.add_argument("--osiris", action="append", default=[], metavar="DIR",
+                       help="an archive made by osiris (its data folder, or the md folder in it), whose sources "
+                            "can each be left out of Search and Related; it joins the corpus if not named among its "
+                            "folders (repeatable)")
         p.add_argument("--tasks", help="folder for task documents (default: _tasks in the first folder)")
         p.add_argument("--model", action="append", metavar="REPO",
                        help=f"offer only this embedding model (repeatable; the first is the default; default: {', '.join(MODELS)})")
@@ -150,4 +172,12 @@ def main(argv: list[str] | None = None) -> None:
                    add_help=False)
 
     args = parser.parse_args(argv)
+    if not args.corpus and not args.osiris:
+        parser.error("name a folder of markdown files, or an osiris archive with --osiris")
+    if args.osiris:  # each archive is served as its folder of documents
+        from .engine.osiris import archive_folders
+
+        archived = {archive_folders(Path(d))[0]: d for d in args.osiris if Path(d).is_dir()}
+        args.corpus = [str(next((md for md, given in archived.items() if Path(given).resolve() == Path(d).resolve()), d))
+                       for d in args.corpus]
     args.func(args)

@@ -673,7 +673,8 @@ const state = {
   readerLocation: null, // the passage highlighted in the reader
   files: [],
   openFolders: new Set(), // folders open in the Files panel; all are closed at first
-  skipped: loadSkipped(), // corpus folders left out of Search and Related alike
+  skipped: loadSkipped(), // corpus folders, and sources of osiris archives, left out of Search and Related alike
+  sources: [], // the sources of the osiris archives, as /api/status lists them
   panel: "search",
   relatedStale: false, // something changed since the suggestions on show were made
   relatedFor: null, // the task they are for
@@ -2432,32 +2433,104 @@ function loadSkipped() {
 
 const saveSkipped = () => store.set("skip", JSON.stringify([...state.skipped]));
 
-function renderFolderPicks(folders) {
+// The boxes of an osiris archive's sources: `sources` as /api/status lists them, each with its id
+// ("md/youtube:auto"), its folder, its lane ("md/youtube"), the lane's name, its own name and its
+// number of documents. The skipped set holds the ids of the sources left out.
+function renderFolderPicks(folders, sources = state.sources) {
   state.folders = folders;
-  for (const name of [...state.skipped]) if (!folders.includes(name)) state.skipped.delete(name);
+  state.sources = sources;
+  const ids = new Set(sources.map((s) => s.id));
+  const archives = new Set(sources.map((s) => s.folder));
+  for (const name of [...state.skipped]) {
+    const [folder, kind] = name.split("/");
+    // A source that has no documents now is forgotten, but not while its archive lists none yet.
+    if (kind === undefined ? !folders.includes(name) : archives.has(folder) && !ids.has(name)) state.skipped.delete(name);
+  }
   for (const panel of ["search", "related"]) {
     const box = $(`#${panel}-folders`);
-    box.hidden = folders.length < 2;
-    box.replaceChildren(...folders.map((name) =>
-      h("label", { class: "toggle", title: `Include the folder ${name} in Search and Related. Untick to leave it out of both.` },
-        h("input", {
-          type: "checkbox",
-          "data-folder": name,
-          checked: !state.skipped.has(name),
-          onchange: (e) => {
-            if (e.target.checked) state.skipped.delete(name);
-            else state.skipped.add(name);
-            saveSkipped();
-            for (const box of document.querySelectorAll(`.folder-picks input`)) {
-              if (box.dataset.folder === name) box.checked = e.target.checked;
-            }
-            settingChanged("search");
-            settingChanged("related");
-          },
-        }),
-        name,
-      )));
+    box.hidden = folders.length < 2 && !sources.length;
+    box.replaceChildren(
+      folders.length > 1 ? h("div", { class: "folder-row" }, folders.map((name) =>
+        h("label", { class: "toggle", title: `Include the folder ${name} in Search and Related. Untick to leave it out of both.` },
+          h("input", { type: "checkbox", "data-key": name, checked: !state.skipped.has(name), onchange: (e) => setSkipped([name], !e.target.checked) }),
+          name,
+        ))) : "",
+      ...[...archives].map((folder) => renderSources(folder, sources.filter((s) => s.folder === folder))),
+    );
   }
+}
+
+// Leaves these folders or sources out, or takes them back, in Search and Related alike.
+function setSkipped(names, skip) {
+  for (const name of names) {
+    if (skip) state.skipped.add(name);
+    else state.skipped.delete(name);
+  }
+  saveSkipped();
+  const focused = document.activeElement;
+  const panel = focused?.closest?.(".folder-picks")?.id;
+  renderFolderPicks(state.folders);
+  if (panel) { // the boxes are drawn again: keep the focus on the one just used
+    [...document.querySelectorAll(`#${panel} input[data-key]`)].find((box) => box.dataset.key === focused.dataset.key)?.focus();
+  }
+  settingChanged("search");
+  settingChanged("related");
+}
+
+const SOURCES_OPEN_KEY = "sources-open";
+
+// One drawer per archive, with a box for each lane and, where a lane has several kinds of
+// document, one for each kind.
+function renderSources(folder, sources) {
+  const lanes = new Map();
+  for (const s of sources) lanes.set(s.lane, [...(lanes.get(s.lane) ?? []), s]);
+  const left = sources.filter((s) => state.skipped.has(s.id));
+  const count = (n) => `${n.toLocaleString()} ${n === 1 ? "document" : "documents"}`;
+  const off = Boolean(folder) && state.skipped.has(folder);
+  const where = folder ? ` in ${folder}` : "";
+  const openKeys = new Set(store.json(SOURCES_OPEN_KEY, []));
+  const drawer = h("details", { class: "tune sources", "data-folder": folder },
+    h("summary", {},
+      h("span", { class: "tune-title" }, `Sources${where}`, " ",
+        h("span", { class: "tune-count" }, off ? "· folder left out" : left.length ? `· ${left.length} of ${sources.length} left out` : "· all")),
+      left.length > 0 && h("button", {
+        type: "button",
+        class: "tune-reset",
+        title: `Include every source${where} again.`,
+        onclick: (e) => { e.preventDefault(); setSkipped(left.map((s) => s.id), false); },
+      }, "Include all")),
+    h("div", { class: `source-list${off ? " off" : ""}` },
+      [...lanes.values()].map((kinds) => {
+        const skipped = kinds.filter((s) => state.skipped.has(s.id)).length;
+        const total = kinds.reduce((n, s) => n + s.documents, 0);
+        const laneBox = h("input", {
+          type: "checkbox",
+          "data-key": kinds[0].lane,
+          checked: skipped < kinds.length,
+          disabled: off,
+          onchange: () => setSkipped(kinds.map((s) => s.id), skipped === 0),
+        });
+        laneBox.indeterminate = skipped > 0 && skipped < kinds.length;
+        const single = kinds.length === 1 && kinds[0].name === kinds[0].lane_name;
+        return h("div", { class: "source-lane" },
+          h("label", { class: "toggle", title: `Include ${kinds[0].lane_name} in Search and Related. Untick to leave it out of both.` },
+            laneBox, kinds[0].lane_name, h("span", { class: "source-count" }, count(total))),
+          !single && h("div", { class: "source-kinds" }, kinds.map((s) =>
+            h("label", { class: "toggle", title: `Include ${s.name} (${kinds[0].lane_name}) in Search and Related. Untick to leave them out of both.` },
+              h("input", { type: "checkbox", "data-key": s.id, checked: !state.skipped.has(s.id), disabled: off, onchange: (e) => setSkipped([s.id], !e.target.checked) }),
+              s.name, h("span", { class: "source-count" }, count(s.documents))))));
+      })));
+  drawer.open = openKeys.has(folder);
+  drawer.addEventListener("toggle", () => {
+    const open = new Set(store.json(SOURCES_OPEN_KEY, []));
+    if (drawer.open) open.add(folder);
+    else open.delete(folder);
+    store.set(SOURCES_OPEN_KEY, JSON.stringify([...open]));
+    for (const other of document.querySelectorAll(".sources")) {
+      if (other !== drawer && other.dataset.folder === folder) other.open = drawer.open;
+    }
+  });
+  return drawer;
 }
 
 // ---------- index status ----------
@@ -2525,6 +2598,7 @@ async function pollStatus() {
       if (state.relatedFor) requestRelated();
     }
     state.indexUpdated = s.updated;
+    if (JSON.stringify(s.sources ?? []) !== JSON.stringify(state.sources)) renderFolderPicks(state.folders, s.sources ?? []);
     const outdated = String(s.page_version) !== state.pageVersion;
     $("#statusbar").classList.toggle("update-ready", outdated);
     $("#reload-page").hidden = !outdated;
@@ -2728,7 +2802,7 @@ async function init() {
   const status = await api("GET", "api/status");
   // The version these files came with. Asking the server now would make an old page look current.
   state.pageVersion = $('meta[name="page-version"]')?.content || String(status.page_version);
-  renderFolderPicks(status.folders);
+  renderFolderPicks(status.folders, status.sources ?? []);
   renderModelPick(status.models ?? []);
   $("#model-pick").addEventListener("change", (e) => pickModel(e.target.value));
   if (!status.model) {

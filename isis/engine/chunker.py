@@ -14,6 +14,7 @@ HAS_WORD = re.compile(r"[^\W_]")
 YAML_LINE = re.compile(r"^(\s|#|-\s|[\w.-]+(?: [\w.-]+){0,3}:(\s|$))")  # a key, a list item, a comment, or indented
 FRONT_MATTER_TITLE = re.compile(r"^title:\s*(.*?)\s*$", re.IGNORECASE)
 FRONT_MATTER_URL = re.compile(r"^url:\s*(.*?)\s*$", re.IGNORECASE)
+FRONT_MATTER_SOURCE = re.compile(r"^source:\s*(.*?)\s*$", re.IGNORECASE)
 TITLE_SEARCH_LINES = 200  # a top-level heading further down is a part of the document, not its title
 MAX_FRONT_MATTER = 200  # lines, as in the page (reflow.js)
 
@@ -84,6 +85,12 @@ def web_host(url: str) -> str:
 def document_site(lines: list[str]) -> str:
     """The host of `url:` in a document's frontmatter. Empty if it has none."""
     return web_host(_front_matter_value(lines, FRONT_MATTER_URL))
+
+
+def document_source(lines: list[str]) -> str:
+    """`source:` in a document's frontmatter, which osiris sets to where its text came from. Empty
+    if it has none."""
+    return _front_matter_value(lines, FRONT_MATTER_SOURCE)
 
 
 def document_title(lines: list[str]) -> str:

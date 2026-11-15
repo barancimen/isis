@@ -258,6 +258,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             **state,
             "index_bytes": engine.index_bytes(),
             "folders": [name for name in engine.roots if name],  # when serving several folders
+            "sources": engine.sources(),  # of osiris archives
             "model": getattr(engine.embedder, "model_id", None),  # the default
             "models": [
                 {"id": e.model_id, "label": e.model_id,  # the organisation and the model
@@ -441,7 +442,8 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 
 def app_from_env() -> FastAPI:
     """The app `isis serve` runs, configured through ISIS_CORPUS (folders separated like PATH),
-    ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
+    ISIS_OSIRIS (those of the folders that are osiris archives, each as folder and manifest
+    separated by "|", the manifest empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
     this machine only), ISIS_PUBLIC ("1": serve the public, see public.py), ISIS_BASE_PATH (with
     ISIS_PUBLIC: where the site lives on its domain, such as /isis) and ISIS_BUILD_NATIVE ("1": build
     the Rust extension when it is missing or outdated, see native.start_build)."""
@@ -451,7 +453,9 @@ def app_from_env() -> FastAPI:
     folders = [Path(d) for d in os.environ["ISIS_CORPUS"].split(os.pathsep)]
     tasks_dir = Path(os.environ.get("ISIS_TASKS") or folders[0] / "_tasks")
     models = [m for m in os.environ.get("ISIS_MODELS", "").split(",") if m]
-    engine = Engine(folders, embedder=[Embedder(m) for m in models], exclude=corpus_exclude(folders, tasks_dir))
+    osiris = dict(entry.partition("|")[::2] for entry in os.environ.get("ISIS_OSIRIS", "").split(os.pathsep) if entry)
+    engine = Engine(folders, embedder=[Embedder(m) for m in models], exclude=corpus_exclude(folders, tasks_dir),
+                    osiris={folder: manifest or None for folder, manifest in osiris.items()})
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
     store = (Workspaces(tasks_dir, base_path=os.environ.get("ISIS_BASE_PATH", ""))
              if os.environ.get("ISIS_PUBLIC") == "1" else TaskStore(tasks_dir))

@@ -27,8 +27,10 @@ from pathlib import Path
 import numpy as np
 
 from . import native
-from .chunker import MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, split_lines
+from .chunker import (MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, document_source,
+                      split_lines)
 from .lexical import B, BM25, K1, Vocabulary, term_counts
+from .osiris import Manifest
 from .text import STOPWORDS, WORD, tokenize_with_surface
 from .typos import WordView, Words
 
@@ -105,6 +107,7 @@ class FileRecord:
     vectors: dict[str, np.ndarray] = field(default_factory=dict)  # model name -> float16, one row per passage
     reuse: dict[str, dict[str, np.ndarray]] | None = None  # model name -> embed_text -> vector kept from before; not saved
     site: str | None = None  # the host of `url:` in the frontmatter; None if not known yet
+    source: str | None = None  # `source:` in the frontmatter (osiris sets it); None if not known yet
     _keys: np.ndarray | None = field(default=None, repr=False)
 
     def keys(self) -> np.ndarray:
@@ -128,9 +131,11 @@ class Snapshot:
     has_vector: np.ndarray  # bool [n]
     file_rows: dict[str, tuple[int, int]]  # path -> [start, end) rows
     file_sites: dict[str, str] = field(default_factory=dict)  # path -> host, for documents that have one
+    file_sources: dict[str, str] = field(default_factory=dict)  # path -> source id, in osiris archives (see osiris.py)
     _bm25_variants: dict = field(default_factory=dict, repr=False)
     _pattern_counts: dict = field(default_factory=dict, repr=False)
     _folder_rows: dict = field(default_factory=dict, repr=False)
+    _source_rows: dict = field(default_factory=dict, repr=False)
     near_words: dict = field(default_factory=dict, repr=False)  # for search.near_words
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
@@ -212,11 +217,31 @@ class Snapshot:
 
         return self.cached(self._folder_rows, "spans", 1, spans)
 
+    def source_rows(self) -> dict[str, np.ndarray]:
+        """The rows of each source of an osiris archive, by source id ("md/youtube:auto"), and of
+        each of its lanes ("md/youtube")."""
+
+        def rows() -> dict[str, np.ndarray]:
+            found: dict[str, list[np.ndarray]] = {}
+            for path, source in self.file_sources.items():
+                start, end = self.file_rows[path]
+                folder, _, kind = source.partition("/")
+                lane = f"{folder}/{kind.partition(':')[0]}"
+                for key in {source, lane}:
+                    found.setdefault(key, []).append(np.arange(start, end))
+            return {key: np.concatenate(parts) for key, parts in found.items()}
+
+        return self.cached(self._source_rows, "rows", 1, rows)
+
     def outside_folders(self, skip) -> np.ndarray:
-        """Which passages are not in these corpus folders."""
+        """Which passages are not in these corpus folders, nor of these sources of an osiris
+        archive (named as "folder/kind" or "folder/lane")."""
         ok = np.ones(len(self.passages), bool)
         for name in skip:
-            if (span := self.folder_rows().get(name)) is not None:
+            if "/" in name:
+                if (rows := self.source_rows().get(name)) is not None:
+                    ok[rows] = False
+            elif (span := self.folder_rows().get(name)) is not None:
                 ok[span[0]:span[1]] = False
         return ok
 
@@ -260,10 +285,14 @@ class Engine:
         exclude: tuple[str | Path, ...] = (),
         target_words: int = TARGET_WORDS,
         max_words: int = MAX_WORDS,
+        osiris: dict | None = None,  # folder -> its manifest.sqlite (or None), for the folders that are osiris archives
     ):
         dirs = list(dict.fromkeys(Path(d).resolve() for d in (corpus_dir if isinstance(corpus_dir, (list, tuple)) else [corpus_dir])))
         self.root = dirs[0]
         self.roots: dict[str, Path] = {"": dirs[0]} if len(dirs) == 1 else self._named(dirs)  # path prefix -> folder
+        archives = {Path(d).resolve(): m for d, m in (osiris or {}).items()}
+        self.osiris: dict[str, Manifest] = {prefix: Manifest.at(Path(archives[d]) if archives[d] else None)
+                                            for prefix, d in self.roots.items() if d in archives}
         self.index_dir = Path(index_dir).resolve() if index_dir else None
         self.embedders = [] if embedder is None else list(embedder) if isinstance(embedder, (list, tuple)) else [embedder]
         self.exclude = {Path(p).resolve() for p in exclude}
@@ -280,6 +309,7 @@ class Engine:
         self.links: set[str] = set()  # corpus-relative paths of the folder links the last scan met
         self._said: set[str] = set()  # one-time messages about links, so rescans stay quiet
         self._refreshed = False
+        self._sources: tuple = (None, [])  # the snapshot that sources() last described, and what it said
         self._load()
         self._publish()
 
@@ -455,8 +485,9 @@ class Engine:
     def _read(self, path: str, stat: os.stat_result) -> FileRecord:
         text = self._located(path).read_text(encoding="utf-8", errors="replace")
         passages = chunk_markdown(path, text, *self.chunking)
-        site = document_site(split_lines(text)[:MAX_FRONT_MATTER])
-        return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *self._terms_of(passages), site=site)
+        head = split_lines(text)[:MAX_FRONT_MATTER]
+        return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *self._terms_of(passages), site=document_site(head),
+                          source=document_source(head))
 
     def _terms_of(self, passages: list[Passage]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """The BM25 rows (CSR pieces) of these passages. Their words join the word list."""
@@ -466,13 +497,43 @@ class Engine:
             self.words.add(word, self.vocab.ids[term])
         return rows
 
-    def _site_on_disk(self, path: str) -> str | None:
-        """The site of a file in a cache from before sites were kept, without reading all of it."""
+    def _front_matter_on_disk(self, path: str) -> tuple[str | None, str | None]:
+        """The site and source of a file in a cache from before they were kept, without reading
+        all of it."""
         try:
             with self._located(path).open(encoding="utf-8", errors="replace") as f:
-                return document_site(split_lines(f.read(FRONT_MATTER_CHARS))[:MAX_FRONT_MATTER])
+                head = split_lines(f.read(FRONT_MATTER_CHARS))[:MAX_FRONT_MATTER]
         except (OSError, AttributeError):  # gone, or its folder is away: known next time
-            return None
+            return None, None
+        return document_site(head), document_source(head)
+
+    def _prefix(self, path: str) -> str:
+        """The corpus folder a path is in, by its name ("" when one folder is served)."""
+        return "" if "" in self.roots else path.partition("/")[0]
+
+    def _source_id(self, path: str, record: FileRecord) -> str | None:
+        """The source id of a file of an osiris archive, such as "md/youtube:auto"; None elsewhere."""
+        manifest = self.osiris.get(prefix := self._prefix(path))
+        return None if manifest is None else f"{prefix}/{manifest.kind(path, record.source or '')}"
+
+    def sources(self) -> list[dict]:
+        """The sources of the osiris archives, with how many documents each has, for the page."""
+        from .osiris import describe, order
+
+        snapshot = self.snapshot
+        if self._sources[0] is snapshot:
+            return self._sources[1]
+        counts: dict[str, int] = {}
+        for source in snapshot.file_sources.values():
+            counts[source] = counts.get(source, 0) + 1
+        out = []
+        for source in sorted(counts, key=lambda s: (list(self.roots).index(s.partition("/")[0]), order(s.partition("/")[2]))):
+            folder, _, kind = source.partition("/")
+            lane, lane_name, name = describe(kind)
+            out.append({"id": source, "folder": folder, "lane": f"{folder}/{lane}", "lane_name": lane_name, "name": name,
+                        "documents": counts[source]})
+        self._sources = (snapshot, out)
+        return out
 
     # ---- refresh ----
 
@@ -494,6 +555,7 @@ class Engine:
         if first:
             log.info("scanning %s", ", ".join(map(str, self.roots.values())))
         found = self._scan()
+        relabeled = any([manifest.refresh() for manifest in self.osiris.values()])  # osiris wrote to it
         removed = [p for p in self.files if p not in found and not self._is_unread(p)]
         changed = [
             p
@@ -535,7 +597,7 @@ class Engine:
                     record.vectors = {}
                     dropped += 1
         touched = bool(removed or changed or dropped)
-        if touched:
+        if touched or relabeled:
             self._publish()
 
         embedded, filled = self._embed_missing(on_progress)
@@ -640,7 +702,10 @@ class Engine:
         indptrs, term_ids, counts = [np.zeros(1, np.int64)], [], []
         vectors = {e.name: ([], []) for e in self.embedders}  # model name -> (arrays, has)
         nnz = 0
-        for path in sorted(self.files):
+        # The files of an osiris archive go by source, so that each source's passages are together,
+        # and a search that leaves some sources out compares the others by meaning at little cost.
+        sources = {path: self._source_id(path, r) for path, r in self.files.items() if self._prefix(path) in self.osiris}
+        for path in sorted(self.files, key=lambda p: (self._prefix(p), sources[p], p) if p in sources else (self._prefix(p), "", p)):
             r = self.files[path]
             n = len(r.passages)
             file_rows[path] = (len(passages), len(passages) + n)
@@ -681,6 +746,7 @@ class Engine:
             has_vector=default_has,
             file_rows=file_rows,
             file_sites={path: r.site for path, r in self.files.items() if r.site},
+            file_sources=sources,
         )
         for e in self.embedders:
             if e is self.embedder:
@@ -802,6 +868,7 @@ class Engine:
                     "mtime_ns": r.mtime_ns,
                     "size": r.size,
                     "site": r.site,
+                    "source": r.source,
                     "passages": [[p.heading, p.start_line, p.end_line, p.text] for p in r.passages],
                 }
                 for path, r in zip(paths, records)
@@ -865,9 +932,12 @@ class Engine:
         except Exception as e:
             log.warning("ignoring unreadable index cache in %s: %s", folder, e)
             return
-        for path, record in files.items():
-            if record.site is None:
-                record.site = self._site_on_disk(path)
+        for path, record in files.items():  # a cache from before sites or sources were kept
+            if record.site is None or (record.source is None and prefix in self.osiris):
+                site, source = self._front_matter_on_disk(path)
+                record.site = site if record.site is None else record.site
+                record.source = source if record.source is None else record.source
+                self._cache_unsaved = self._cache_unsaved or source is not None
         self.files.update(files)
         log.info("loaded the index cache%s: %s, %s", f" of {prefix}" if prefix else "", _count(len(files), "file"),
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
@@ -932,6 +1002,7 @@ class Engine:
                 arrays["term_ids"][at_nnz : at_nnz + nnz],
                 arrays["counts"][at_nnz : at_nnz + nnz],
                 site=e.get("site"),
+                source=e.get("source"),
             )
             at_indptr += n + 1
             at_nnz += nnz
@@ -942,7 +1013,10 @@ class Engine:
     # ---- queries ----
 
     def _named_folders(self, skip) -> set[str]:
-        return {name for name in skip if name and name in self.roots}
+        """What a request leaves out that this corpus has: folders by name, and sources of its osiris
+        archives (see osiris.py)."""
+        return {name for name in skip
+                if (name and name in self.roots) or ("/" in name and name.partition("/")[0] in self.osiris)}
 
     def search(self, query: str, *, limit: int = 50, mode: str = "lexical", context_lines: int = 2, config=None,
                skip_folders=(), skip_files=(), model: str | None = None):

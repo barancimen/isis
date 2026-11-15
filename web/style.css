@@ -223,8 +223,14 @@ body.dragging-task, body.dragging-task * { cursor: grabbing !important; user-sel
 .history-forget { flex: none; border: none; padding: 0 6px; color: var(--faint); visibility: hidden; }
 .history-forget:hover { color: var(--fg); background: none; }
 .history-item:hover .history-forget, .history-item[aria-selected="true"] .history-forget { visibility: visible; }
-.folder-picks { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin: 8px 0 4px; }
+.folder-picks { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+.folder-row { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
 .folder-picks .toggle { overflow-wrap: anywhere; white-space: normal; }
+.source-list { display: flex; flex-direction: column; gap: 4px; padding: 2px 10px 8px; }
+.source-list.off { opacity: 0.55; }
+.source-lane > .toggle { color: var(--fg); }
+.source-kinds { display: flex; flex-direction: column; gap: 2px; padding-left: 22px; }
+.source-count { margin-left: auto; padding-left: 8px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .toggle { display: flex; gap: 4px; align-items: center; color: var(--muted); white-space: nowrap; font-size: 13.5px; }
 .hint, .status-line { color: var(--faint); font-size: 12.5px; }
 .status-line { font-variant-numeric: tabular-nums; }

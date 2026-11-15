@@ -87,6 +87,8 @@ def _parser(command: str) -> argparse.ArgumentParser:
     p.add_argument("-l", "--files", action="store_true", help="print only the documents")
     p.add_argument("--json", action="store_true", help="print the server's answer as JSON")
     p.add_argument("--folder", action="append", default=[], metavar="NAME", help="only this corpus folder (repeatable)")
+    p.add_argument("--source", action="append", default=[], metavar="NAME",
+                   help="only this source of an osiris archive, such as youtube or youtube:human (repeatable)")
     p.add_argument("--model", default="", metavar="ID", help="the embedding model (default the server's)")
     p.add_argument("--server", default=os.environ.get("ISIS_SERVER") or DEFAULT_SERVER, metavar="URL",
                    help=f"where isis serve runs (default {DEFAULT_SERVER}, or ISIS_SERVER)")
@@ -157,17 +159,33 @@ def describe(specs: list[dict]) -> str:
     return "\n".join(rows)
 
 
-def skipped_folders(server: str, wanted: list[str]) -> list[str]:
-    """The corpus folders to leave out, when only `wanted` are asked for."""
-    if not wanted:
+def skipped_folders(server: str, wanted: list[str], sources: list[str] = ()) -> list[str]:
+    """What to leave out when only the folders `wanted` and the osiris `sources` are asked for: the
+    other folders, and the other sources of an archive that some are asked for from. A source is
+    named by its lane ("youtube"), its kind ("youtube:human"), or either after its folder
+    ("md/youtube")."""
+    if not wanted and not sources:
         return []
-    folders = fetch(server, "GET", "/api/status").get("folders") or []
-    if not folders:
+    status = fetch(server, "GET", "/api/status")
+    folders, known = status.get("folders") or [], status.get("sources") or []
+    if wanted and not folders:
         raise Failure("this server has one corpus folder, so there is no folder to choose")
     unknown = [f for f in wanted if f not in folders]
     if unknown:
         raise Failure(f"there is no folder named {unknown[0]}. The folders are {', '.join(folders)}")
-    return [f for f in folders if f not in wanted]
+    kept = set()
+    for name in sources:
+        found = [s["id"] for s in known
+                 if name in (s["id"], s["lane"], s["id"].partition("/")[2], s["lane"].partition("/")[2])]
+        if not found:
+            if not known:
+                raise Failure("this server has no osiris archive, so there is no source to choose")
+            names = sorted({n for s in known for n in (s["lane"].partition("/")[2], s["id"].partition("/")[2])})
+            raise Failure(f"there is no source named {name}. The sources are {', '.join(names)}")
+        kept.update(found)
+    partly = {s["folder"] for s in known if s["id"] in kept} - set(wanted)  # archives that only some sources are wanted from
+    skip = [f for f in folders if f not in wanted and f not in partly]
+    return skip + [s["id"] for s in known if s["folder"] in partly and s["id"] not in kept]
 
 
 # ---- what is shown ----
@@ -238,7 +256,7 @@ def run_search(a, params: dict) -> tuple[dict, list[tuple[str, list[dict]]]]:
         "mode": "hybrid",  # always, as in the page
         "limit": SEARCH_LIMIT if a.limit is None else a.limit,
         "params": json.dumps(params),
-        "skip": json.dumps(skipped_folders(a.server, a.folder)),
+        "skip": json.dumps(skipped_folders(a.server, a.folder, a.source)),
         "as_typed": "true" if a.as_typed else "false",
     }
     if a.model:
@@ -255,7 +273,7 @@ def run_related(a, params: dict) -> tuple[dict, list[tuple[str, list[dict]]]]:
     except OSError as e:
         raise Failure(f"could not read {a.file} ({e.strerror or e})") from None
     body = {"text": text, "steer": a.rules, "params": params,  # how many results is total_slots, as in the page
-            "skip_folders": skipped_folders(a.server, a.folder), "model": a.model}
+            "skip_folders": skipped_folders(a.server, a.folder, a.source), "model": a.model}
     answer = fetch(a.server, "POST", "/api/related", body=body)
     groups, left = [], a.limit  # -n only cuts what is shown, in the page's order
     for lane in answer.get("lanes") or []:
