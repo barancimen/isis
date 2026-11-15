@@ -673,7 +673,7 @@ const state = {
   readerLocation: null, // the passage highlighted in the reader
   files: [],
   openFolders: new Set(), // folders open in the Files panel; all are closed at first
-  skipped: { search: loadSkipped("search"), related: loadSkipped("related") }, // corpus folders left out, per panel
+  skipped: loadSkipped(), // corpus folders left out of Search and Related alike
   panel: "search",
   relatedStale: false, // something changed since the suggestions on show were made
   relatedFor: null, // the task they are for
@@ -1560,7 +1560,7 @@ async function searchNow() {
   const stop = stopSearchClock = stopwatch((t) => { $("#search-status").textContent = `Searching… ${t}`; });
   try {
     const tuned = Object.keys(state.params.search).length ? `&params=${enc(JSON.stringify(state.params.search))}` : "";
-    const skip = state.skipped.search.size ? `&skip=${enc(JSON.stringify([...state.skipped.search]))}` : "";
+    const skip = state.skipped.size ? `&skip=${enc(JSON.stringify([...state.skipped]))}` : "";
     const hide = state.hiddenDocs.size ? `&hide=${enc(JSON.stringify([...state.hiddenDocs]))}` : "";
     // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
     const asTyped = state.searchAsTyped === q ? "&as_typed=true" : "";
@@ -1819,7 +1819,7 @@ async function fetchRelated() {
     result = await api("POST", `api/tasks/${enc(name)}/related`, {
       text: taskView.state.doc.toString(),
       params: state.params.related,
-      skip_folders: [...state.skipped.related],
+      skip_folders: [...state.skipped],
       model: state.model ?? "",
     });
   } finally {
@@ -2276,7 +2276,7 @@ const savePresets = () => store.set("presets", JSON.stringify(state.presets));
 const sortedList = (list) => [...new Set(list ?? [])].sort();
 
 function currentSettings(kind, prefs = state.prefsFor === state.task ? state.prefs : null) {
-  const settings = { params: { ...state.params[kind] }, skipped: sortedList(state.skipped[kind]) };
+  const settings = { params: { ...state.params[kind] }, skipped: sortedList(state.skipped) };
   if (kind === "search") return { ...settings, query: $("#search-input").value, hidden_docs: sortedList(state.hiddenDocs) };
   return { ...settings, steer: prefs?.steer ?? "", ignored: sortedList(prefs?.ignored), excluded_docs: sortedList(prefs?.excluded_docs) };
 }
@@ -2338,9 +2338,11 @@ async function applyPreset(kind, name) {
   state.params[kind] = Object.fromEntries(Object.entries(settings.params ?? {}).filter(([param]) => known.has(param)));
   saveParams();
   buildTuner(kind);
-  state.skipped[kind] = new Set(settings.skipped ?? []);
+  const skippedBefore = settingsKey({ skipped: [...state.skipped] });
+  state.skipped = new Set(settings.skipped ?? []);
   renderFolderPicks(state.folders);
-  store.set(`skip-${kind}`, JSON.stringify([...state.skipped[kind]]));
+  saveSkipped();
+  if (settingsKey({ skipped: [...state.skipped] }) !== skippedBefore) settingChanged(kind === "search" ? "related" : "search");
   state.activePreset[kind] = name;
   if (kind === "search") {
     $("#search-input").value = settings.query ?? "";
@@ -2413,30 +2415,44 @@ function showPanel(name) {
 
 // ---------- corpus folders ----------
 
-// When several folders are served, each panel has its own boxes to leave some of them out. They
-// are remembered in this browser, like the parameters.
-function loadSkipped(panel) {
-  const saved = store.json(`skip-${panel}`, []);
-  return new Set(Array.isArray(saved) ? saved : []);
+// When several folders are served, Search and Related both show a box for each, to leave some of
+// them out. The boxes are one setting: unticking a folder in either panel leaves it out of both.
+// They are remembered in this browser, like the parameters.
+function loadSkipped() {
+  let saved = store.json("skip", null);
+  if (!Array.isArray(saved)) {
+    // From when each panel had its own boxes: Search's choice wins.
+    saved = [store.json("skip-search", null), store.json("skip-related", null)].find(Array.isArray) ?? [];
+    store.set("skip", JSON.stringify(saved));
+    store.remove("skip-search");
+    store.remove("skip-related");
+  }
+  return new Set(saved.filter((name) => typeof name === "string"));
 }
+
+const saveSkipped = () => store.set("skip", JSON.stringify([...state.skipped]));
 
 function renderFolderPicks(folders) {
   state.folders = folders;
+  for (const name of [...state.skipped]) if (!folders.includes(name)) state.skipped.delete(name);
   for (const panel of ["search", "related"]) {
-    const skipped = state.skipped[panel];
-    for (const name of [...skipped]) if (!folders.includes(name)) skipped.delete(name);
     const box = $(`#${panel}-folders`);
     box.hidden = folders.length < 2;
     box.replaceChildren(...folders.map((name) =>
-      h("label", { class: "toggle", title: `Include the folder ${name} in ${panel === "search" ? "Search" : "Related"}. Untick to leave it out.` },
+      h("label", { class: "toggle", title: `Include the folder ${name} in Search and Related. Untick to leave it out of both.` },
         h("input", {
           type: "checkbox",
-          checked: !skipped.has(name),
+          "data-folder": name,
+          checked: !state.skipped.has(name),
           onchange: (e) => {
-            if (e.target.checked) skipped.delete(name);
-            else skipped.add(name);
-            store.set(`skip-${panel}`, JSON.stringify([...skipped]));
-            settingChanged(panel);
+            if (e.target.checked) state.skipped.delete(name);
+            else state.skipped.add(name);
+            saveSkipped();
+            for (const box of document.querySelectorAll(`.folder-picks input`)) {
+              if (box.dataset.folder === name) box.checked = e.target.checked;
+            }
+            settingChanged("search");
+            settingChanged("related");
           },
         }),
         name,
