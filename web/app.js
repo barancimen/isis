@@ -6,6 +6,7 @@ import {
   search, SearchQuery, setSearchQuery, findNext, findPrevious, openSearchPanel, closeSearchPanel,
 } from "./vendor/codemirror.js";
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
+import { cleanHistory, forget, remember } from "./history.js";
 import { planInsertion } from "./insert.js";
 import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
 
@@ -646,6 +647,10 @@ measureWhenScrollbarPressed(taskView);
 const SHARED_HIDDEN_KEY = "hidden-search";
 const MAX_HIDDEN_DOCS = 50; // the list travels in the URL, which a public server limits in length
 
+// The recent searches are kept for this tab, through reloads, and shared by its tasks. A new tab
+// starts without any.
+const HISTORY_KEY = "isis.search-history";
+
 const state = {
   model: null, // the meaning model this browser uses, by id; null with keywords only
   indexStatus: null, // the last answer of api/status
@@ -679,6 +684,11 @@ const state = {
   searchAsTyped: null, // the query to search for without correcting its spelling
   searchTop: 0, // where the Search panel is scrolled to, for the active task
   searchPending: false, // the task's search results aren't back yet, and then go to searchTop
+  searchRunning: null, // the query whose results are on their way
+  searchedOk: null, // the query of the results on show, when it searched without an error
+  searchToKeep: null, // a settled query that joins the recent searches once it has searched
+  searchHistory: loadHistory(), // recent searches in this tab, newest first
+  historyAt: -1, // the recent search picked with the arrow keys, or -1
   sideScroll: null, // where the Files or Related panel was before a reload, until its content is back
   taskPlaces: {}, // task name -> { top, cursor }
   indexUpdated: null,
@@ -966,6 +976,8 @@ async function showView(view) {
 // The results come from the server only once the panel is on show, as in Related.
 function showViewSearch(view) {
   runSearch.cancel();
+  closeHistory();
+  state.searchToKeep = null;
   state.searchSeq++;
   stopSearchClock();
   state.searchAsTyped = view.asTyped ?? null;
@@ -1492,6 +1504,7 @@ function renderHit(hit, { lane = null } = {}) {
   const key = passageKey(hit);
   const open = (event) => {
     if (event.target.closest("button")) return;
+    if (!lane) searchSettled();
     state.openedHit = key;
     for (const card of document.querySelectorAll(".hit")) card.classList.toggle("opened", card.dataset.key === key);
     openFile(hit.path, {
@@ -1503,7 +1516,7 @@ function renderHit(hit, { lane = null } = {}) {
     }).catch(fail);
   };
   const actions = h("span", { class: "hit-actions" },
-    h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail) }, "+"),
+    h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => { if (!lane) searchSettled(); addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail); } }, "+"),
     lane && h("button", {
       class: "like",
       "aria-pressed": String(Boolean(hit.why.liked)),
@@ -1533,13 +1546,16 @@ async function searchNow() {
   const q = $("#search-input").value;
   const seq = ++state.searchSeq;
   stopSearchClock();
+  state.searchedOk = null;
   if (!q.trim()) {
+    state.searchRunning = null;
     $("#search-status").textContent = "";
     $("#search-results").replaceChildren();
     $("#search-results").classList.remove("stale");
     searchArrived();
     return;
   }
+  state.searchRunning = q;
   $("#search-results").classList.add("stale");
   const stop = stopSearchClock = stopwatch((t) => { $("#search-status").textContent = `Searching… ${t}`; });
   try {
@@ -1566,10 +1582,14 @@ async function searchNow() {
     ];
     $("#search-status").replaceChildren(...(correction || []), summary);
     $("#search-results").classList.remove("stale");
+    state.searchRunning = null;
+    state.searchedOk = q;
+    keepIfSearched();
     searchArrived();
   } catch (error) {
     if (seq !== state.searchSeq) return;
     stop();
+    state.searchRunning = null;
     if (error.status !== 400) fail(error);
     $("#search-status").textContent = error.status === 400 ? `⚠ ${error.message}` : "";
     $("#search-results").replaceChildren();
@@ -1579,6 +1599,136 @@ async function searchNow() {
 }
 
 const runSearch = debounce(searchNow, 200);
+
+// ---------- recent searches ----------
+
+function loadHistory() {
+  try { return cleanHistory(JSON.parse(sessionStorage.getItem(HISTORY_KEY))); } catch { return []; }
+}
+
+function saveHistory() {
+  try { sessionStorage.setItem(HISTORY_KEY, JSON.stringify(state.searchHistory)); } catch {}
+}
+
+// The box searches while you type, so a query joins the recent searches only once it is settled:
+// on Enter, when a result is opened or added, or when the box is left. Even then it waits until it
+// has searched without an error, so a regex still being written is not kept.
+function searchSettled() {
+  const q = $("#search-input").value;
+  if (!q.trim()) return;
+  state.searchToKeep = q;
+  if (state.searchedOk === q) keepIfSearched();
+  else if (state.searchRunning !== q) {
+    runSearch.cancel();
+    searchNow();
+  }
+}
+
+function keepIfSearched() {
+  if (state.searchToKeep === null || state.searchToKeep !== state.searchedOk) return;
+  state.searchHistory = remember(state.searchHistory, state.searchToKeep);
+  state.searchToKeep = null;
+  saveHistory();
+}
+
+const historyOpen = () => !$("#search-history").hidden;
+
+function openHistory(at = -1) {
+  if (!state.searchHistory.length) return closeHistory();
+  state.historyAt = at;
+  renderHistory();
+  $("#search-history").hidden = false;
+  $("#search-input").setAttribute("aria-expanded", "true");
+}
+
+function closeHistory() {
+  state.historyAt = -1;
+  $("#search-history").hidden = true;
+  $("#search-input").setAttribute("aria-expanded", "false");
+  $("#search-input").removeAttribute("aria-activedescendant");
+}
+
+function renderHistory() {
+  const list = $("#search-history");
+  const items = state.searchHistory.map((q, i) => h("li", {
+    id: `search-history-${i}`,
+    class: "history-item",
+    role: "option",
+    "aria-selected": String(i === state.historyAt),
+    title: q,
+    onclick: (e) => { if (!e.target.closest("button")) useHistory(q); },
+  },
+  h("span", { class: "history-query" }, q),
+  h("button", { type: "button", class: "history-forget", tabindex: "-1", title: "Remove this search from the list. Delete does the same for the one picked with the arrow keys.", "aria-label": `Remove ${q} from recent searches`, onclick: () => forgetSearch(q) }, "×")));
+  list.replaceChildren(h("li", { class: "history-head", role: "presentation" }, "Recent searches in this tab"), ...items);
+  const input = $("#search-input");
+  if (state.historyAt < 0) input.removeAttribute("aria-activedescendant");
+  else {
+    input.setAttribute("aria-activedescendant", items[state.historyAt].id);
+    items[state.historyAt].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function moveInHistory(step) {
+  const n = state.searchHistory.length;
+  state.historyAt = state.historyAt < 0 ? (step > 0 ? 0 : n - 1) : (state.historyAt + step + n) % n;
+  renderHistory();
+}
+
+function useHistory(q) {
+  closeHistory();
+  $("#search-input").value = q;
+  renderPresets("search");
+  state.searchToKeep = q; // moves it to the top once it has searched
+  runSearch.cancel();
+  searchNow();
+}
+
+function forgetSearch(q) {
+  state.searchHistory = forget(state.searchHistory, q);
+  saveHistory();
+  if (!state.searchHistory.length) return closeHistory();
+  state.historyAt = Math.min(state.historyAt, state.searchHistory.length - 1);
+  renderHistory();
+}
+
+function bindSearchHistory() {
+  const input = $("#search-input");
+  $("#search-history").addEventListener("mousedown", (e) => e.preventDefault()); // the box keeps the focus
+  input.addEventListener("input", () => {
+    state.searchToKeep = null;
+    if (!input.value && document.activeElement === input) openHistory();
+    else closeHistory();
+  });
+  input.addEventListener("click", () => {
+    if (!input.value && !historyOpen()) openHistory();
+  });
+  input.addEventListener("blur", closeHistory);
+  input.addEventListener("change", searchSettled); // on leaving the box after a change
+  input.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.ctrlKey || e.metaKey) return;
+    const open = historyOpen();
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (open) moveInHistory(e.key === "ArrowDown" ? 1 : -1);
+      else if (e.key === "ArrowDown" && state.searchHistory.length) openHistory(0);
+      else return;
+      e.preventDefault();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (open && state.historyAt >= 0) useHistory(state.searchHistory[state.historyAt]);
+      else {
+        closeHistory();
+        searchSettled();
+      }
+    } else if (e.key === "Escape" && open) {
+      e.preventDefault(); // a search field would clear itself
+      closeHistory();
+    } else if (e.key === "Delete" && open && state.historyAt >= 0) {
+      e.preventDefault();
+      forgetSearch(state.searchHistory[state.historyAt]);
+    }
+  });
+}
 
 // ---------- related panel ----------
 
@@ -2507,6 +2657,7 @@ function bind() {
   window.addEventListener("pagehide", rememberReaderScroll);
   window.addEventListener("pagehide", saveResume);
   $("#search-input").addEventListener("input", runSearch);
+  bindSearchHistory();
   $("#search-meaning").addEventListener("click", toggleMeaning);
   $("#search-input").addEventListener("input", () => renderPresets("search"));
   $("#related-refresh").addEventListener("click", () => refreshRelated().then(scrollToBestResults).catch(fail));

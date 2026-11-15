@@ -34,11 +34,14 @@
     </section>
     <section id="panel-search" class="panel" role="tabpanel">
       <div class="search-row">
-        <input id="search-input" spellcheck="false" type="search" placeholder="Find passages in your documents…" aria-label="Find passages in your documents">
+        <div class="search-box">
+          <input id="search-input" spellcheck="false" type="search" placeholder="Find passages in your documents…" aria-label="Find passages in your documents" role="combobox" aria-autocomplete="none" aria-expanded="false" aria-controls="search-history">
+          <ul id="search-history" role="listbox" aria-label="Recent searches" hidden></ul>
+        </div>
         <button id="search-meaning" type="button" class="meaning-btn" aria-pressed="true" title="When this is on, Search also finds passages close to your words in meaning, even if they use different words. When it's off, Search matches your words only. That's the same as setting &quot;How important meaning is&quot; to 0 in Adjustments.">Meaning</button>
       </div>
       <div id="search-folders" class="folder-picks" hidden></div>
-      <div class="hint">Type the words you want to find. Passages (short sections of a document) with more of your words rank higher. <code>"two words"</code> finds a phrase and <code>/text/</code> is a regular expression. <code>+word</code> keeps only passages with that word and <code>-word</code> removes them. <code>site:github.com</code> keeps only documents with that website in the <code>url:</code> line at their top and <code>-site:github.com</code> removes them. Press Ctrl/⌘+K to come back here.</div>
+      <div class="hint">Type the words you want to find. Passages (short sections of a document) with more of your words rank higher. <code>"two words"</code> finds a phrase and <code>/text/</code> is a regular expression. <code>+word</code> keeps only passages with that word and <code>-word</code> removes them. <code>site:github.com</code> keeps only documents with that website in the <code>url:</code> line at their top and <code>-site:github.com</code> removes them. Press Ctrl/⌘+K to come back here. Press ↓ in the box, or click it while it's empty, to pick one of your recent searches in this tab.</div>
       <div id="search-presets" class="preset-bar"></div>
       <details id="search-tune" class="tune"></details>
       <details id="search-hidden" class="tune" hidden></details>
