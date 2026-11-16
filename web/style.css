@@ -295,7 +295,16 @@ body.dragging-task, body.dragging-task * { cursor: grabbing !important; user-sel
 .hit:hover { border-color: var(--faint); }
 .hit.opened { background: var(--panel-2); } /* the result last opened in the reader */
 .hit-head { display: flex; gap: 6px; align-items: baseline; }
-.hit-title { font-weight: 600; flex: 1; min-width: 0; }
+.hit-title {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 2px;
+}
+.hit-title:hover { text-decoration-color: currentColor; }
 .hit-actions { display: flex; gap: 4px; }
 .hit-actions button { padding: 0 7px; font-size: 13.5px; }
 .hit-actions .add { color: var(--accent); border-color: var(--accent); }

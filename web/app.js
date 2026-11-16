@@ -1504,7 +1504,7 @@ function renderHit(hit, { lane = null } = {}) {
   const file = withoutExtension(hit.path.split("/").pop());
   const key = passageKey(hit);
   const open = (event) => {
-    if (event.target.closest("button")) return;
+    if (event.target.closest("button, a")) return;
     if (!lane) searchSettled();
     state.openedHit = key;
     for (const card of document.querySelectorAll(".hit")) card.classList.toggle("opened", card.dataset.key === key);
@@ -1515,6 +1515,14 @@ function renderHit(hit, { lane = null } = {}) {
       end: hit.end_line,
       marks: hit.marks,
     }).catch(fail);
+  };
+  // The title opens the whole document from its start, where the rest of the card opens the passage.
+  const openDocument = (event) => {
+    event.preventDefault();
+    if (!lane) searchSettled();
+    state.openedHit = null;
+    for (const card of document.querySelectorAll(".hit.opened")) card.classList.remove("opened");
+    openFile(hit.path, null, { place: 0 }).catch(fail);
   };
   const actions = h("span", { class: "hit-actions" },
     h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => { if (!lane) searchSettled(); addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail); } }, "+"),
@@ -1531,8 +1539,8 @@ function renderHit(hit, { lane = null } = {}) {
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
   return h("article", { class: `hit${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, "data-meaning-rank": hit.why.meaning_rank, onclick: open, title: describeHover(hit.why) },
-    h("div", { class: "hit-head" }, h("span", { class: "hit-title" }, hitTitle(hit, file)), actions),
-    h("div", { class: "hit-loc" }, `${hit.path}:${hit.focus_line + 1}`),
+    h("div", { class: "hit-head" }, h("a", { class: "hit-title", href: "#", title: hitTitle(hit, file), onclick: openDocument }, hitTitle(hit, file)), actions),
+    h("div", { class: "hit-loc", title: `${hit.path}:${hit.focus_line + 1}` }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
     why && h("div", { class: "hit-why" }, why),
   );
