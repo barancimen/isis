@@ -918,14 +918,17 @@ async function switchTask(name, view = loadTaskView(name)) {
     rememberTaskPlace();
     saveTaskView();
     state.docs.get(state.task).state = taskView.state;
-    await saveTask(state.task);
+    saveTask(state.task).catch(fail); // in the background, so the switch doesn't wait
   }
   let doc = state.docs.get(name);
-  const opening = !doc;
+  const opening = !doc || doc.preloaded;
   if (!doc) {
     const task = await api("GET", `api/tasks/${enc(name)}`);
     doc = { state: taskState(task.content), mtime: task.mtime, dirty: false };
     state.docs.set(name, doc);
+  } else if (doc.preloaded) {
+    delete doc.preloaded;
+    recheckTask(name, doc).catch(() => {});
   }
   state.task = name;
   store.set("task", name);
@@ -940,6 +943,34 @@ async function switchTask(name, view = loadTaskView(name)) {
   updateRefreshButton();
   if (state.panel === "related") refreshRelated().catch(fail); // what is on show is another task's
   if (view || leaving) await showView(view ?? {});
+}
+
+// After the page starts, the other tasks' text loads in the background, one at a time, so that
+// opening one doesn't wait for the server.
+async function preloadTasks() {
+  for (const { name } of [...state.tasks]) {
+    if (state.docs.has(name)) continue;
+    try {
+      const task = await api("GET", `api/tasks/${enc(name)}`);
+      if (!state.docs.has(name) && state.tasks.some((t) => t.name === name)) {
+        state.docs.set(name, { state: taskState(task.content), mtime: task.mtime, dirty: false, preloaded: true });
+      }
+    } catch {} // it loads when it's opened instead
+  }
+}
+
+// A preloaded task is shown as it was loaded, then checked in case it changed since, such as in
+// another browser. If it did and it hasn't been edited here, the newer text replaces it.
+async function recheckTask(name, doc) {
+  const task = await api("GET", `api/tasks/${enc(name)}`);
+  if (state.docs.get(name) !== doc || doc.dirty || doc.saving || task.mtime === doc.mtime) return;
+  doc.state = taskState(task.content);
+  doc.mtime = task.mtime;
+  if (state.task === name) {
+    taskView.setState(doc.state);
+    measureWholeDocument(taskView);
+    restoreTaskPlace(name, true);
+  }
 }
 
 // ---------- each task's reader and search ----------
@@ -1046,7 +1077,10 @@ async function newTask() {
   const name = prompt("Name of the new task");
   if (!name || !name.trim()) return null;
   const task = await api("POST", "api/tasks", { name });
-  await loadTasks();
+  // The answer has all the page needs, so the list and the task's text aren't asked for again.
+  if (!state.tasks.some((t) => t.name === task.name)) state.tasks.push({ name: task.name, mtime: task.mtime });
+  state.docs.set(task.name, { state: taskState(task.content), mtime: task.mtime, dirty: false });
+  renderTaskTabs();
   await switchTask(task.name);
   return task.name;
 }
@@ -1935,13 +1969,29 @@ function renderChips(terms) {
   $("#related-terms").replaceChildren(...terms.map(chip));
 }
 
+// A chip changes at once and the server catches up. If it refuses, the chip goes back.
 async function termAction(chip, term, action) {
-  if (!(await changePrefs("POST", "/terms", { term, action }))) return;
-  if (!chip) return; // from the drawer: the word may not be among the task's keywords any more
+  if (!chip) { // from the drawer: the word may not be among the task's keywords any more
+    await changePrefs("POST", "/terms", { term, action });
+    return;
+  }
+  const before = { boosted: chip.boosted, ignored: chip.ignored, terms: state.relatedTerms };
   chip.boosted = action === "boost";
   chip.ignored = action === "ignore";
   if (action === "exclude") state.relatedTerms = state.relatedTerms.filter((t) => t !== chip);
   renderChips(state.relatedTerms);
+  const shown = state.relatedTerms;
+  try {
+    await changePrefs("POST", "/terms", { term, action });
+  } catch (error) {
+    if (state.relatedTerms === shown) { // not replaced by a refresh meanwhile
+      chip.boosted = before.boosted;
+      chip.ignored = before.ignored;
+      state.relatedTerms = before.terms;
+      renderChips(state.relatedTerms);
+    }
+    throw error;
+  }
 }
 
 // Change what the task remembers and show the result, unless the user has moved to another task
@@ -1963,8 +2013,12 @@ function showPrefs(prefs) {
   renderSteer(prefs.steer);
   renderFeedback(prefs, state.relatedTerms, state.relatedLanes);
   rememberLikes(prefs);
+  paintLikes();
+}
+
+function paintLikes() {
   for (const card of document.querySelectorAll("#related-lanes .hit")) {
-    const on = state.likedIds.has(card.dataset.key);
+    const on = likeWanted.get(card.dataset.key) ?? state.likedIds.has(card.dataset.key);
     const button = card.querySelector("button.like");
     button.setAttribute("aria-pressed", String(on));
     button.title = on ? "Showing more passages like this one. Click to stop." : LIKE_TITLE;
@@ -2006,9 +2060,33 @@ async function dismiss(hit, lane, element, avoid = false) {
   await changePrefs("POST", "/feedback", { action: avoid ? "avoid" : "dismiss", ...passageFields(hit, lane) });
 }
 
+// The ↑ button changes at once and the server catches up. Clicks on one passage go to the server
+// in turn, since unliking needs the id that liking it gave.
+const likeRequests = new Map(); // "path:line" -> the latest request for it
+const likeWanted = new Map(); // "path:line" -> whether it should be liked, while requests are on their way
+
 async function likeHit(hit, lane) {
-  const id = state.likedIds.get(passageKey(hit));
-  await changePrefs("POST", "/feedback", id ? { action: "unlike", id } : { action: "like", ...passageFields(hit, lane) });
+  const key = passageKey(hit);
+  const on = !(likeWanted.get(key) ?? state.likedIds.has(key));
+  likeWanted.set(key, on);
+  paintLikes();
+  const previous = likeRequests.get(key);
+  const request = (async () => {
+    await previous?.catch(() => {});
+    const id = state.likedIds.get(key);
+    if (on === Boolean(id)) return; // the server has it so already
+    await changePrefs("POST", "/feedback", on ? { action: "like", ...passageFields(hit, lane) } : { action: "unlike", id });
+  })();
+  likeRequests.set(key, request);
+  try {
+    await request;
+  } finally {
+    if (likeRequests.get(key) === request) {
+      likeRequests.delete(key);
+      likeWanted.delete(key);
+      paintLikes(); // what the server has, also after a failure
+    }
+  }
 }
 
 // ---------- documents hidden from Search ----------
@@ -2894,6 +2972,7 @@ async function init() {
   }
   restoreSideScroll("files"); // opening a document scrolls the list to it
   pollStatus();
+  preloadTasks();
 }
 
 init().catch(fail);
