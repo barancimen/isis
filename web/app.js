@@ -715,6 +715,7 @@ function renderTaskTabs() {
       list.append(
         h("li", { class: "task-tab", role: "presentation", "data-name": name },
           h("button", { class: "name", role: "tab", title: name }, name),
+          h("button", { class: "task-x", tabindex: "-1", title: "Delete this task", "aria-label": `Delete ${name}`, onclick: () => deleteTask(name).catch(fail) }, "×"),
         ),
       );
     }
@@ -813,6 +814,7 @@ function bindTaskTabs() {
     if (name && e.target.closest(".name")) switchTask(name).catch(fail);
   });
   list.addEventListener("dblclick", (e) => {
+    if (e.target.closest(".task-x")) return;
     const name = nameAt(e);
     if (name) startRename(name);
   });
