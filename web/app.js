@@ -61,7 +61,16 @@ function stopwatch(show) {
   };
 }
 
-async function api(method, url, body, options = {}) {
+// While a task's rename is on its way to the server, its requests wait for it and then use the
+// name it ends up with. The rename's own requests pass `duringRename`.
+let renaming = null; // a promise of { from, to }: the name shown meanwhile and the final one
+
+async function api(method, url, body, { duringRename = false, ...options } = {}) {
+  if (renaming && !duringRename && url.startsWith("api/tasks/")) {
+    const { from, to } = await renaming;
+    const prefix = `api/tasks/${enc(from)}`;
+    if (url === prefix || url.startsWith(`${prefix}/`)) url = `api/tasks/${enc(to)}${url.slice(prefix.length)}`;
+  }
   const res = await fetch(url, {
     method,
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -1042,43 +1051,86 @@ async function newTask() {
   return task.name;
 }
 
-// Returns the name the task has now, which the server may have cleaned up.
-async function renameTask(name, newName) {
-  await saveTask(name);
-  const task = await api("POST", `api/tasks/${enc(name)}/rename`, { new_name: newName });
-  const doc = state.docs.get(name);
-  state.docs.delete(name);
-  if (doc) state.docs.set(task.name, { ...doc, mtime: task.mtime });
-  if (state.taskPlaces[name]) state.taskPlaces[task.name] = state.taskPlaces[name];
-  delete state.taskPlaces[name];
-  const view = store.get(viewKey(name));
-  if (view) store.set(viewKey(task.name), view);
-  store.remove(viewKey(name));
-  if (state.relatedFor === name) state.relatedFor = task.name;
-  if (state.task === name) {
-    state.task = task.name;
-    store.set("task", task.name);
-    $("#task-name").textContent = task.name;
+// Moves what the page keeps about a task to a new name.
+function carryTaskState(from, to) {
+  if (from === to) return;
+  const doc = state.docs.get(from);
+  state.docs.delete(from);
+  if (doc) state.docs.set(to, doc);
+  if (state.taskPlaces[from]) state.taskPlaces[to] = state.taskPlaces[from];
+  delete state.taskPlaces[from];
+  const view = store.get(viewKey(from));
+  if (view) store.set(viewKey(to), view);
+  store.remove(viewKey(from));
+  if (state.relatedFor === from) state.relatedFor = to;
+  for (const task of state.tasks) if (task.name === from) task.name = to;
+  if (state.task === from) {
+    state.task = to;
+    store.set("task", to);
+    $("#task-name").textContent = to;
   }
-  await loadTasks();
-  return task.name;
+  renderTaskTabs();
 }
 
+// The new name shows at once and the server catches up. Saves of the task wait for it, since the
+// task has its old name there until then. If the server cleans the name up, the cleaned name
+// replaces it, and if the server refuses, the old name comes back. Returns the name the task has.
+async function renameTask(name, newName) {
+  while (renaming) { // one rename at a time
+    const { from, to } = await renaming;
+    if (name === from) name = to;
+  }
+  newName = newName.trim();
+  if (state.tasks.some((t) => t.name === newName)) throw new Error(`a task named '${newName}' already exists`);
+  carryTaskState(name, newName);
+  let done;
+  renaming = new Promise((resolve) => (done = resolve));
+  let final = name;
+  try {
+    await saveTask(newName, { beforeRename: name });
+    const task = await api("POST", `api/tasks/${enc(name)}/rename`, { new_name: newName }, { duringRename: true });
+    final = task.name;
+    const doc = state.docs.get(newName);
+    if (doc) doc.mtime = task.mtime;
+    carryTaskState(newName, final);
+    return final;
+  } catch (error) {
+    carryTaskState(newName, name);
+    throw error;
+  } finally {
+    renaming = null;
+    done({ from: newName, to: final });
+  }
+}
+
+// The task leaves the list at once and the server catches up. If it refuses, the task comes back.
 async function deleteTask(name) {
   if (!confirm(`Delete the task “${name}”?`)) return;
-  await api("DELETE", `api/tasks/${enc(name)}`);
+  const kept = { doc: state.docs.get(name), place: state.taskPlaces[name], view: store.get(viewKey(name)) };
+  const wasActive = state.task === name;
   state.docs.delete(name);
   delete state.taskPlaces[name];
   store.remove(viewKey(name));
-  await loadTasks();
-  if (state.task === name) {
+  state.tasks = state.tasks.filter((t) => t.name !== name);
+  renderTaskTabs();
+  const deleting = api("DELETE", `api/tasks/${enc(name)}`);
+  deleting.catch(() => {}); // handled below, after the switch
+  if (wasActive) {
     state.task = null;
-    if (state.tasks.length) {
-      await switchTask(state.tasks[0].name, loadTaskView(state.tasks[0].name) ?? {});
-    } else {
+    if (state.tasks.length) await switchTask(state.tasks[0].name, loadTaskView(state.tasks[0].name) ?? {}).catch(fail);
+    else {
       showNoTask();
       await showView({});
     }
+  }
+  try {
+    await deleting;
+  } catch (error) {
+    if (kept.doc) state.docs.set(name, kept.doc);
+    if (kept.place) state.taskPlaces[name] = kept.place;
+    if (kept.view) store.set(viewKey(name), kept.view);
+    await loadTasks().catch(() => {});
+    throw error;
   }
 }
 
@@ -1093,7 +1145,8 @@ function setSaveState(state) {
 
 const scheduleSave = debounce(() => saveTask(state.task).catch(fail), 800);
 
-async function saveTask(name, { keepalive = false } = {}) {
+// `beforeRename`: the name the task still has on the server, while a rename is on its way there.
+async function saveTask(name, { keepalive = false, beforeRename = null } = {}) {
   const doc = name && state.docs.get(name);
   if (!doc) return;
   if (doc.saving) {
@@ -1109,7 +1162,7 @@ async function saveTask(name, { keepalive = false } = {}) {
       const body = { content, base_mtime: doc.mtime };
       // Browsers refuse keepalive requests over 64 KiB; a larger task saves as a normal request.
       const small = new TextEncoder().encode(JSON.stringify(body)).length < 60000;
-      const result = await api("PUT", `api/tasks/${enc(name)}`, body, { keepalive: keepalive && small });
+      const result = await api("PUT", `api/tasks/${enc(beforeRename ?? name)}`, body, { keepalive: keepalive && small, duringRename: Boolean(beforeRename) });
       doc.mtime = result.mtime;
       if (name === state.task) setSaveState(doc.dirty ? "unsaved" : "saved");
     } catch (error) {
@@ -1133,7 +1186,7 @@ async function saveTask(name, { keepalive = false } = {}) {
   }
   if (doc.again && !doc.conflictMtime) {
     doc.again = false;
-    return saveTask(name);
+    return saveTask(name, { keepalive, beforeRename });
   }
 }
 
