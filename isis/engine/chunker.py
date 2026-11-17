@@ -32,7 +32,12 @@ class Passage:
 
     @property
     def embed_text(self) -> str:
-        """What the embedding model sees: the heading gives a short passage its context."""
+        """What the embedding model sees: the passage's text alone, without its heading."""
+        return self.text
+
+    @property
+    def search_text(self) -> str:
+        """What phrases and regexes are matched in: the heading too, as words are."""
         return f"{self.heading}\n{self.text}" if self.heading else self.text
 
 

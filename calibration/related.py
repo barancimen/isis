@@ -151,10 +151,9 @@ def signals(engine, args, docs, qrels):
     rows = []
     for tid, doc in docs.items():
         units = task_units(doc)
-        find_excerpts(snap, units)
+        find_excerpts(snap, units, cfg)
         vecs = embed_reusing(snap, engine.embedder, [u.embed_text for u in units], [same_passage(snap, u.source_rows, u.text) for u in units])
         _, z = zscores(snap, vecs)
-        find_excerpts(snap, units, vecs)
         weight_units(units, cfg)
         assign_themes(units, vecs, cfg, snap)
         sizes = np.array([len(u.text.split()) * u.weight for u in units], np.float32)

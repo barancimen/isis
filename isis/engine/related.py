@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass, field
 from functools import partial
 
 import numpy as np
+from rapidfuzz import fuzz
 
 from .chunker import MAX_WORDS, chunk_markdown, heading_texts
 from .index import Snapshot
@@ -98,7 +99,7 @@ class RelatedConfig:
         "Lower it to use only the most distinctive words.",
     )
     excerpt_weight: float = tunable(
-        0.5, label="How important collected passages are", group=QUERY, min=0.0, max=3.0, step=0.1,
+        1.0, label="How important collected passages are", group=QUERY, min=0.0, max=3.0, step=0.1,
         help="How much the passages you've added to your task count, compared with your notes.\n"
         "At 1, they count the same as your notes.\n"
         "Raise it to move results closer to the passages you've collected.\n"
@@ -152,12 +153,14 @@ class RelatedConfig:
         "Raise it to give more passages the lower limit, which can mean more results.\n"
         "Lower it to give fewer passages the lower limit. At 0, none get it.",
     )
-    duplicate_cos: float = tunable(
-        0.95, label="Duplicate limit", group=FILTER, min=0.7, max=1.0, step=0.01,
-        help="A passage this close to a paragraph in your task is hidden, "
-        "because your task probably already contains that text.\n"
-        "Raise it to hide only near-identical passages. At 1, they must match exactly in meaning.\n"
-        "Lower it to also hide passages that are less close to your text.",
+    copy_match: float = tunable(
+        0.9, label="How close a copy must be", group=FILTER, min=0.5, max=1.0, step=0.01,
+        help="A paragraph in your task counts as copied from a passage when this much of its wording matches, "
+        "in the same order. A copied passage isn't suggested again, and neither is any passage "
+        "that matches the copy as closely. Only the words are compared, never the meaning.\n"
+        "Raise it to count only copies you've changed very little. At 1, they must match exactly, "
+        "apart from capitals and spacing.\n"
+        "Lower it to also count copies you've edited more.",
     )
     negative_weight: float = tunable(
         0.0, label="Effect of removed passages", group=FILTER, min=0.0, max=2.0, step=0.1,
@@ -456,8 +459,8 @@ class Unit:
     theme: int = 0
 
     @property
-    def embed_text(self) -> str:
-        return f"{self.heading}\n{self.text}" if self.heading else self.text
+    def embed_text(self) -> str:  # as for a corpus passage: the text alone
+        return self.text
 
 
 @dataclass
@@ -511,45 +514,45 @@ def weight_units(units: list[Unit], config: RelatedConfig) -> None:
         u.weight = w / top
 
 
+EXCERPT_CANDIDATES = 10  # best keyword matches of a paragraph that are checked for being its source
+MIN_COPY_CHARS = 20  # shorter text is too common to say where it was copied from
+
+
 def _closest_in_words(snapshot: Snapshot, text: str) -> np.ndarray:
     ids = [i for t in set(tokenize(text)) if (i := snapshot.term_id(t)) is not None]
-    return top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), 5, positive=True)
+    return top_rows(snapshot.bm25.scores(ids, np.ones(len(ids))), EXCERPT_CANDIDATES, positive=True)
 
 
-def _closest_in_meaning(snapshot: Snapshot, vec: np.ndarray) -> np.ndarray:
-    scores = snapshot.vectors @ vec
-    scores[~snapshot.has_vector] = -np.inf
-    return top_rows(scores, 5)
+def copy_score(a: str, b: str, cutoff: float = 0.0) -> float:
+    """How closely the shorter of two normalised texts matches some part of the longer one, from 0
+    to 1, by their wording in order (rapidfuzz's partial ratio). A text shorter than MIN_COPY_CHARS
+    scores 0, so a short heading inside a paragraph isn't a copy of it. Below `cutoff` it may
+    answer 0, which is quicker."""
+    if min(len(a), len(b)) < MIN_COPY_CHARS:
+        return 0.0
+    if a in b or b in a:
+        return 1.0
+    return fuzz.partial_ratio(a, b, score_cutoff=cutoff * 100) / 100
 
 
-def _sharing_text(snapshot: Snapshot, closest: Callable[[], np.ndarray], needle: str) -> list[int]:
-    """The closest passages that hold this normalised text, or are held by it."""
-    found = []
-    for row in dict.fromkeys(int(r) for r in closest()):
-        hay = _norm(snapshot.passages[row].text)
-        if needle in hay or (len(hay) >= 20 and hay in needle):
-            found.append(row)
-    return found
-
-
-def find_excerpts(snapshot: Snapshot, units: list[Unit], unit_vecs: np.ndarray | None = None) -> None:
+def find_excerpts(snapshot: Snapshot, units: list[Unit], config: RelatedConfig | None = None) -> None:
     """Mark units copied from the corpus, and remember which passages they came from.
 
-    A unit is an excerpt when its text appears inside a corpus passage (or contains one). The
-    places to look are the unit's best lexical matches; with `unit_vecs`, the closest passages in
-    meaning of the units not matched yet (the second pass, once the units are embedded). Answers
-    are kept per text for as long as the index stays the same, so a long task only pays for the
-    paragraphs that changed."""
-    for j, unit in enumerate(units):
+    A unit is copied when its wording matches a passage, or the passage matches a part of it, at
+    least `copy_match` closely (see copy_score). Only words are compared: the places to look are
+    the unit's best keyword matches. Answers are kept per text and closeness for as long as the
+    index stays the same, so a long task only pays for the paragraphs that changed."""
+    threshold = (config or RelatedConfig()).copy_match
+    for unit in units:
         needle = _norm(unit.text)
-        if len(needle) < 20 or (unit_vecs is not None and unit.excerpt):
+        if len(needle) < MIN_COPY_CHARS:
             continue
-        if unit_vecs is None:
-            key, closest = (needle,), partial(_closest_in_words, snapshot, unit.text)
-        else:
-            key, closest = (needle, unit.heading, unit.text), partial(_closest_in_meaning, snapshot, unit_vecs[j])
-        matches = partial(_sharing_text, snapshot, closest, needle)
-        for row in snapshot.cached(snapshot.excerpt_matches, key, MAX_EXCERPT_MATCHES, matches):
+
+        def matches(needle=needle, text=unit.text):
+            rows = dict.fromkeys(int(r) for r in _closest_in_words(snapshot, text))
+            return [row for row in rows if copy_score(needle, _norm(snapshot.passages[row].text), threshold) >= threshold]
+
+        for row in snapshot.cached(snapshot.excerpt_matches, (needle, threshold), MAX_EXCERPT_MATCHES, matches):
             if row not in unit.source_rows:
                 unit.excerpt = True
                 unit.source_rows.append(row)
@@ -618,8 +621,11 @@ def _clusters(vecs: np.ndarray, distance: float) -> np.ndarray:
     a theme per paragraph. Small themes are kept: on long tasks, merging single paragraphs into
     bigger themes cost relevance in the bridges and gaps lanes (CALIBRATE.md)."""
     from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import pdist
 
-    tree = linkage(vecs, "average", metric="cosine")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        distances = pdist(vecs, "cosine")
+    tree = linkage(np.nan_to_num(distances, nan=1.0), "average")  # an empty vector is unlike every other
     clusters = fcluster(tree, distance, "distance")
     cap = 2 * math.ceil(math.sqrt(len(vecs)))
     if len(set(clusters)) > cap:
@@ -653,7 +659,6 @@ class SemanticSignals:
     strongest: np.ndarray  # against the query, unweighted: what the thresholds compare
     weighted: np.ndarray  # the same with paragraph weights: what the meaning ranking sorts by
     best_unit: np.ndarray | None = None  # query="paragraphs": the paragraph each passage matches best
-    closest: np.ndarray | None = None  # best cosine to any paragraph of the task
     theme_z: np.ndarray | None = None  # [passages, themes], with two themes or more
     second: np.ndarray | None = None  # each passage's z-score on its second-best theme
     avoided: np.ndarray | None = None  # clearly like a passage the user avoids
@@ -705,14 +710,12 @@ def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs:
         if avoid:  # anti-queries: everything clearly like them is out
             out.avoided = z_neg[:, avoid].max(1) >= config.avoid_z
 
-    theme_of = np.array([u.theme for u in units])
-    per_theme = [
-        theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t], scope, scope_key)
-        for t in range(len(themes))
-    ]
-    out.closest = np.max([best_cos for _, best_cos in per_theme], axis=0)
     if len(themes) >= 2:
-        out.theme_z = np.stack([best_z for best_z, _ in per_theme], axis=1)
+        theme_of = np.array([u.theme for u in units])
+        out.theme_z = np.stack([
+            theme_scores(snapshot, [u for u in units if u.theme == t], unit_vecs[theme_of == t], scope, scope_key)
+            for t in range(len(themes))
+        ], axis=1)
         out.second = np.partition(out.theme_z, -2, axis=1)[:, -2]
     return out
 
@@ -793,21 +796,20 @@ def task_terms(snapshot: Snapshot, units: list[Unit], prefs: TaskPrefs, config: 
 
 
 def theme_scores(snapshot: Snapshot, theme_units: list[Unit], vecs: np.ndarray, scope: np.ndarray | None = None,
-                 scope_key=()) -> tuple[np.ndarray, np.ndarray]:
-    """For one theme, every passage's best z-score and best cosine against its paragraphs. Kept
+                 scope_key=()) -> np.ndarray:
+    """For one theme, every passage's best z-score against its paragraphs. Kept
     for as long as the theme's text and the index stay the same: typing changes one theme, and
     the table of all passages against all paragraphs would not fit in memory for a large corpus."""
 
     def score():
-        best_z, best_cos = None, None
+        best_z = None
         for start in range(0, len(vecs), THEME_BATCH):
-            cos, z = zscores(snapshot, vecs[start : start + THEME_BATCH], scope)
-            z, cos = z.max(1), cos.max(1)
+            _, z = zscores(snapshot, vecs[start : start + THEME_BATCH], scope)
+            z = z.max(1)
             best_z = z if best_z is None else np.maximum(best_z, z)
-            best_cos = cos if best_cos is None else np.maximum(best_cos, cos)
-        return best_z, best_cos
+        return best_z
 
-    key = (scope_key, *sorted(f"{u.heading}\0{u.text}" for u in theme_units))
+    key = (scope_key, *sorted(u.text for u in theme_units))
     return snapshot.cached(snapshot.theme_scores, key, MAX_THEME_SCORES, score)
 
 
@@ -836,8 +838,6 @@ def gate(snapshot: Snapshot, units: list[Unit], signals: SemanticSignals, lex: n
     )
     if signals.second is not None:
         relevant |= has & (signals.second >= config.bridge_z)
-    if semantic:
-        relevant &= ~(has & (signals.closest >= config.duplicate_cos))
 
     candidates = set(top_rows(lex, config.candidates, positive=True)) | set(top_rows(signals.weighted, config.candidates))
     if signals.second is not None:
@@ -853,11 +853,10 @@ def gate(snapshot: Snapshot, units: list[Unit], signals: SemanticSignals, lex: n
     collected = {r for u in units for r in u.source_rows}
     dismissed_keys = {(d.get("path"), _norm(d.get("text", ""))) for d in prefs.dismissed}
     excluded_docs = set(prefs.excluded_docs)
-    excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= 20]
-    joined = "\0".join(excerpts)
+    excerpts = [e for u in units if u.excerpt and len(e := _norm(u.text)) >= MIN_COPY_CHARS]
 
-    def near_excerpt(hay: str) -> bool:  # inside a collected excerpt, or holding one
-        return hay in joined or any(e in hay for e in excerpts)
+    def near_excerpt(hay: str) -> bool:  # a copy of a collected excerpt, or of a part of one, by its words
+        return any(copy_score(hay, e, config.copy_match) >= config.copy_match for e in excerpts)
 
     gated = []
     for row in map(int, rows):
@@ -1056,11 +1055,10 @@ def related(
     # 1: units and themes
     semantic = embedder is not None and snapshot.has_vector.any()
     unit_vecs = None
-    find_excerpts(snapshot, units)
+    find_excerpts(snapshot, units, config)
     if semantic:
         reuse = [same_passage(snapshot, u.source_rows, u.text) for u in units]
         unit_vecs = embed_reusing(snapshot, embedder, [u.embed_text for u in units], reuse)
-        find_excerpts(snapshot, units, unit_vecs)
     weight_units(units, config)
     themes = assign_themes(units, unit_vecs, config, snapshot)
     lap("units")

@@ -54,9 +54,9 @@ def test_line_splitting_matches_codemirror():
     assert split_lines("a\r\nb\rc\nd") == ["a", "b", "c", "d"]
 
 
-def test_embed_text_includes_heading():
+def test_embed_text_is_the_passage_alone():
     (p,) = chunk_markdown("a.md", "# Whales\nThey dive.")
-    assert p.embed_text == "Whales\nThey dive."
+    assert p.heading == "Whales" and p.embed_text == "They dive."
 
 
 def test_heading_texts_lists_every_heading_line():

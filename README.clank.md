@@ -114,13 +114,13 @@ Task documents are ordinary markdown files, so you can edit them elsewhere too. 
 
 The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and every threshold is a field of `RelatedConfig`:
 
-1. **Units.** The task is split into paragraphs. Paragraphs copied from the corpus are recognised as collected excerpts; a whole collected passage reuses its embedding from the index, so a long task is quick to refresh. Clusters of similar paragraphs become themes; headings play no part in them.
-2. **Signals.** The whole document is the query. Every corpus passage is scored two ways:
+1. **Units.** The task is split into paragraphs. Paragraphs copied from the corpus are recognised as collected excerpts, by their wording alone. A paragraph counts as copied when it matches a passage, or a part of one, at least 90% closely in its wording and word order (rapidfuzz's partial ratio, Adjustments › *How close a copy must be*), so a copy with a few words changed still counts. Only the paragraph's 10 best keyword matches are checked, and text under 20 characters never counts. Collected excerpts count as much as your own paragraphs by default (*How important collected passages are*, 1). A whole collected passage reuses its embedding from the index, so a long task is quick to refresh. Clusters of similar paragraphs become themes; headings play no part in them.
+2. **Signals.** Passages and task paragraphs are embedded as their text alone, without their headings (phrases and regexes still match in headings). The whole document is the query. Every corpus passage is scored two ways:
    - its *robust z-score* of embedding similarity to the document vector (the length-weighted mean of the paragraph embeddings), meaning how far it stands out from the typical passage (above 50,000 passages, "typical" is estimated from a fixed sample of 20,000);
    - BM25 for the document's ~30 most distinctive terms.
 
    With `RelatedConfig(query="paragraphs")`, each paragraph is a query of its own instead. A passage then scores by its best match. Use this when a document covers unrelated topics and you want strong matches to any one of them, not to their overlap.
-3. **Gate.** Only clearly relevant passages survive: a strong z-score, a top keyword hit with some semantic support, or a clear relation to two themes at once. Already-collected and dismissed passages, and every passage of an excluded document, are dropped.
+3. **Gate.** Only clearly relevant passages survive: a strong z-score, a top keyword hit with some semantic support, or a clear relation to two themes at once. Already-collected and dismissed passages, and every passage of an excluded document, are dropped. So is any passage whose wording matches a collected excerpt as closely as *How close a copy must be* asks. Meaning plays no part in this.
 4. **Lanes.**
    - *Best results* (`core`): reciprocal-rank fusion of both signals.
    - *Same meaning, different words* (`hidden`): high meaning, low keyword overlap.

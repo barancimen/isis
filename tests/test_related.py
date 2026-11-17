@@ -77,6 +77,38 @@ def test_collected_excerpts_are_recognised_and_not_suggested_again(engine):
     assert (source.path, source.start_line) not in {(h.path, h.start_line) for h in items(result)}
 
 
+def test_a_copy_with_a_word_changed_still_counts_as_collected(engine):
+    # Two neighbouring passages as one paragraph, about as long as a real one, with a word changed in each.
+    rows = range(*engine.snapshot.file_rows["sea-1.md"])
+    source, after = engine.snapshot.passages[rows[1]], engine.snapshot.passages[rows[2]]
+
+    def edited(text):
+        words = text.split()
+        words[len(words) // 2] = "zebra"
+        return " ".join(words)
+
+    task = f"# Sea\nWhales, ships and harpoons.\n\n{edited(source.text)} {edited(after.text)}\n"
+    result = engine.related(task)
+    assert result.stats["excerpts"] == 1
+    assert (source.path, source.start_line) not in {(h.path, h.start_line) for h in items(result)}
+    exact_only = engine.related(task, config=RelatedConfig(copy_match=1.0))
+    assert exact_only.stats["excerpts"] == 0  # at 1, only exact copies count
+
+
+def test_copy_score_compares_wording_only():
+    from isis.engine.related import copy_score
+    text = ("the white whale swam past the harpoon ship while ahab watched the sea from the deck "
+            "and the crew waited for the order to lower the boats into the grey water")
+    assert copy_score(text, f"before it, {text}, and after it") == 1.0
+    assert copy_score(text.replace("swam", "drifted"), text) >= 0.9
+    assert copy_score("a whale is a big fish that swims in the deep sea", text) < 0.9
+    assert copy_score("the white whale", text) == 0.0  # too short to say it was copied
+
+
+def test_collected_passages_count_as_much_as_notes_by_default():
+    assert RelatedConfig().excerpt_weight == 1.0
+
+
 def test_terms_follow_the_task_the_steer_line_and_ignored_words(engine):
     task = "Whale whale whale harpoon ocean."
     chips = {c.term: c for c in engine.related(task).terms}
@@ -130,7 +162,7 @@ def test_passages_from_the_corpus_are_not_embedded_again(engine, monkeypatch):
     reused = lambda: not any(p.text in t for p in collected for t in embedded)
     result = engine.related(task + "\nA new note about lances.\n")
     assert result.stats["excerpts"] == 3
-    assert "Sea\nA new note about lances." in embedded and reused()  # collected passages keep their vectors
+    assert "A new note about lances." in embedded and reused()  # collected passages keep their vectors
 
     prefs = TaskPrefs()
     prefs.dismiss("core", shown[0].path, shown[0].text, shown[0].start_line)
@@ -240,9 +272,17 @@ def test_more_like_this_pulls_the_suggestions(engine):
     off = engine.related(task, prefs=prefs, config=RelatedConfig(like_weight=0))
     assert [c.term for c in off.terms] == [c.term for c in engine.related(task).terms]  # 0: no pull
 
-    core_birds = lambda weight: sum(h.path.startswith("birds") for h in items(
-        engine.related(task, prefs=prefs, config=RelatedConfig(query="paragraphs", like_weight=weight)), "core"))
-    assert core_birds(1.0) > core_birds(0.0)  # with paragraph queries too (same feedback, so the same slots)
+    # With paragraph queries too: the liked passage raises the meaning scores of passages like it.
+    from isis.engine import related as R
+    snap = engine.snapshot
+    units = R.task_units(task)
+    vecs = engine.embedder.embed([u.embed_text for u in units])
+    themes = R.assign_themes(units, vecs, RelatedConfig(), snap)
+    birds_rows = [r for path, (start, end) in snap.file_rows.items() if path.startswith("birds")
+                  for r in range(start, end) if r != snap.file_rows[pick.path][0]]
+    pull = lambda weight: R.semantic_signals(snap, engine.embedder, units, vecs, themes, prefs.liked, prefs,
+                                             RelatedConfig(query="paragraphs", like_weight=weight)).weighted[birds_rows].mean()
+    assert pull(1.0) > pull(0.0)
 
     prefs.unlike(prefs.summary()["liked"][0]["id"])
     assert prefs.liked == [] and prefs.feedback == {"core": [0, 0]}

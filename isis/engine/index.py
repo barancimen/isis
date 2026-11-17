@@ -167,7 +167,7 @@ class Snapshot:
         todo = np.flatnonzero(~done) if rows is None else rows[~done[rows]]
         if len(todo):
             passages = self.passages  # a pattern that runs out of time raises before anything is marked done
-            texts = (passages[i].embed_text for i in todo.tolist())
+            texts = (passages[i].search_text for i in todo.tolist())
             found = native.phrase_counts(pattern, texts)  # a phrase, with the Rust extension
             if found is None:
                 found = np.fromiter((sum(1 for m in pattern.finditer(text) if m.end() > m.start()) for text in texts),

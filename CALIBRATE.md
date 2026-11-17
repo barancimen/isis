@@ -147,6 +147,16 @@ every judgment key. Decide the chunking first.
     gaps lanes exist for;
   - the precision per lane.
 
+## Changed since the 2026-10-20 calibration
+
+These weren't calibrated, so the thresholds below may need redoing.
+
+- **`excerpt_weight` is 1.0 again**, by choice, so collected passages count as much as your notes.
+- **`duplicate_cos` is gone.** Copies are found by wording only, with `copy_match` (0.9, a
+  rapidfuzz partial ratio) deciding how close a copy must be. Meaning plays no part in it.
+- **Headings are no longer embedded.** Passages and task paragraphs are embedded as their text
+  alone. Every z-score threshold was calibrated with headings embedded.
+
 ## What the 2026-10-20 calibration found
 
 On `sample_corpus/` with bge-micro-v2. A starting point for intuition, not a law.
