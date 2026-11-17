@@ -28,6 +28,25 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// Small line icons, drawn the same on every system. They take the text colour.
+const ICONS = {
+  plus: '<path d="M8 3v10M3 8h10"/>',
+  more: '<path d="M8 13.5V2.75M3.25 7.5 8 2.75l4.75 4.75"/>',
+  less: '<path d="M8 2.5v10.75M3.25 8.5 8 13.25l4.75-4.75"/>',
+  hide: '<path d="M4 4l8 8M12 4l-8 8"/>',
+  doc: '<path d="M3.75 1.75h5.5l3 3v9.5h-8.5z"/><path d="M6.25 7.75l3.5 3.5M9.75 7.75l-3.5 3.5"/>',
+  menu: '<circle cx="3" cy="8" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13" cy="8" r="1.5"/>',
+  check: '<path d="M3 8.5l3.25 3.25L13 5"/>',
+};
+
+function icon(name) {
+  const span = document.createElement("span");
+  span.className = `icon icon-${name}`;
+  span.setAttribute("aria-hidden", "true");
+  span.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14">${ICONS[name]}</svg>`;
+  return span;
+}
+
 function debounce(fn, ms) {
   let timer;
   const wrapped = (...args) => {
@@ -689,7 +708,9 @@ const state = {
   relatedFor: null, // the task they are for
   relatedTerms: [],
   relatedLanes: [],
-  likedIds: new Map(), // "path:line" -> id, for the ↑ buttons
+  likedIds: new Map(), // "path:line" -> id, of the passages marked More like this
+  avoidedKeys: new Set(), // "path:line" of the passages marked Less like this
+  hiddenPassages: [], // passages left out of the active task's Search: [{path, start_line, end_line, text}]
   searchSeq: 0,
   searchAsTyped: null, // the query to search for without correcting its spelling
   searchTop: 0, // where the Search panel is scrolled to, for the active task
@@ -998,6 +1019,7 @@ function currentView() {
     asTyped: state.searchAsTyped,
     searchTop: state.searchTop,
     hiddenDocs: [...state.hiddenDocs],
+    hiddenPassages: state.hiddenPassages,
   };
 }
 
@@ -1026,6 +1048,7 @@ function showViewSearch(view) {
   state.searchAsTyped = view.asTyped ?? null;
   state.searchTop = view.searchTop ?? 0;
   state.hiddenDocs = cleanHiddenDocs(view.hiddenDocs);
+  state.hiddenPassages = cleanHiddenPassages(view.hiddenPassages);
   renderHiddenDocs();
   $("#search-input").value = view.query ?? "";
   $("#search-status").textContent = "";
@@ -1483,7 +1506,6 @@ async function loadFiles() {
 // ---------- results ----------
 
 const passageKey = (passage) => `${passage.path}:${passage.start_line}`;
-const LIKE_TITLE = "Show more passages like this one, in meaning and in words. This doesn't add it to your task.";
 
 // Snippet lines flow as prose (hard-wrapped text would otherwise wrap twice in a narrow
 // panel); blank lines start a new paragraph. Context lines around the passage are dimmed.
@@ -1614,25 +1636,110 @@ function renderHit(hit, { lane = null } = {}) {
     openFile(hit.path, null, { place: 0 }).catch(fail);
   };
   const actions = h("span", { class: "hit-actions" },
-    h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => { if (!lane) searchSettled(); addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail); } }, "+"),
-    lane && h("button", {
-      class: "like",
-      "aria-pressed": String(Boolean(hit.why.liked)),
-      title: LIKE_TITLE,
-      onclick: () => likeHit(hit, lane).catch(fail),
-    }, "↑"),
-    lane && h("button", { class: "dismiss", title: "Remove this result. It won't appear again for this task.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit")).catch(fail) }, "×"),
-    lane && h("button", { class: "avoid", title: "Remove this result and passages close to it in meaning, for this task. \"How near for ⊘\" in Adjustments sets how close.", onclick: (e) => dismiss(hit, lane, e.target.closest(".hit"), true).catch(fail) }, "⊘"),
-    !lane && h("button", { class: "exclude-doc", title: `Hide ${hit.path} from this task's Search. You can bring it back under Hidden documents.`, onclick: () => hideSearchDoc(hit.path) }, "⊠"),
-    lane && h("button", { class: "exclude-doc", title: `Remove all passages from ${hit.path} for this task. Search can still find them.`, onclick: () => excludeDoc(hit.path).catch(fail) }, "⊠"),
+    h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => { if (!lane) searchSettled(); addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail); } }, icon("plus"), "Add"),
+    h("button", { class: "hit-menu-btn", title: "More actions", "aria-label": "More actions", "aria-haspopup": "menu", "aria-expanded": "false", onclick: (e) => openHitMenu(e.currentTarget, hit, lane) }, icon("menu")),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
-  return h("article", { class: `hit${key === state.openedHit ? " opened" : ""}`, "data-key": key, "data-path": hit.path, "data-meaning-rank": hit.why.meaning_rank, onclick: open, title: describeHover(hit.why) },
+  const mark = lane ? markOf(key) : null;
+  const marked = mark === "more" ? " liked" : mark === "less" ? " avoided" : "";
+  return h("article", { class: `hit${key === state.openedHit ? " opened" : ""}${marked}`, "data-key": key, "data-path": hit.path, "data-meaning-rank": hit.why.meaning_rank, onclick: open, title: describeHover(hit.why) },
     h("div", { class: "hit-head" }, h("a", { class: "hit-title", href: "#", title: hitTitle(hit, file), onclick: openDocument }, hitTitle(hit, file)), actions),
     h("div", { class: "hit-loc", title: `${hit.path}:${hit.focus_line + 1}` }, `${hit.path}:${hit.focus_line + 1}`),
     renderSnippet(hit),
     why && h("div", { class: "hit-why" }, why),
   );
+}
+
+// ---------- a result's menu ----------
+
+const MORE_TITLE = "Show more passages like this one, in meaning and in words. This doesn't add it to your task.";
+const LESS_TITLE = "Show fewer passages like this one. When you next refresh, it goes away along with passages close to it in meaning.";
+
+function hitMenuItems(hit, lane, card) {
+  if (!lane) {
+    return [
+      { icon: "hide", label: "Hide this passage", title: "Hide this passage from this task's Search. You can bring it back under Hidden in Search.", run: () => hideSearchPassage(hit) },
+      { icon: "doc", label: "Hide this whole document", title: `Hide ${hit.path} from this task's Search. You can bring it back under Hidden in Search.`, run: () => hideSearchDoc(hit.path) },
+    ];
+  }
+  const mark = markOf(passageKey(hit));
+  return [
+    { icon: "more", label: "More like this", checked: mark === "more", title: mark === "more" ? "Click to stop showing more passages like this one." : MORE_TITLE, run: () => markHit(hit, lane, mark === "more" ? null : "more") },
+    { icon: "less", label: "Less like this", checked: mark === "less", title: mark === "less" ? "Click to take this back. The passage and those like it can appear again." : LESS_TITLE, run: () => markHit(hit, lane, mark === "less" ? null : "less") },
+    null,
+    { icon: "hide", label: "Hide this passage", title: "Remove this result. It won't appear again for this task.", run: () => dismiss(hit, lane, card) },
+    { icon: "doc", label: "Hide this whole document", title: `Remove all passages from ${hit.path} for this task. Search can still find them.`, run: () => excludeDoc(hit.path) },
+  ];
+}
+
+let hitMenu = null; // { el, button } while a result's menu is open
+
+function closeHitMenu({ focus = false } = {}) {
+  if (!hitMenu) return;
+  const { el, button } = hitMenu;
+  hitMenu = null;
+  el.remove();
+  button.setAttribute("aria-expanded", "false");
+  if (focus && button.isConnected) button.focus();
+}
+
+function openHitMenu(button, hit, lane) {
+  const again = hitMenu?.button === button;
+  closeHitMenu();
+  if (again) return; // a second click closes it
+  const items = hitMenuItems(hit, lane, button.closest(".hit")).map((item) => item
+    ? h("button", {
+      type: "button",
+      class: "menu-item",
+      role: item.checked === undefined ? "menuitem" : "menuitemcheckbox",
+      "aria-checked": item.checked === undefined ? null : String(item.checked),
+      title: item.title,
+      onclick: () => {
+        closeHitMenu({ focus: true }); // back to ⋯, unless the choice removes its card
+        Promise.resolve().then(item.run).catch(fail);
+      },
+    }, icon(item.icon), h("span", { class: "menu-label" }, item.label), item.checked && icon("check"))
+    : h("div", { class: "menu-sep", role: "separator" }));
+  const el = h("div", { class: "hit-menu", role: "menu" }, items);
+  document.body.append(el);
+  const box = button.getBoundingClientRect();
+  const left = Math.max(8, Math.min(box.right - el.offsetWidth, innerWidth - el.offsetWidth - 8));
+  let top = box.bottom + 4;
+  if (top + el.offsetHeight > innerHeight - 8) top = Math.max(8, box.top - el.offsetHeight - 4);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  button.setAttribute("aria-expanded", "true");
+  hitMenu = { el, button };
+  el.querySelector(".menu-item").focus();
+}
+
+function bindHitMenu() {
+  document.addEventListener("pointerdown", (e) => {
+    if (hitMenu && !hitMenu.el.contains(e.target) && !hitMenu.button.contains(e.target)) closeHitMenu();
+  }, true);
+  document.addEventListener("scroll", (e) => {
+    if (hitMenu && !hitMenu.el.contains(e.target)) closeHitMenu();
+  }, true);
+  window.addEventListener("resize", () => closeHitMenu());
+  window.addEventListener("blur", () => closeHitMenu());
+  document.addEventListener("keydown", (e) => {
+    if (!hitMenu) return;
+    const items = [...hitMenu.el.querySelectorAll(".menu-item")];
+    const at = items.indexOf(document.activeElement);
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeHitMenu({ focus: true });
+    } else if (e.key === "Tab") {
+      closeHitMenu({ focus: true });
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      items[e.key === "Home" ? 0 : items.length - 1].focus();
+    }
+  }, true);
 }
 
 // ---------- search panel ----------
@@ -1663,13 +1770,16 @@ async function searchNow() {
     // Always hybrid: Meaning off is meaning_weight 0, which the server ranks by keywords alone.
     const asTyped = state.searchAsTyped === q ? "&as_typed=true" : "";
     const model = state.model ? `&model=${enc(state.model)}` : "";
-    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${SEARCH_LIMIT}${tuned}${skip}${hide}${asTyped}${model}`);
+    const hidden = new Set(state.hiddenPassages.map(passageKey));
+    const limit = Math.min(SEARCH_LIMIT + hidden.size, 200); // the server's most
+    const result = await api("GET", `api/search?q=${enc(q)}&mode=hybrid&limit=${limit}${tuned}${skip}${hide}${asTyped}${model}`);
     if (seq !== state.searchSeq) return;
-    const n = result.hits.length;
-    $("#search-results").replaceChildren(...result.hits.map((hit) => renderHit(hit)));
+    const hits = result.hits.filter((hit) => !hidden.has(passageKey(hit))).slice(0, SEARCH_LIMIT);
+    const n = hits.length;
+    $("#search-results").replaceChildren(...hits.map((hit) => renderHit(hit)));
     const took = stop();
-    const byMeaning = result.hits.some((hit) => "meaning_rank" in hit.why);
-    const how = !byMeaning ? "" : result.hits.some((hit) => hit.why.keyword_rank) ? " by keywords and meaning" : " by meaning only";
+    const byMeaning = hits.some((hit) => "meaning_rank" in hit.why);
+    const how = !byMeaning ? "" : hits.some((hit) => hit.why.keyword_rank) ? " by keywords and meaning" : " by meaning only";
     const summary = n ? `${n}${n === SEARCH_LIMIT ? "+" : ""} ${n === 1 ? "passage" : "passages"}${how} · ${took}` : `No passages found · ${took}`;
     const correction = result.corrected && [
       "Showing results for ",
@@ -2013,20 +2123,20 @@ function showPrefs(prefs) {
   renderSteer(prefs.steer);
   renderFeedback(prefs, state.relatedTerms, state.relatedLanes);
   rememberLikes(prefs);
-  paintLikes();
+  paintMarks();
 }
 
-function paintLikes() {
+function paintMarks() {
   for (const card of document.querySelectorAll("#related-lanes .hit")) {
-    const on = likeWanted.get(card.dataset.key) ?? state.likedIds.has(card.dataset.key);
-    const button = card.querySelector("button.like");
-    button.setAttribute("aria-pressed", String(on));
-    button.title = on ? "Showing more passages like this one. Click to stop." : LIKE_TITLE;
+    const mark = markOf(card.dataset.key);
+    card.classList.toggle("liked", mark === "more");
+    card.classList.toggle("avoided", mark === "less");
   }
 }
 
 function rememberLikes(prefs) {
   state.likedIds = new Map(prefs.liked.map((d) => [passageKey(d), d.id]));
+  state.avoidedKeys = new Set(prefs.dismissed.filter((d) => d.avoid).map(passageKey));
 }
 
 // The steer line: clauses as in a search, kept with the task. Enter saves; Escape undoes the edit.
@@ -2055,36 +2165,43 @@ async function saveSteer(event) {
 
 const passageFields = (hit, lane) => ({ lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
 
-async function dismiss(hit, lane, element, avoid = false) {
+async function dismiss(hit, lane, element) {
   element?.remove();
-  await changePrefs("POST", "/feedback", { action: avoid ? "avoid" : "dismiss", ...passageFields(hit, lane) });
+  await changePrefs("POST", "/feedback", { action: "dismiss", ...passageFields(hit, lane) });
 }
 
-// The ↑ button changes at once and the server catches up. Clicks on one passage go to the server
-// in turn, since unliking needs the id that liking it gave.
-const likeRequests = new Map(); // "path:line" -> the latest request for it
-const likeWanted = new Map(); // "path:line" -> whether it should be liked, while requests are on their way
+// More like this and Less like this show on the card at once, as its colour, and the server
+// catches up. Choices for one passage go to the server in turn, since taking a mark back needs
+// what the server answered when it was made.
+const markRequests = new Map(); // "path:line" -> the latest request for it
+const markWanted = new Map(); // "path:line" -> "more", "less" or null, while requests are on their way
 
-async function likeHit(hit, lane) {
+const serverMark = (key) => (state.likedIds.has(key) ? "more" : state.avoidedKeys.has(key) ? "less" : null);
+const markOf = (key) => (markWanted.has(key) ? markWanted.get(key) : serverMark(key));
+
+async function markHit(hit, lane, mark) {
   const key = passageKey(hit);
-  const on = !(likeWanted.get(key) ?? state.likedIds.has(key));
-  likeWanted.set(key, on);
-  paintLikes();
-  const previous = likeRequests.get(key);
+  markWanted.set(key, mark);
+  paintMarks();
+  const previous = markRequests.get(key);
   const request = (async () => {
     await previous?.catch(() => {});
-    const id = state.likedIds.get(key);
-    if (on === Boolean(id)) return; // the server has it so already
-    await changePrefs("POST", "/feedback", on ? { action: "like", ...passageFields(hit, lane) } : { action: "unlike", id });
+    const now = serverMark(key);
+    if (now === mark) return;
+    const fields = passageFields(hit, lane);
+    if (now === "more" && mark === null) await changePrefs("POST", "/feedback", { action: "unlike", id: state.likedIds.get(key) });
+    if (now === "less") await changePrefs("POST", "/feedback", { action: "restore", path: hit.path, text: hit.text });
+    if (mark === "more") await changePrefs("POST", "/feedback", { action: "like", ...fields });
+    if (mark === "less") await changePrefs("POST", "/feedback", { action: "avoid", ...fields }); // this also takes back a like
   })();
-  likeRequests.set(key, request);
+  markRequests.set(key, request);
   try {
     await request;
   } finally {
-    if (likeRequests.get(key) === request) {
-      likeRequests.delete(key);
-      likeWanted.delete(key);
-      paintLikes(); // what the server has, also after a failure
+    if (markRequests.get(key) === request) {
+      markRequests.delete(key);
+      markWanted.delete(key);
+      paintMarks(); // what the server has, also after a failure
     }
   }
 }
@@ -2126,6 +2243,39 @@ function hideSearchDoc(path) {
   settingChanged("search");
 }
 
+const MAX_HIDDEN_PASSAGES = 100;
+
+function cleanHiddenPassages(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((d) => d && typeof d.path === "string" && Number.isInteger(d.start_line)).slice(0, MAX_HIDDEN_PASSAGES)
+    .map((d) => ({ path: d.path, start_line: d.start_line, end_line: Number.isInteger(d.end_line) ? d.end_line : d.start_line, text: String(d.text ?? "") }));
+}
+
+function setHiddenPassages(list) {
+  state.hiddenPassages = list;
+  saveTaskView();
+  renderHiddenDocs();
+}
+
+// Hidden passages are left out by the page, which asks for that many more results to make up.
+function hideSearchPassage(hit) {
+  if (state.hiddenPassages.length >= MAX_HIDDEN_PASSAGES) {
+    flash(`You can hide up to ${MAX_HIDDEN_PASSAGES} passages. Bring one back first.`);
+    return;
+  }
+  const text = hit.text.replace(/\s+/g, " ").trim().slice(0, 200);
+  setHiddenPassages([...state.hiddenPassages, { path: hit.path, start_line: hit.start_line, end_line: hit.end_line, text }]);
+  for (const card of document.querySelectorAll("#search-results .hit")) {
+    if (card.dataset.key === passageKey(hit)) card.remove();
+  }
+  settingChanged("search");
+}
+
+function showSearchPassage(key) {
+  setHiddenPassages(state.hiddenPassages.filter((d) => passageKey(d) !== key));
+  settingChanged("search");
+}
+
 function showSearchDoc(path) {
   setHiddenDocs([...state.hiddenDocs].filter((p) => p !== path));
   settingChanged("search");
@@ -2134,20 +2284,41 @@ function showSearchDoc(path) {
 function renderHiddenDocs() {
   const drawer = $("#search-hidden");
   const paths = [...state.hiddenDocs].sort();
-  drawer.hidden = !paths.length;
+  const passages = state.hiddenPassages;
+  drawer.hidden = !paths.length && !passages.length;
+  const openLink = (path, d) => h("button", {
+    class: "feedback-open",
+    title: d ? `Open this document at line ${d.start_line + 1}` : "Open this document",
+    onclick: () => openFile(path, d ? { line: d.start_line, start: d.start_line, end: d.end_line } : null).catch(fail),
+  }, d ? `${path}:${d.start_line + 1}` : path);
   drawer.replaceChildren(
-    sectionHead("Hidden documents", "Documents you've hidden from Search for this task. This browser remembers them.",
-      h("button", { class: "tune-reset", type: "button", title: "Bring back every hidden document.", onclick: () => {
+    sectionHead("Hidden in Search", "Documents and passages you've hidden from Search for this task. This browser remembers them.",
+      h("button", { class: "tune-reset", type: "button", title: "Bring back everything you've hidden.", onclick: () => {
+        state.hiddenPassages = [];
         setHiddenDocs([]);
         settingChanged("search");
-      } }, "Show all"), ` · ${paths.length}`),
+      } }, "Show all"), ` · ${paths.length + passages.length}`),
     h("div", { class: "tune-body" },
-      h("ul", { class: "feedback-list" }, paths.map((path) =>
-        h("li", { class: "feedback-item" },
-          h("div", { class: "feedback-head" },
-            h("button", { class: "feedback-open", title: "Open this document", onclick: () => openFile(path).catch(fail) }, path),
-            h("button", { class: "undo", title: "Bring this document back into Search.", onclick: () => showSearchDoc(path) }, "Show again"),
-          ))))),
+      paths.length > 0 && [
+        h("div", { class: "tune-group" }, "Documents"),
+        h("ul", { class: "feedback-list" }, paths.map((path) =>
+          h("li", { class: "feedback-item" },
+            h("div", { class: "feedback-head" },
+              openLink(path),
+              h("button", { class: "undo", title: "Bring this document back into Search.", onclick: () => showSearchDoc(path) }, "Show again"),
+            )))),
+      ],
+      passages.length > 0 && [
+        h("div", { class: "tune-group" }, "Passages"),
+        h("ul", { class: "feedback-list" }, [...passages].reverse().map((d) =>
+          h("li", { class: "feedback-item" },
+            h("div", { class: "feedback-head" },
+              openLink(d.path, d),
+              h("button", { class: "undo", title: "Bring this passage back into Search.", onclick: () => showSearchPassage(passageKey(d)) }, "Show again"),
+            ),
+            h("div", { class: "feedback-text" }, d.text.length > 160 ? `${d.text.slice(0, 160).trimEnd()}…` : d.text)))),
+      ],
+    ),
   );
 }
 
@@ -2190,7 +2361,7 @@ function renderFeedback(prefs, terms, lanes) {
 
   const laneTitles = new Map(lanes.map((l) => [l.name, l.title]));
   const counted = Object.entries(prefs.feedback).filter(([, [adds, dismisses]]) => adds || dismisses);
-  const added = Math.max(counted.reduce((sum, [, [adds]]) => sum + adds, 0) - prefs.liked.length, 0); // a ↑ also counts for its lane
+  const added = Math.max(counted.reduce((sum, [, [adds]]) => sum + adds, 0) - prefs.liked.length, 0); // More like this also counts for its lane
   const summary = [
     prefs.liked.length && `${prefs.liked.length} more of this`,
     prefs.dismissed.length - avoided && `${prefs.dismissed.length - avoided} removed`,
@@ -2217,7 +2388,7 @@ function renderFeedback(prefs, terms, lanes) {
   };
   const dismissed = [...prefs.dismissed].reverse().map((d) => passageItem("removed", d,
     h("button", { class: "undo", title: "Let this passage appear again.", onclick: (e) => undoFeedback("restore", d.id, e.target.closest("li")).catch(fail) }, "Show again"),
-    d.avoid && h("span", { class: "feedback-tag", title: "You clicked ⊘ on this passage, so passages close to it in meaning are removed too." }, "⊘ and nearby passages")));
+    d.avoid && h("span", { class: "feedback-tag", title: "You chose Less like this for this passage, so passages close to it in meaning are removed too." }, "Less like this")));
   const liked = [...prefs.liked].reverse().map((d) => passageItem("liked", d,
     h("button", { class: "undo", title: "Stop looking for more passages like this one.", onclick: (e) => undoFeedback("unlike", d.id, e.target.closest("li")).catch(fail) }, "Stop")));
   const excludedDocs = [...prefs.excluded_docs].reverse().map((path) =>
@@ -2233,7 +2404,7 @@ function renderFeedback(prefs, terms, lanes) {
       h("button", { class: "chip-x", title: "Use this keyword again.", onclick: () => termAction(state.relatedTerms.find((t) => t.term === term), term, "unignore").catch(fail) }, "×"),
     );
   const laneCounts = counted.map(([lane, [adds, dismisses]]) =>
-    `${laneTitles.get(lane) ?? lane} (${[adds && `${adds} ${prefs.liked.length ? "added or ↑" : "added"}`, dismisses && `${dismisses} removed`].filter(Boolean).join(", ")})`);
+    `${laneTitles.get(lane) ?? lane} (${[adds && `${adds} ${prefs.liked.length ? "added or liked" : "added"}`, dismisses && `${dismisses} removed`].filter(Boolean).join(", ")})`);
 
   drawer.replaceChildren(
     sectionHead("Your changes", "Everything you've told Related about this task. It stays when you edit the task's text.",
@@ -2246,15 +2417,15 @@ function renderFeedback(prefs, terms, lanes) {
       }, "Remove all changes"), summary.length ? ` · ${summary.join(" · ")}` : ""),
     h("div", { class: "tune-body" },
       empty && h("p", { class: "feedback-note" },
-        "No changes for this task yet. This list will show passages you add (+) or want more of (↑), passages and documents you remove (×, ⊘, ⊠), your word rules and keywords you stop using. They stay when you edit the task's text."),
+        "No changes for this task yet. This list will show passages you add or want more or less of, passages and documents you hide, your word rules and keywords you stop using. They stay when you edit the task's text."),
       liked.length > 0 && [
         h("div", { class: "tune-group" }, "More of this"),
-        h("p", { class: "feedback-note" }, "Related looks for more passages like these, in meaning and in keywords. They aren't part of your task. \"How strong ↑ is\" in Adjustments sets how much they count."),
+        h("p", { class: "feedback-note" }, "Related looks for more passages like these, in meaning and in keywords. They aren't part of your task. \"How strong More like this is\" in Adjustments sets how much they count."),
         h("ul", { class: "feedback-list" }, liked),
       ],
       dismissed.length > 0 && [
         h("div", { class: "tune-group" }, "Removed passages"),
-        h("p", { class: "feedback-note" }, "These passages won't appear again. A passage marked ⊘ takes nearby passages with it. \"How near for ⊘\" and \"Effect of removed passages\" in Adjustments control this."),
+        h("p", { class: "feedback-note" }, "These passages won't appear again. A passage marked Less like this takes nearby passages with it. \"How near for Less like this\" and \"Effect of removed passages\" in Adjustments control this."),
         h("ul", { class: "feedback-list" }, dismissed),
       ],
       excludedDocs.length > 0 && [
@@ -2880,6 +3051,7 @@ function bind() {
   bindResizers();
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
   bindTaskTabs();
+  bindHitMenu();
   $("#reader-add").addEventListener("click", addReaderSelection);
   $("#conflict-load").addEventListener("click", () => resolveConflict(false).catch(fail));
   $("#conflict-keep").addEventListener("click", () => resolveConflict(true).catch(fail));

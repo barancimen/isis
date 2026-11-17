@@ -162,7 +162,7 @@ class VisitorStore(TaskStore):
     def save_prefs(self, name: str, prefs) -> None:
         self.workspaces.check_room()
         if len(prefs.liked) > self.limits.max_liked:
-            raise TaskError(f"you can use ↑ on at most {self.limits.max_liked} passages per task", 403)
+            raise TaskError(f"you can choose More like this for at most {self.limits.max_liked} passages per task", 403)
         prefs.dismissed = prefs.dismissed[-MAX_DISMISSED:]
         path = self._existing_meta_path(name)
         before = path.stat().st_size if path.exists() else 0

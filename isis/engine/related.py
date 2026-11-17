@@ -105,12 +105,12 @@ class RelatedConfig:
         "Lower it to move results closer to your notes. At 0, collected passages aren't used.",
     )
     like_weight: float = tunable(
-        1.0, label="How strong ↑ is", group=QUERY, min=0.0, max=3.0, step=0.1,
-        help="When you click ↑ on a result, Related looks for more passages like it. "
+        1.0, label="How strong More like this is", group=QUERY, min=0.0, max=3.0, step=0.1,
+        help="When you choose More like this for a result, Related looks for more passages like it. "
         "This sets how strong that pull is, in meaning and in keywords.\n"
-        "At 1, each passage with ↑ counts the same as all of your task.\n"
-        "Raise it to move results closer to the passages with ↑.\n"
-        "Lower it to keep results closer to your task. At 0, ↑ has no effect.",
+        "At 1, each passage marked this way counts the same as all of your task.\n"
+        "Raise it to move results closer to those passages.\n"
+        "Lower it to keep results closer to your task. At 0, More like this has no effect.",
     )
     bm25_k1: float = tunable(
         K1, label="Words used many times", group=KEYWORDS, min=0.0, max=3.0, step=0.1,
@@ -168,8 +168,8 @@ class RelatedConfig:
         "In tests, this also pushed good results down.",
     )
     avoid_z: float = tunable(
-        3.5, label="How near for ⊘", group=FILTER, min=0.5, max=6.0, step=0.1,
-        help="When you click ⊘ on a result, it's removed along with passages close to it in meaning. "
+        3.5, label="How near for Less like this", group=FILTER, min=0.5, max=6.0, step=0.1,
+        help="When you choose Less like this for a result, it's removed along with passages close to it in meaning. "
         "This sets how close they must be, as a meaning score measured from the removed passage.\n"
         "Raise it to remove only the closest passages.\n"
         "Lower it to remove more passages.",

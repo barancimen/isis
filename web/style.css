@@ -14,6 +14,10 @@
   --active-line: rgba(0, 0, 0, 0.025);
   --added: rgba(47, 111, 115, 0.16);
   --danger: #8f2a23;
+  --liked-bg: #e9f3e4;
+  --liked-border: #b5d3aa;
+  --avoided-bg: #f8e9e6;
+  --avoided-border: #e3bbb3;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color-scheme: light dark;
 }
@@ -35,6 +39,10 @@
     --active-line: rgba(255, 255, 255, 0.03);
     --added: rgba(111, 183, 185, 0.18);
     --danger: #ee8a80;
+    --liked-bg: #1d2a1d;
+    --liked-border: #3f5e3c;
+    --avoided-bg: #2e1f1d;
+    --avoided-border: #6a3e38;
   }
 }
 
@@ -326,11 +334,53 @@ body.dragging-task, body.dragging-task * { cursor: grabbing !important; user-sel
   text-underline-offset: 2px;
 }
 .hit-title:hover { text-decoration-color: currentColor; }
-.hit-actions { display: flex; gap: 4px; }
-.hit-actions button { padding: 0 7px; font-size: 13.5px; }
+/* Passages marked More like this and Less like this, until the next refresh. */
+.hit.liked { background: var(--liked-bg); border-color: var(--liked-border); }
+.hit.avoided { background: var(--avoided-bg); border-color: var(--avoided-border); }
+.hit-actions { display: flex; gap: 4px; align-self: center; }
+.hit-actions button { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; font-size: 13px; background: var(--bg); }
+.hit-actions button:hover { background: var(--panel-2); }
 .hit-actions .add { color: var(--accent); border-color: var(--accent); }
-.hit-actions .avoid, .hit-actions .exclude-doc { color: var(--danger); }
-.hit-actions .like[aria-pressed="true"] { background: var(--panel-2); border-color: var(--fg); font-weight: 700; }
+.hit-actions .hit-menu-btn { color: var(--muted); padding: 1px 6px; }
+.hit-actions .hit-menu-btn[aria-expanded="true"] { background: var(--panel-2); border-color: var(--faint); }
+
+.icon { display: inline-flex; flex: none; }
+.icon svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.icon-more svg, .icon-less svg { stroke-width: 2.6; }
+.icon circle { fill: currentColor; stroke: none; }
+
+/* A result's menu. */
+.hit-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 210px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 13.5px;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--panel-2); outline: none; }
+.menu-item .menu-label { flex: 1; }
+.menu-item .icon-more { color: #3d7a35; }
+.menu-item .icon-less, .menu-item .icon-hide, .menu-item .icon-doc { color: var(--danger); }
+.menu-item .icon-check { color: var(--accent); }
+.menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+@media (prefers-color-scheme: dark) {
+  .menu-item .icon-more { color: #8fcf84; }
+  .hit-menu { box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5); }
+}
 .hit-loc { color: var(--faint); font-size: 12.5px; }
 .hit-body { margin-top: 4px; font-size: 14px; }
 .hit-body p { margin: 0 0 4px; overflow-wrap: anywhere; text-align: justify; }

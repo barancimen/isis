@@ -46,6 +46,12 @@ def opens_as_shown(page, card) -> str:
     return shown[:40]
 
 
+def menu_pick(page, card, label):
+    """Open a result's ⋯ menu and choose an item by its label."""
+    card.locator(".hit-menu-btn").click()
+    page.locator(".hit-menu .menu-item", has_text=label).click()
+
+
 def refresh_related(page):
     """Press Refresh, and wait for the new suggestions."""
     expect(page.locator("#related-refresh")).to_be_enabled(timeout=30000)
@@ -245,7 +251,7 @@ def main() -> None:
         page.locator("#related-terms .chip .chip-x").first.click()
         expect(page.locator("#related-terms .chip.ignored")).to_have_count(1, timeout=30000)
         with page.expect_response(lambda r: r.url.endswith("/feedback"), timeout=30000):
-            page.locator("#related-lanes .hit button.dismiss").first.click()
+            menu_pick(page, page.locator("#related-lanes .hit").first, "Hide this passage")
         page.wait_for_timeout(200)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["ignored"] and meta["dismissed"]
@@ -294,17 +300,17 @@ def main() -> None:
         expect(page.locator("#steer-error")).to_contain_text("⚠", timeout=30000)
         page.press("#steer-input", "Escape")
         expect(page.locator("#steer-input")).to_have_value("-squid +/[Ww]hal/")
-        page.locator("#related-lanes .hit button.avoid").first.click()
+        menu_pick(page, page.locator("#related-lanes .hit").first, "Less like this")
         expect(page.locator("#related-feedback .feedback-item[data-kind=removed] .feedback-tag")).to_have_count(1, timeout=30000)
         meta = json.loads((TASKS / ".meta" / f"{WHALES}.json").read_text())
         assert meta["steer"] == "-squid +/[Ww]hal/" and meta["dismissed"][0]["avoid"] is True
         shot(page, "steer.png")
-        step("related steer line: -squid excludes, +/regex/ requires, a bad pattern is reported; ⊘ avoided a passage")
+        step("related steer line: -squid excludes, +/regex/ requires, a bad pattern is reported; Less like this avoided a passage")
 
         card = page.locator("#related-lanes .hit").first
         title = card.locator(".hit-loc").inner_text()
-        card.locator("button.like").click()
-        marked = page.locator("#related-lanes .hit", has=page.locator("button.like[aria-pressed=true]"))
+        menu_pick(page, card, "More like this")
+        marked = page.locator("#related-lanes .hit.liked")
         expect(marked).to_have_count(1, timeout=30000)
         assert marked.locator(".hit-loc").inner_text() == title  # it stays on show
         expect(page.locator("#related-feedback .feedback-item[data-kind=liked]")).to_have_count(1)
@@ -315,7 +321,7 @@ def main() -> None:
             page.locator("#related-feedback > summary").click()
         page.locator("#related-feedback .feedback-item[data-kind=liked] .undo").click()
         expect(marked).to_have_count(0, timeout=30000)
-        step("↑ more like this: marks a suggestion, stays on show, stays out of the document; the drawer undoes it")
+        step("More like this: marks a suggestion, stays on show, stays out of the document; the drawer undoes it")
 
         (TASKS / f"{WHALES}.md").write_text("edited elsewhere\n")
         page.click("#task-editor .cm-content")
@@ -613,7 +619,7 @@ def main() -> None:
         expect(page.locator("#search-results .hit").first).to_be_visible(timeout=10000)
         expect(page.locator("#search-hidden")).to_be_hidden()
         hidden_path = page.locator("#search-results .hit").first.get_attribute("data-path")
-        page.locator("#search-results .hit").first.locator(".exclude-doc").click()
+        menu_pick(page, page.locator("#search-results .hit").first, "Hide this whole document")
         expect(page.locator("#search-hidden")).to_be_visible()
         page.wait_for_timeout(800)  # the search runs again
         expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]')).to_have_count(0)
@@ -630,7 +636,7 @@ def main() -> None:
         expect(page.locator(f'#search-results .hit[data-path="{hidden_path}"]').first).to_be_visible(timeout=10000)
         step("Search can hide a whole document, remembers it after a reload, and can bring it back")
 
-        page.locator("#search-results .hit").first.locator(".exclude-doc").click()
+        menu_pick(page, page.locator("#search-results .hit").first, "Hide this whole document")
         expect(page.locator("#search-hidden")).to_be_visible()
         page.fill("#search-input", "whale +/sp.rm/")
         page.click("#search-tune > summary")
