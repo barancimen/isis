@@ -2841,29 +2841,33 @@ function renderFolderTree(panel, folders, sources) {
   const isOpen = (key, byDefault) => unfolded[key] ?? byDefault;
   const count = (n) => n.toLocaleString();
   const rows = [];
-  let serial = 0;
 
   const row = ({ depth, key, label, documents, checked, partial = false, title, onchange, children }) => {
-    const id = `${panel}-tree-${serial++}`;
-    const input = h("input", { type: "checkbox", id, "data-key": key, checked, onchange });
+    const input = h("input", { type: "checkbox", "data-key": key, checked, onchange, "aria-label": label });
     input.indeterminate = partial;
     const open = children && isOpen(key, depth === 0);
-    rows.push(h("div", { class: `tree-row depth-${depth}`, style: `--depth: ${depth}`, title },
+    // Only the box ticks. A click anywhere else on the line of a node with something under it folds or unfolds it.
+    rows.push(h("div", {
+      class: `tree-row depth-${depth}${children ? " foldable" : ""}`, style: `--depth: ${depth}`, title,
+      onclick: children ? (e) => { if (!e.target.closest("input, button")) foldTreeNode(panel, key, !open); } : undefined,
+    },
       input,
       h("span", { class: "tree-name" },
         children
           ? h("button", {
             type: "button", class: "tree-fold", "data-fold": key, "aria-expanded": String(open),
-            "aria-label": `${open ? "Fold" : "Unfold"} ${typeof label === "string" ? label : "this"}`,
+            "aria-label": `${open ? "Fold" : "Unfold"} ${label}`,
             onclick: () => foldTreeNode(panel, key, !open),
           }, open ? "▾" : "▸")
           : h("span", { class: "tree-fold" }),
-        h("label", { for: id }, label)),
+        h("span", { class: "tree-label" }, label)),
       documents !== undefined ? h("span", { class: "source-count" }, count(documents)) : h("span")));
     if (open) children();
   };
 
-  for (const folder of folders.length ? folders : [...archives]) {
+  // Archives first, then the folders with nothing under them.
+  const order = folders.length ? [...folders.filter((f) => archives.has(f)), ...folders.filter((f) => !archives.has(f))] : [...archives];
+  for (const folder of order) {
     if (!archives.has(folder)) {
       row({
         depth: 0, key: folder, label: folder, checked: !state.skipped.has(folder),

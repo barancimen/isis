@@ -257,12 +257,14 @@ body.dragging-task, body.dragging-task * { cursor: grabbing !important; user-sel
 .folder-picks .toggle { overflow-wrap: anywhere; white-space: normal; }
 .tree { display: flex; flex-direction: column; padding: 4px 10px 8px; }
 .tree-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 6px; padding: 1px 0; font-size: 13px; color: var(--muted); }
-.tree-row > input { margin: 0; accent-color: var(--accent); }
+.tree-row > input { margin: 0; accent-color: var(--accent); cursor: pointer; }
 .tree-row.depth-0 { color: var(--fg); font-weight: 600; }
 .tree-row.depth-0 + .tree-row.depth-0 { margin-top: 2px; }
-.tree-row:has(> input:not(:checked):not(:indeterminate)) .tree-name label { color: var(--faint); }
+.tree-row:has(> input:not(:checked):not(:indeterminate)) .tree-label { color: var(--faint); }
+.tree-row.foldable { cursor: pointer; user-select: none; }
+.tree-row.foldable:hover .tree-label { text-decoration: underline; text-decoration-color: var(--border); }
 .tree-name { display: flex; align-items: center; gap: 2px; padding-left: calc(var(--depth) * 18px); min-width: 0; }
-.tree-name label { cursor: pointer; overflow-wrap: anywhere; }
+.tree-label { overflow-wrap: anywhere; }
 .tree-fold { flex: none; width: 16px; padding: 0; border: none; background: none; color: var(--faint); font-size: 11px; line-height: 1.4; text-align: center; }
 button.tree-fold { cursor: pointer; }
 button.tree-fold:hover { color: var(--fg); }
