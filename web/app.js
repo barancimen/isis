@@ -2787,19 +2787,10 @@ function renderFolderPicks(folders, sources = state.sources) {
     // A source that has no documents now is forgotten, but not while its archive lists none yet.
     if (kind === undefined ? !folders.includes(name) : archives.has(folder) && !ids.has(name)) state.skipped.delete(name);
   }
-  // An archive's folder has no box of its own: its Sources chips say what of it is included.
-  const plain = folders.filter((name) => !archives.has(name));
   for (const panel of ["search", "related"]) {
     const box = $(`#${panel}-folders`);
     box.hidden = folders.length < 2 && !sources.length;
-    box.replaceChildren(
-      plain.length > 1 || (plain.length && archives.size) ? h("div", { class: "folder-row" }, plain.map((name) =>
-        h("label", { class: "toggle", title: `Include the folder ${name} in Search and Related. Untick to leave it out of both.` },
-          h("input", { type: "checkbox", "data-key": name, checked: !state.skipped.has(name), onchange: (e) => setSkipped([name], !e.target.checked) }),
-          name,
-        ))) : "",
-      ...[...archives].map((folder) => renderSources(folder, sources.filter((s) => s.folder === folder))),
-    );
+    box.replaceChildren(box.hidden ? "" : renderFolderTree(panel, folders, sources));
   }
 }
 
@@ -2837,78 +2828,112 @@ function skippedChanged() {
   settingChanged("related");
 }
 
-const SOURCES_CLOSED_KEY = "sources-closed";
+const TREE_CLOSED_KEY = "folders-closed"; // "1" once the drawer is closed
+const TREE_OPEN_KEY = "folder-tree-open"; // node key -> whether it is unfolded, where that isn't the default
 
-// One drawer per archive, open unless closed here before. It has a chip for all the sources, one for
-// each lane and, where a lane has several kinds of document, one for each kind. As with the tag chips
-// of osiris, unticking "All sources" unticks every chip, so that a few can be ticked again.
-function renderSources(folder, sources) {
-  const lanes = new Map();
-  for (const s of sources) lanes.set(s.lane, [...(lanes.get(s.lane) ?? []), s]);
-  const off = Boolean(folder) && state.skipped.has(folder);
-  const on = new Set(off ? [] : sources.filter((s) => !state.skipped.has(s.id)).map((s) => s.id));
-  const where = folder ? ` in ${folder}` : "";
+// One drawer with a tree of what Search and Related look in: every corpus folder, and under an osiris
+// archive its lanes, and under a lane its kinds of document. The tick boxes are in one column, and
+// only the names are indented. An archive's box ticks or unticks everything in it, a lane's box all
+// its kinds, and a box shows a mix when only some of what is under it is ticked.
+function renderFolderTree(panel, folders, sources) {
+  const archives = new Set(sources.map((s) => s.folder));
+  const unfolded = store.json(TREE_OPEN_KEY, {});
+  const isOpen = (key, byDefault) => unfolded[key] ?? byDefault;
   const count = (n) => n.toLocaleString();
-  const chip = ({ key, label, documents, checked, partial = false, kind = false, title, onchange }) => {
-    const input = h("input", { type: "checkbox", "data-key": key, checked, onchange });
+  const rows = [];
+  let serial = 0;
+
+  const row = ({ depth, key, label, documents, checked, partial = false, title, onchange, children }) => {
+    const id = `${panel}-tree-${serial++}`;
+    const input = h("input", { type: "checkbox", id, "data-key": key, checked, onchange });
     input.indeterminate = partial;
-    return h("label", { class: `source-chip${kind ? " kind" : ""}${partial ? " partial" : ""}`, title },
-      input, label, documents !== undefined && h("span", { class: "source-count" }, count(documents)));
+    const open = children && isOpen(key, depth === 0);
+    rows.push(h("div", { class: `tree-row depth-${depth}`, style: `--depth: ${depth}`, title },
+      input,
+      h("span", { class: "tree-name" },
+        children
+          ? h("button", {
+            type: "button", class: "tree-fold", "data-fold": key, "aria-expanded": String(open),
+            "aria-label": `${open ? "Fold" : "Unfold"} ${typeof label === "string" ? label : "this"}`,
+            onclick: () => foldTreeNode(panel, key, !open),
+          }, open ? "▾" : "▸")
+          : h("span", { class: "tree-fold" }),
+        h("label", { for: id }, label)),
+      documents !== undefined ? h("span", { class: "source-count" }, count(documents)) : h("span")));
+    if (open) children();
   };
-  const turn = (ids, include) => {
-    const next = new Set(on);
-    for (const id of ids) include ? next.add(id) : next.delete(id);
-    setSourcesOn(folder, sources, next);
-  };
-  const status = on.size === sources.length ? "all" : on.size ? `${on.size} of ${sources.length}` : "none";
-  const closed = new Set(store.json(SOURCES_CLOSED_KEY, []));
-  const drawer = h("details", { class: "tune sources", "data-folder": folder },
-    h("summary", {}, h("span", { class: "tune-title" }, `Sources${where}`, " ", h("span", { class: "tune-count" }, `· ${status}`))),
-    h("div", { class: "source-list" },
-      h("div", { class: "source-lane" }, chip({
-        key: `${folder}/*`,
-        label: h("b", {}, "All sources"),
-        checked: on.size === sources.length,
-        partial: on.size > 0 && on.size < sources.length,
-        title: `Ticked, every source${where} is in Search and Related. Untick it to leave them all out, then tick the ones you want.`,
-        onchange: () => setSourcesOn(folder, sources, new Set(on.size === sources.length ? [] : sources.map((s) => s.id))),
-      })),
-      [...lanes.values()].map((kinds) => {
-        const ids = kinds.map((s) => s.id);
-        const ticked = ids.filter((id) => on.has(id)).length;
-        const name = kinds[0].lane_name;
-        const single = kinds.length === 1 && kinds[0].name === name;
-        const laneChip = chip({
-          key: kinds[0].lane,
-          label: name,
-          documents: kinds.reduce((n, s) => n + s.documents, 0),
-          checked: ticked === ids.length,
-          partial: ticked > 0 && ticked < ids.length,
-          title: single ? `Include ${name} in Search and Related.` : `Include every kind of document from ${name} in Search and Related.`,
-          onchange: () => turn(ids, ticked < ids.length),
-        });
-        if (single) return laneChip;
-        return h("div", { class: "source-lane" }, laneChip, kinds.map((s) => chip({
-          key: s.id,
-          label: s.name,
-          documents: s.documents,
-          checked: on.has(s.id),
-          kind: true,
-          title: `Include ${s.name} from ${name} in Search and Related.`,
-          onchange: (e) => turn([s.id], e.target.checked),
-        })));
-      })));
-  drawer.open = !closed.has(folder);
-  drawer.addEventListener("toggle", () => {
-    const now = new Set(store.json(SOURCES_CLOSED_KEY, []));
-    if (drawer.open) now.delete(folder);
-    else now.add(folder);
-    store.set(SOURCES_CLOSED_KEY, JSON.stringify([...now]));
-    for (const other of document.querySelectorAll(".sources")) {
-      if (other !== drawer && other.dataset.folder === folder) other.open = drawer.open;
+
+  for (const folder of folders.length ? folders : [...archives]) {
+    if (!archives.has(folder)) {
+      row({
+        depth: 0, key: folder, label: folder, checked: !state.skipped.has(folder),
+        title: `Include the folder ${folder} in Search and Related. Untick to leave it out of both.`,
+        onchange: (e) => setSkipped([folder], !e.target.checked),
+      });
+      continue;
     }
+    const mine = sources.filter((s) => s.folder === folder);
+    const off = Boolean(folder) && state.skipped.has(folder);
+    const on = new Set(off ? [] : mine.filter((s) => !state.skipped.has(s.id)).map((s) => s.id));
+    const turn = (ids, include) => {
+      const next = new Set(on);
+      for (const id of ids) include ? next.add(id) : next.delete(id);
+      setSourcesOn(folder, mine, next);
+    };
+    const lanes = new Map();
+    for (const s of mine) lanes.set(s.lane, [...(lanes.get(s.lane) ?? []), s]);
+    row({
+      depth: 0, key: `${folder}/*`, label: folder || "Sources", documents: mine.reduce((n, s) => n + s.documents, 0),
+      checked: on.size === mine.length, partial: on.size > 0 && on.size < mine.length,
+      title: `An osiris archive. Ticked, all of it is in Search and Related. Untick it to leave everything in it out, then tick the sources you want.`,
+      onchange: () => setSourcesOn(folder, mine, new Set(on.size === mine.length ? [] : mine.map((s) => s.id))),
+      children: () => {
+        for (const kinds of lanes.values()) {
+          const ids = kinds.map((s) => s.id);
+          const ticked = ids.filter((id) => on.has(id)).length;
+          const name = kinds[0].lane_name;
+          const single = kinds.length === 1 && kinds[0].name === name;
+          row({
+            depth: 1, key: kinds[0].lane, label: name, documents: kinds.reduce((n, s) => n + s.documents, 0),
+            checked: ticked === ids.length, partial: ticked > 0 && ticked < ids.length,
+            title: single ? `Include ${name} in Search and Related.` : `Include every kind of document from ${name} in Search and Related.`,
+            onchange: () => turn(ids, ticked < ids.length),
+            children: single ? undefined : () => {
+              for (const s of kinds) {
+                row({
+                  depth: 2, key: s.id, label: s.name, documents: s.documents, checked: on.has(s.id),
+                  title: `Include ${s.name} from ${name} in Search and Related.`,
+                  onchange: (e) => turn([s.id], e.target.checked),
+                });
+              }
+            },
+          });
+        }
+      },
+    });
+  }
+
+  const leaves = [...folders.filter((f) => !archives.has(f)).map((f) => !state.skipped.has(f)),
+    ...sources.map((s) => !(s.folder && state.skipped.has(s.folder)) && !state.skipped.has(s.id))];
+  const included = leaves.filter(Boolean).length;
+  const status = included === leaves.length ? "all" : included ? "some left out" : "none";
+  const drawer = h("details", { class: "tune folder-tree" },
+    h("summary", {}, h("span", { class: "tune-title" }, archives.size ? "Folders and sources" : "Folders", " ",
+      h("span", { class: "tune-count" }, `· ${status}`))),
+    h("div", { class: "tree" }, rows));
+  drawer.open = store.get(TREE_CLOSED_KEY) !== "1";
+  drawer.addEventListener("toggle", () => {
+    store.set(TREE_CLOSED_KEY, drawer.open ? "" : "1");
+    for (const other of document.querySelectorAll(".folder-tree")) if (other !== drawer) other.open = drawer.open;
   });
   return drawer;
+}
+
+// Folds or unfolds a node in both panels' trees, keeping the focus on its button.
+function foldTreeNode(panel, key, open) {
+  store.set(TREE_OPEN_KEY, JSON.stringify({ ...store.json(TREE_OPEN_KEY, {}), [key]: open }));
+  renderFolderPicks(state.folders);
+  [...document.querySelectorAll(`#${panel}-folders button[data-fold]`)].find((b) => b.dataset.fold === key)?.focus();
 }
 
 // ---------- index status ----------
