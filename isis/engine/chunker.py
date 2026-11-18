@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import bisect
 import json
+import math
 import re
 from dataclasses import dataclass
+from itertools import accumulate
 from urllib.parse import urlsplit
 
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
@@ -20,6 +23,8 @@ MAX_FRONT_MATTER = 200  # lines, as in the page (reflow.js)
 
 TARGET_WORDS = 100  # short neighbouring paragraphs under one heading are merged up to this size
 MAX_WORDS = 180  # longer runs are cut at line boundaries, so most passages fit in 256 model tokens
+MIN_WORDS = 30  # a shorter passage joins a neighbour under the same heading, if it has one
+OVERLAP_WORDS = 20  # each piece of a cut run starts with about this many words from the end of the one before
 
 
 @dataclass(frozen=True)
@@ -152,17 +157,72 @@ def _blocks(lines: list[str]):
         yield section, heading, run, len(lines) - 1
 
 
-def _cut(lines: list[str], words: list[int], start: int, end: int, max_words: int):
-    """Cut lines [start, end] into pieces of at most max_words, trimming blank lines at the edges."""
-    pieces, s, total = [], start, 0
-    for n in range(start, end + 1):
-        if total and total + words[n] > max_words:
-            pieces.append((s, n - 1))
-            s, total = n, 0
-        total += words[n]
-    pieces.append((s, end))
+def _absorb_short(groups: list[list], min_words: int) -> None:
+    """Merge each group of fewer than min_words into the next group under the same heading, or else
+    the one before it: a byline, a date, a heading written as plain text or a one-line reply then
+    joins the text around it. A section with nothing else in it keeps its short group."""
+    i = 0
+    while i < len(groups):
+        g = groups[i]
+        if g[4] < min_words:
+            if i + 1 < len(groups) and groups[i + 1][0] == g[0]:
+                nxt = groups.pop(i + 1)
+                g[3], g[4] = nxt[3], g[4] + nxt[4]
+                continue  # it may still be short
+            if i and groups[i - 1][0] == g[0]:
+                prev = groups[i - 1]
+                prev[3], prev[4] = g[3], prev[4] + g[4]
+                groups.pop(i)
+                continue
+        i += 1
 
-    for s, e in pieces:
+
+def _cut(lines: list[str], words: list[int], start: int, end: int, max_words: int, min_words: int = 0,
+         overlap_words: int = 0):
+    """Cut lines [start, end] into pieces of about max_words at most, trimming blank lines at the edges.
+
+    A run too long for one piece is cut into as few pieces as fit, at the line boundaries that make
+    them most nearly equal, so no short tail is left over. Each piece after the first then starts
+    with about overlap_words from the end of the piece before it. A piece still shorter than
+    min_words (where single lines are very long) joins its smaller neighbour."""
+    total = sum(words[start:end + 1])
+    min_words, overlap = min(min_words, max_words // 4), min(overlap_words, max_words // 4)
+    if total <= max_words:
+        spans = [[start, end]]
+    else:
+        count = math.ceil(total / (max_words - overlap))
+        upto = list(accumulate(words[start:end + 1]))  # words up to and including each line
+        cuts: list[int] = []  # the lines (from start) that end a piece
+        for k in range(1, count):
+            goal = total * k / count
+            j = bisect.bisect_left(upto, goal)
+            near = [i for i in (j - 1, j) if 0 <= i < len(upto) - 1 and (not cuts or (i > cuts[-1] and upto[i] > upto[cuts[-1]]))]
+            if near:
+                cuts.append(min(near, key=lambda i: abs(upto[i] - goal)))
+        spans, s = [], start
+        for c in cuts:
+            spans.append([s, start + c])
+            s = start + c + 1
+        spans.append([s, end])
+
+        def size(span):
+            return sum(words[span[0]:span[1] + 1])
+
+        while len(spans) > 1 and min(map(size, spans)) < min_words:
+            i = min(range(len(spans)), key=lambda i: size(spans[i]))
+            j = i - 1 if i == len(spans) - 1 or (i and size(spans[i - 1]) <= size(spans[i + 1])) else i + 1
+            a, b = sorted((i, j))
+            spans[a:b + 1] = [[spans[a][0], spans[b][1]]]
+
+        own_starts = [span[0] for span in spans]  # before any piece takes lines from the one before it
+        for floor, span in zip(own_starts, spans[1:]):
+            taken, n = 0, span[0] - 1
+            while n >= floor and taken < overlap and taken + words[n] <= overlap * 1.5:
+                taken += words[n]
+                n -= 1
+            span[0] = n + 1 if taken else span[0]
+
+    for s, e in spans:
         while s < e and not lines[s].strip():
             s += 1
         while e > s and not lines[e].strip():
@@ -171,12 +231,15 @@ def _cut(lines: list[str], words: list[int], start: int, end: int, max_words: in
 
 
 def chunk_markdown(
-    path: str, content: str, target_words: int = TARGET_WORDS, max_words: int = MAX_WORDS
+    path: str, content: str, target_words: int = TARGET_WORDS, max_words: int = MAX_WORDS,
+    min_words: int = MIN_WORDS, overlap_words: int = OVERLAP_WORDS,
 ) -> list[Passage]:
     """Split a markdown file into passages with 0-based line ranges.
 
-    Paragraphs under the same heading are merged while the total stays within `target_words`
-    (pass 0 to keep every paragraph separate), and anything over `max_words` is cut.
+    Paragraphs under the same heading are merged while the total stays within `target_words`, and
+    what is still under `min_words` joins a neighbour under the same heading (pass target_words=0
+    to keep every paragraph separate). Anything over `max_words` is cut into nearly equal pieces
+    that overlap by about `overlap_words`.
     """
     lines = split_lines(content)
     words = [len(line.split()) for line in lines]
@@ -191,10 +254,12 @@ def chunk_markdown(
             last[3], last[4] = end, last[4] + size
         else:
             groups.append([section, heading, start, end, size])
+    if target_words:
+        _absorb_short(groups, min(min_words, target_words // 2))
 
     passages = []
     for _, heading, start, end, _ in groups:
-        for s, e in _cut(lines, words, start, end, max_words):
+        for s, e in _cut(lines, words, start, end, max_words, min_words if target_words else 0, overlap_words):
             text = "\n".join(lines[s : e + 1])
             if HAS_WORD.search(text):
                 passages.append(Passage(path, heading, s, e, text))

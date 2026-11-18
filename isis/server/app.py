@@ -25,7 +25,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from ..engine import native
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
+from ..engine.related import PRESETS as RELATED_PRESETS
 from ..engine.related import RelatedConfig, TaskPrefs
+from ..engine.search import PRESETS as SEARCH_PRESETS
 from ..engine.search import QueryError, SearchConfig, correct_query, pattern_time_limit
 from .public import PATTERN_SECONDS, PublicGuard, Workspaces
 from .tasks import Conflict, TaskError, TaskStore
@@ -286,8 +288,9 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 
     @app.get("/api/params")
     def params():
-        """The parameters the page may tune, with defaults, ranges and help."""
-        return {"search": specs(SearchConfig), "related": specs(RelatedConfig)}
+        """The parameters the page may tune, with defaults, ranges and help, and the built-in presets."""
+        return {"search": specs(SearchConfig), "related": specs(RelatedConfig),
+                "presets": {"search": SEARCH_PRESETS, "related": RELATED_PRESETS}}
 
     @app.get("/api/search")
     def search(q: str = "", mode: Literal["lexical", "hybrid"] = "lexical", limit: int = 50, params: str = "", skip: str = "", hide: str = "", as_typed: bool = False, model: str = ""):

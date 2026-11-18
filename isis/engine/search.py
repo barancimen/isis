@@ -118,6 +118,16 @@ class SearchConfig:
     )
 
 
+# Built-in presets of the Search panel, as in related.PRESETS.
+PRESETS = [
+    {
+        "name": "Close matches",
+        "help": "Ranks results by meaning alone. Paste a passage into the box to find the passages closest to it.",
+        "params": {"keyword_weight": 0.0},
+    },
+]
+
+
 @dataclass
 class SnippetLine:
     line: int

@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from isis import client
 from isis.engine.index import Engine
+from isis.engine.related import PRESETS as RELATED_PRESETS
+from isis.engine.search import PRESETS as SEARCH_PRESETS
 from isis.engine.semantic import HashEmbedder
 from isis.server.app import create_app
 from isis.server.tasks import TaskStore
@@ -191,3 +193,13 @@ def test_an_older_server_is_named_as_such(capsys, tmp_path):
     finally:
         server.shutdown()
     assert code == 2 and "older than this command" in err
+
+
+def test_a_built_in_preset_with_settings_on_top(app, capsys, tmp_path):
+    (tmp_path / "notes.md").write_text(TASK)
+    close = {**RELATED_PRESETS[0]["params"], "z_strong": 1.0}
+    page = app.post("/api/related", json={"text": TASK, "params": close}).json()
+    mine = json.loads(run(capsys, "related", "notes.md", "--preset", RELATED_PRESETS[0]["name"].upper(), "-p", '{"z_strong": 1.0}', "--json")[1])
+    assert mine["lanes"] == page["lanes"]
+    code, _, err = run(capsys, "search", "whale", "--preset", "nope")
+    assert code == 2 and "no built-in preset named 'nope'" in err and SEARCH_PRESETS[0]["name"] in err

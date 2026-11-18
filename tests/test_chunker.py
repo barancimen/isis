@@ -26,7 +26,7 @@ def test_short_paragraphs_merge_within_a_section_only():
 
 def test_merging_stops_at_target_size():
     md = "\n\n".join(["word " * 8] * 3)
-    assert [(p.start_line, p.end_line) for p in chunk_markdown("a.md", md, target_words=16)] == [(0, 2), (4, 4)]
+    assert [(p.start_line, p.end_line) for p in chunk_markdown("a.md", md, target_words=16, min_words=0)] == [(0, 2), (4, 4)]
 
 
 def test_sections_with_the_same_title_stay_apart():
@@ -34,10 +34,28 @@ def test_sections_with_the_same_title_stay_apart():
     assert [p.text for p in chunk_markdown("a.md", md)] == ["a", "b"]
 
 
-def test_long_runs_are_cut_at_line_boundaries():
+def test_long_runs_are_cut_into_nearly_equal_pieces():
     md = "\n".join(f"w{i} " * 10 for i in range(7))  # 7 lines of 10 words, one paragraph
-    passages = chunk_markdown("a.md", md, max_words=30)
-    assert [(p.start_line, p.end_line) for p in passages] == [(0, 2), (3, 5), (6, 6)]
+    passages = chunk_markdown("a.md", md, max_words=30, overlap_words=0)
+    assert [(p.start_line, p.end_line) for p in passages] == [(0, 1), (2, 4), (5, 6)]  # 20, 30, 20: no short tail
+
+
+def test_pieces_of_a_cut_run_overlap():
+    md = "\n".join(f"w{i} " * 10 for i in range(20))  # 200 words in lines of 10
+    assert [(p.start_line, p.end_line) for p in chunk_markdown("a.md", md)] == [(0, 9), (8, 19)]
+
+
+def test_a_piece_too_short_to_stand_alone_joins_its_neighbour():
+    md = "long " * 170 + "\n" + "tail " * 15  # one very long line, then a short one
+    assert [(p.start_line, p.end_line) for p in chunk_markdown("a.md", md)] == [(0, 1)]
+
+
+def test_short_paragraphs_join_their_neighbours():
+    body = "\n".join(["word " * 12] * 13)  # 156 words: too many to merge with up to the target
+    md = f"# Essay\nBy Someone\n\n{body}\n\nParis, 2019\n\n# Notes\nA short note."
+    assert spans(chunk_markdown("a.md", md))[0][1:3] == (1, 17)  # the byline, the body and the signature
+    assert spans(chunk_markdown("a.md", md))[1] == ("Notes", 20, 20, "A short note.")  # nothing else under its heading
+    assert len(chunk_markdown("a.md", md, target_words=0)) == 4  # every paragraph on its own
 
 
 def test_code_fences_keep_blank_lines_and_hashes():

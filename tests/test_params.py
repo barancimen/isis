@@ -8,7 +8,9 @@ from conftest import write_corpus
 
 from isis.engine.index import Engine
 from isis.engine.params import configure, specs
+from isis.engine.related import PRESETS as RELATED_PRESETS
 from isis.engine.related import RelatedConfig, TaskPrefs
+from isis.engine.search import PRESETS as SEARCH_PRESETS
 from isis.engine.search import SearchConfig
 from isis.engine.semantic import HashEmbedder
 
@@ -23,6 +25,17 @@ def test_specs_describe_every_tunable_value():
     assert {"k1", "b", "keyword_weight", "typo_weight"} <= {s["name"] for s in specs(SearchConfig)}
     for spec in [*specs(RelatedConfig), *specs(SearchConfig)]:
         assert spec.get("choices") or spec["min"] <= spec["default"] <= spec["max"], spec["name"]
+
+
+@pytest.mark.parametrize("cls, presets", [(SearchConfig, SEARCH_PRESETS), (RelatedConfig, RELATED_PRESETS)])
+def test_presets_name_known_settings_within_their_ranges(cls, presets):
+    by_name = {s["name"]: s for s in specs(cls)}
+    assert presets and len({p["name"] for p in presets}) == len(presets)
+    for preset in presets:
+        assert preset["name"] and preset["help"]
+        for name, value in preset["params"].items():
+            spec = by_name[name]
+            assert spec["min"] <= value <= spec["max"] and value != spec["default"], (preset["name"], name)
 
 
 def test_configure_applies_valid_overrides_and_ignores_the_rest():
@@ -45,6 +58,7 @@ def test_configure_applies_valid_overrides_and_ignores_the_rest():
 def test_api_lists_params_and_accepts_overrides(client):
     body = client.get("/api/params").json()
     assert {"search", "related"} <= set(body) and any(p["name"] == "rrf_k" for p in body["search"])
+    assert [p["name"] for p in body["presets"]["related"]] == [p["name"] for p in RELATED_PRESETS]
 
     plain = client.get("/api/search", params={"q": "whale ship", "mode": "hybrid"}).json()["hits"]
     tuned = client.get(

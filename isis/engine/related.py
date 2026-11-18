@@ -257,6 +257,31 @@ class RelatedConfig:
     )
 
 
+# Built-in presets of the Related panel: a name, the page's description of it, and the settings it
+# changes (named as in /api/params). The others keep their defaults.
+PRESETS = [
+    {
+        "name": "Close matches",
+        "help": "Fewer results that are all very close to your task in meaning. "
+        "Results aren't made to differ from each other, so passages that say nearly the same thing appear together.",
+        "params": {
+            "z_strong": 3.75, "z_weak": 2.75, "bridge_z": 3.0, "max_per_file": 3, "total_slots": 15,
+            "mmr_lambda.core": 0.95, "mmr_lambda.hidden": 0.9, "mmr_lambda.bridges": 0.9, "mmr_lambda.gaps": 0.9,
+        },
+    },
+    {
+        "name": "Abstract links",
+        "help": "More results that relate to your task loosely or in other words, often sharing only a word or two with it. "
+        "Each result in a group comes from a different document.",
+        "params": {
+            "z_strong": 3.0, "lexical_top": 100, "bm25_k1": 0.5, "hidden_z": 2.25, "hidden_max_obviousness": 0.4,
+            "bridge_z": 3.0, "gap_z": 3.0, "max_per_file": 1, "total_slots": 30, "min_slots": 3,
+            "mmr_lambda.core": 0.6, "mmr_lambda.bridges": 0.7, "mmr_lambda.gaps": 0.7,
+        },
+    },
+]
+
+
 def _norm(s: str) -> str:
     return " ".join(s.lower().split())
 
@@ -502,7 +527,7 @@ class RelatedResult:
 def task_units(text: str) -> list[Unit]:
     return [
         Unit(p.heading, p.start_line, p.end_line, p.text)
-        for p in chunk_markdown("<task>", text, target_words=0, max_words=MAX_WORDS)
+        for p in chunk_markdown("<task>", text, target_words=0, max_words=MAX_WORDS, overlap_words=0)
     ]
 
 

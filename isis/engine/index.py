@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 INDEX_VERSION = 2
 FRONT_MATTER_CHARS = 65536  # enough to hold the frontmatter of any file
-CHUNKER_VERSION = 2  # raise it when files split differently: they are read again, and keep their embeddings
+CHUNKER_VERSION = 3  # raise it when files split differently: they are read again, and keep their embeddings
 TERMS_VERSION = 2  # raise it when text becomes terms differently: cached passages are split into terms again
 # (1: Snowball stems; 2: lowercase words)
 MARKDOWN = (".md", ".markdown")

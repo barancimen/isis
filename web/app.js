@@ -2599,35 +2599,59 @@ function settingsKey(settings) {
   return JSON.stringify({ ...settings, params, skipped: sortedList(settings.skipped), ignored: sortedList(settings.ignored), excluded_docs: sortedList(settings.excluded_docs), hidden_docs: sortedList(settings.hidden_docs) });
 }
 
+// Built-in presets come from the server with the sliders. They set only the sliders, so the folders,
+// the search box and the word rules stay as they are. A server without any shows none.
+function builtinPresets(kind) {
+  const list = state.paramSpecs.presets?.[kind];
+  return (Array.isArray(list) ? list : []).map((p) => ({ name: p.name, help: p.help, settings: { params: p.params ?? {} }, builtin: true }));
+}
+
+// The sliders that differ from their defaults, so that a slider moved back to its default still matches.
+function changedParams(kind, params) {
+  const specs = new Map(state.paramSpecs[kind].map((s) => [s.name, s]));
+  return Object.fromEntries(Object.entries(params ?? {}).filter(([name, value]) => specs.has(name) && value !== specs.get(name).default));
+}
+
 function renderPresets(kind) {
   const bar = $(`#${kind}-presets`);
   if (!bar) return;
-  const presets = state.presets[kind];
-  const key = settingsKey(currentSettings(kind));
-  const same = (preset) => settingsKey(preset.settings) === key;
-  const active = presets.find((p) => p.name === state.activePreset[kind]);
-  const showing = active && same(active) ? active : presets.find(same);
+  const own = state.presets[kind];
+  const builtin = builtinPresets(kind);
+  const current = currentSettings(kind);
+  const key = settingsKey(current);
+  const paramsKey = settingsKey({ params: changedParams(kind, current.params) });
+  const same = (preset) => preset.builtin ? settingsKey({ params: changedParams(kind, preset.settings.params) }) === paramsKey : settingsKey(preset.settings) === key;
+  const active = builtin.find((p) => p.name === state.activePreset[kind]) ?? own.find((p) => p.name === state.activePreset[kind]);
+  const showing = active && same(active) ? active : own.find(same) ?? builtin.find(same);
   if (showing) state.activePreset[kind] = showing.name;
   const named = showing ?? active;
+  const option = (p) => h("option", { value: p.name, title: p.help }, p.name);
   const select = h("select", {
     id: `${kind}-preset`,
-    title: "Choose a preset to restore all of its settings.",
+    title: "Choose a preset to restore its settings. A built-in preset sets only the sliders.",
     onchange: (e) => e.target.value && applyPreset(kind, e.target.value).catch(fail),
   },
-    !showing && h("option", { value: "" }, active ? `${active.name} (changed)` : presets.length ? "Current settings" : "No presets yet"),
-    presets.map((p) => h("option", { value: p.name }, p.name)));
+    !showing && h("option", { value: "" }, active ? `${active.name} (changed)` : own.length || builtin.length ? "Current settings" : "No presets yet"),
+    builtin.length ? [h("optgroup", { label: "Built in" }, builtin.map(option)), own.length > 0 && h("optgroup", { label: "Saved in this browser" }, own.map(option))] : own.map(option));
   select.value = showing?.name ?? "";
+  const deleteTitle = !named ? "Choose a preset to delete it." : named.builtin ? "Built-in presets can't be deleted." : `Delete the preset “${named.name}”. Your current settings stay as they are.`;
   bar.replaceChildren(
     h("label", { for: select.id }, "Preset"),
     select,
     h("button", { type: "button", class: "preset-save", title: `Save ${kind === "search" ? "the sliders, folders, hidden documents, Meaning button and search box" : "the sliders, folders, word rules, keywords not in use and removed documents"} under a name. Presets are saved in this browser.`, onclick: () => savePreset(kind).catch(fail) }, "Save"),
-    h("button", { type: "button", class: "preset-delete", title: named ? `Delete the preset “${named.name}”. Your current settings stay as they are.` : "Choose a preset to delete it.", disabled: !named, onclick: () => deletePreset(kind, named.name) }, "Delete"),
+    h("button", { type: "button", class: "preset-delete", title: deleteTitle, disabled: !named || named.builtin, onclick: () => deletePreset(kind, named.name) }, "Delete"),
   );
 }
 
 async function savePreset(kind) {
-  const name = prompt("Name for this preset", state.activePreset[kind] ?? "")?.trim().slice(0, 60);
+  const builtin = builtinPresets(kind);
+  const suggested = builtin.some((p) => p.name === state.activePreset[kind]) ? "" : state.activePreset[kind] ?? "";
+  const name = prompt("Name for this preset", suggested)?.trim().slice(0, 60);
   if (!name) return;
+  if (builtin.some((p) => p.name === name)) {
+    alert(`“${name}” is the name of a built-in preset. Choose another name.`);
+    return;
+  }
   const presets = state.presets[kind];
   const existing = presets.find((p) => p.name === name);
   if (existing && name !== state.activePreset[kind] && !confirm(`Replace the preset “${name}”?`)) return;
@@ -2644,13 +2668,18 @@ async function savePreset(kind) {
 }
 
 async function applyPreset(kind, name) {
-  const preset = state.presets[kind].find((p) => p.name === name);
+  const preset = builtinPresets(kind).find((p) => p.name === name) ?? state.presets[kind].find((p) => p.name === name);
   if (!preset) return;
   const { settings } = preset;
   const known = new Set(state.paramSpecs[kind].map((s) => s.name));
   state.params[kind] = Object.fromEntries(Object.entries(settings.params ?? {}).filter(([param]) => known.has(param)));
   saveParams();
   buildTuner(kind);
+  if (preset.builtin) {
+    state.activePreset[kind] = name;
+    settingChanged(kind);
+    return;
+  }
   const skippedBefore = settingsKey({ skipped: [...state.skipped] });
   state.skipped = new Set(settings.skipped ?? []);
   renderFolderPicks(state.folders);

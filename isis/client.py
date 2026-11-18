@@ -82,6 +82,7 @@ def _parser(command: str) -> argparse.ArgumentParser:
     shown = f"default {SEARCH_LIMIT}, as in the page" if command == "search" else "default all, as in the page"
     p.add_argument("-n", "--limit", type=int, metavar="N", help=f"show only the first N results ({shown})")
     p.add_argument("-p", "--params", metavar="JSON", help="settings for this call, as JSON or @file.json")
+    p.add_argument("--preset", metavar="NAME", help="start from this built-in preset of the page, with -p on top")
     p.add_argument("-o", "--output", metavar="FILE", help="also save the results (.json, .md or plain text)")
     p.add_argument("-q", "--quiet", action="store_true", help="print nothing (with -o)")
     p.add_argument("-l", "--files", action="store_true", help="print only the documents")
@@ -129,6 +130,17 @@ def _read_json(text: str) -> dict:
     if not isinstance(value, dict):
         raise Failure('the settings must be a JSON object, such as {"k1": 1.5}')
     return value
+
+
+def preset_params(name: str, presets: list[dict]) -> dict:
+    """The settings of the built-in preset with this name, in any case."""
+    for preset in presets:
+        if preset.get("name", "").casefold() == name.casefold():
+            return dict(preset.get("params") or {})
+    names = [f"'{p.get('name')}'" for p in presets]
+    known = f"The presets are {', '.join(names[:-1])} and {names[-1]}." if len(names) > 1 else \
+        f"The only preset is {names[0]}." if names else "This server has no built-in presets."
+    raise Failure(f"There's no built-in preset named '{name}'. {known}")
 
 
 def check_params(params: dict, specs: list[dict]) -> None:
@@ -298,8 +310,11 @@ def main(argv: list[str]) -> int:
         if a.limit is not None and a.limit < 1:
             raise Failure("-n needs a number of 1 or more")
         params = _read_json(a.params) if a.params else {}
-        if params:
-            check_params(params, fetch(a.server, "GET", "/api/params")[command])
+        if params or a.preset:
+            listing = fetch(a.server, "GET", "/api/params")
+            if a.preset:
+                params = {**preset_params(a.preset, listing.get("presets", {}).get(command, [])), **params}
+            check_params(params, listing[command])
         answer, groups = (run_search if command == "search" else run_related)(a, params)
         if a.output:
             save(a.output, answer, groups, a.files)
