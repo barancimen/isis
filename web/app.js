@@ -2495,7 +2495,11 @@ function paramRow(kind, spec) {
   const input = spec.type === "choice"
     ? h("select", {}, spec.choices.map((c) => h("option", { value: c, selected: c === value }, spec.choice_labels[c])))
     : h("input", { type: "range", min: spec.min, max: spec.max, step: spec.step, value });
+  // The track is drawn in style.css, which reads how far along it to fill from --fill, from 0 to 1.
+  const fill = () => spec.type !== "choice" && input.style.setProperty("--fill", (input.value - spec.min) / (spec.max - spec.min || 1));
+  fill();
   input.addEventListener("input", () => {
+    fill();
     const v = spec.type === "choice" ? input.value : Number(input.value);
     output.textContent = formatValue(spec, v);
     if (v === spec.default) delete state.params[kind][spec.name];
@@ -2720,6 +2724,20 @@ function resetParams(kind) {
   settingChanged(kind);
 }
 
+// A slider is centred on its row, which is the middle of the line box beside it, but digits sit above or
+// below that middle depending on the font. This moves the sliders by the difference, measured on the
+// font the numbers are drawn in on this computer, so they are level with the numbers.
+function levelSliders() {
+  const output = $(".tune-row output");
+  if (!output) return;
+  const style = getComputedStyle(output);
+  const ctx = document.createElement("canvas").getContext("2d");
+  ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const m = ctx.measureText("0123456789");
+  const shift = (m.fontBoundingBoxAscent - m.fontBoundingBoxDescent) / 2 - (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
+  if (Number.isFinite(shift)) document.documentElement.style.setProperty("--slider-shift", `${shift.toFixed(2)}px`);
+}
+
 async function loadParamSpecs() {
   state.paramSpecs = await api("GET", "api/params");
   for (const kind of ["search", "related"]) {
@@ -2730,6 +2748,7 @@ async function loadParamSpecs() {
   }
   saveParams();
   renderHiddenDocs();
+  document.fonts.ready.then(levelSliders);
 }
 
 // ---------- panels ----------

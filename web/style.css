@@ -6,7 +6,7 @@
   --fg: #131313;
   --muted: #353535;
   --faint: #575757;
-  --border: #c3c3c3;
+  --border: #999999;
   --accent: #b3121f;
   --accent-fg: #ffffff;
   --hit-line: rgba(0, 0, 0, 0.035);
@@ -34,7 +34,7 @@
     --fg: #f2f2f2;
     --muted: #d4d4d4;
     --faint: #adadad;
-    --border: #484848;
+    --border: #5e5e5e;
     --accent: #f07474;
     --accent-fg: #160b0b;
     --hit-line: rgba(255, 255, 255, 0.035);
@@ -449,10 +449,45 @@ button.tree-fold:hover { color: var(--fg); }
 .tune-row:not(.changed) .tune-default { visibility: hidden; }
 .tune-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 34px max-content; align-items: center; gap: 8px; font-size: 13px; }
 .tune-label { white-space: normal; overflow: visible; }
-.tune-row input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+/* The red fill runs to the middle of the handle, so the handle and the fill read as one shape. */
+.tune-row input[type="range"] {
+  --thumb: 12px;
+  --track: 6px;
+  --to: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--fill, 0));
+  position: relative;
+  top: var(--slider-shift, 0px); /* set by levelSliders in app.js */
+  width: 100%;
+  height: var(--thumb);
+  margin: 0;
+  background: none;
+  appearance: none;
+  cursor: pointer;
+}
+.tune-row input[type="range"]::-webkit-slider-runnable-track {
+  height: var(--track);
+  border: 1px solid transparent;
+  border-radius: calc(var(--track) / 2);
+  background:
+    linear-gradient(to right, var(--accent) var(--to), transparent 0) border-box,
+    linear-gradient(var(--bg), var(--bg)) padding-box,
+    linear-gradient(var(--faint), var(--faint)) border-box;
+}
+.tune-row input[type="range"]::-webkit-slider-thumb {
+  width: var(--thumb);
+  height: var(--thumb);
+  margin-top: calc((var(--track) - 2px - var(--thumb)) / 2);
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  appearance: none;
+}
+.tune-row input[type="range"]::-moz-range-track { box-sizing: border-box; height: var(--track); border: 1px solid var(--faint); border-radius: calc(var(--track) / 2); background: var(--bg); }
+.tune-row input[type="range"]::-moz-range-progress { height: var(--track); border-radius: calc(var(--track) / 2) 0 0 calc(var(--track) / 2); background: var(--accent); }
+.tune-row input[type="range"]::-moz-range-thumb { width: var(--thumb); height: var(--thumb); border: none; border-radius: 50%; background: var(--accent); }
 .tune-row select { grid-column: 2 / 4; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: calc(4px * var(--round)); }
 .tune-row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
-.tune-row.changed .tune-label, .tune-row.changed output { color: var(--accent); font-weight: 600; }
+/* A thin outline thickens the letters without widening them, as bold would, so the label doesn't wrap differently. */
+.tune-row.changed .tune-label, .tune-row.changed output { color: var(--accent); -webkit-text-stroke: 0.04em currentColor; }
 
 /* ---- feedback drawer ---- */
 
