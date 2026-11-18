@@ -2787,11 +2787,13 @@ function renderFolderPicks(folders, sources = state.sources) {
     // A source that has no documents now is forgotten, but not while its archive lists none yet.
     if (kind === undefined ? !folders.includes(name) : archives.has(folder) && !ids.has(name)) state.skipped.delete(name);
   }
+  // An archive's folder has no box of its own: its Sources chips say what of it is included.
+  const plain = folders.filter((name) => !archives.has(name));
   for (const panel of ["search", "related"]) {
     const box = $(`#${panel}-folders`);
     box.hidden = folders.length < 2 && !sources.length;
     box.replaceChildren(
-      folders.length > 1 ? h("div", { class: "folder-row" }, folders.map((name) =>
+      plain.length > 1 || (plain.length && archives.size) ? h("div", { class: "folder-row" }, plain.map((name) =>
         h("label", { class: "toggle", title: `Include the folder ${name} in Search and Related. Untick to leave it out of both.` },
           h("input", { type: "checkbox", "data-key": name, checked: !state.skipped.has(name), onchange: (e) => setSkipped([name], !e.target.checked) }),
           name,
@@ -2807,6 +2809,23 @@ function setSkipped(names, skip) {
     if (skip) state.skipped.add(name);
     else state.skipped.delete(name);
   }
+  skippedChanged();
+}
+
+// Includes exactly the sources in `on` of an archive's `sources`. With none, the archive's folder is
+// left out as a whole, so that a kind of document it gets later stays out too. An archive served
+// alone has no folder name to leave out, so then each of its sources is.
+function setSourcesOn(folder, sources, on) {
+  for (const s of sources) state.skipped.delete(s.id);
+  if (on.size === 0 && folder) state.skipped.add(folder);
+  else {
+    state.skipped.delete(folder);
+    for (const s of sources) if (!on.has(s.id)) state.skipped.add(s.id);
+  }
+  skippedChanged();
+}
+
+function skippedChanged() {
   saveSkipped();
   const focused = document.activeElement;
   const panel = focused?.closest?.(".folder-picks")?.id;
@@ -2818,55 +2837,73 @@ function setSkipped(names, skip) {
   settingChanged("related");
 }
 
-const SOURCES_OPEN_KEY = "sources-open";
+const SOURCES_CLOSED_KEY = "sources-closed";
 
-// One drawer per archive, with a box for each lane and, where a lane has several kinds of
-// document, one for each kind.
+// One drawer per archive, open unless closed here before. It has a chip for all the sources, one for
+// each lane and, where a lane has several kinds of document, one for each kind. As with the tag chips
+// of osiris, unticking "All sources" unticks every chip, so that a few can be ticked again.
 function renderSources(folder, sources) {
   const lanes = new Map();
   for (const s of sources) lanes.set(s.lane, [...(lanes.get(s.lane) ?? []), s]);
-  const left = sources.filter((s) => state.skipped.has(s.id));
-  const count = (n) => `${n.toLocaleString()} ${n === 1 ? "document" : "documents"}`;
   const off = Boolean(folder) && state.skipped.has(folder);
+  const on = new Set(off ? [] : sources.filter((s) => !state.skipped.has(s.id)).map((s) => s.id));
   const where = folder ? ` in ${folder}` : "";
-  const openKeys = new Set(store.json(SOURCES_OPEN_KEY, []));
+  const count = (n) => n.toLocaleString();
+  const chip = ({ key, label, documents, checked, partial = false, kind = false, title, onchange }) => {
+    const input = h("input", { type: "checkbox", "data-key": key, checked, onchange });
+    input.indeterminate = partial;
+    return h("label", { class: `source-chip${kind ? " kind" : ""}${partial ? " partial" : ""}`, title },
+      input, label, documents !== undefined && h("span", { class: "source-count" }, count(documents)));
+  };
+  const turn = (ids, include) => {
+    const next = new Set(on);
+    for (const id of ids) include ? next.add(id) : next.delete(id);
+    setSourcesOn(folder, sources, next);
+  };
+  const status = on.size === sources.length ? "all" : on.size ? `${on.size} of ${sources.length}` : "none";
+  const closed = new Set(store.json(SOURCES_CLOSED_KEY, []));
   const drawer = h("details", { class: "tune sources", "data-folder": folder },
-    h("summary", {},
-      h("span", { class: "tune-title" }, `Sources${where}`, " ",
-        h("span", { class: "tune-count" }, off ? "· folder left out" : left.length ? `· ${left.length} of ${sources.length} left out` : "· all")),
-      left.length > 0 && h("button", {
-        type: "button",
-        class: "tune-reset",
-        title: `Include every source${where} again.`,
-        onclick: (e) => { e.preventDefault(); setSkipped(left.map((s) => s.id), false); },
-      }, "Include all")),
-    h("div", { class: `source-list${off ? " off" : ""}` },
+    h("summary", {}, h("span", { class: "tune-title" }, `Sources${where}`, " ", h("span", { class: "tune-count" }, `· ${status}`))),
+    h("div", { class: "source-list" },
+      h("div", { class: "source-lane" }, chip({
+        key: `${folder}/*`,
+        label: h("b", {}, "All sources"),
+        checked: on.size === sources.length,
+        partial: on.size > 0 && on.size < sources.length,
+        title: `Ticked, every source${where} is in Search and Related. Untick it to leave them all out, then tick the ones you want.`,
+        onchange: () => setSourcesOn(folder, sources, new Set(on.size === sources.length ? [] : sources.map((s) => s.id))),
+      })),
       [...lanes.values()].map((kinds) => {
-        const skipped = kinds.filter((s) => state.skipped.has(s.id)).length;
-        const total = kinds.reduce((n, s) => n + s.documents, 0);
-        const laneBox = h("input", {
-          type: "checkbox",
-          "data-key": kinds[0].lane,
-          checked: skipped < kinds.length,
-          disabled: off,
-          onchange: () => setSkipped(kinds.map((s) => s.id), skipped === 0),
+        const ids = kinds.map((s) => s.id);
+        const ticked = ids.filter((id) => on.has(id)).length;
+        const name = kinds[0].lane_name;
+        const single = kinds.length === 1 && kinds[0].name === name;
+        const laneChip = chip({
+          key: kinds[0].lane,
+          label: name,
+          documents: kinds.reduce((n, s) => n + s.documents, 0),
+          checked: ticked === ids.length,
+          partial: ticked > 0 && ticked < ids.length,
+          title: single ? `Include ${name} in Search and Related.` : `Include every kind of document from ${name} in Search and Related.`,
+          onchange: () => turn(ids, ticked < ids.length),
         });
-        laneBox.indeterminate = skipped > 0 && skipped < kinds.length;
-        const single = kinds.length === 1 && kinds[0].name === kinds[0].lane_name;
-        return h("div", { class: "source-lane" },
-          h("label", { class: "toggle", title: `Include ${kinds[0].lane_name} in Search and Related. Untick to leave it out of both.` },
-            laneBox, kinds[0].lane_name, h("span", { class: "source-count" }, count(total))),
-          !single && h("div", { class: "source-kinds" }, kinds.map((s) =>
-            h("label", { class: "toggle", title: `Include ${s.name} (${kinds[0].lane_name}) in Search and Related. Untick to leave them out of both.` },
-              h("input", { type: "checkbox", "data-key": s.id, checked: !state.skipped.has(s.id), disabled: off, onchange: (e) => setSkipped([s.id], !e.target.checked) }),
-              s.name, h("span", { class: "source-count" }, count(s.documents))))));
+        if (single) return laneChip;
+        return h("div", { class: "source-lane" }, laneChip, kinds.map((s) => chip({
+          key: s.id,
+          label: s.name,
+          documents: s.documents,
+          checked: on.has(s.id),
+          kind: true,
+          title: `Include ${s.name} from ${name} in Search and Related.`,
+          onchange: (e) => turn([s.id], e.target.checked),
+        })));
       })));
-  drawer.open = openKeys.has(folder);
+  drawer.open = !closed.has(folder);
   drawer.addEventListener("toggle", () => {
-    const open = new Set(store.json(SOURCES_OPEN_KEY, []));
-    if (drawer.open) open.add(folder);
-    else open.delete(folder);
-    store.set(SOURCES_OPEN_KEY, JSON.stringify([...open]));
+    const now = new Set(store.json(SOURCES_CLOSED_KEY, []));
+    if (drawer.open) now.delete(folder);
+    else now.add(folder);
+    store.set(SOURCES_CLOSED_KEY, JSON.stringify([...now]));
     for (const other of document.querySelectorAll(".sources")) {
       if (other !== drawer && other.dataset.folder === folder) other.open = drawer.open;
     }
