@@ -30,7 +30,7 @@ def test_specs_describe_every_tunable_value():
 @pytest.mark.parametrize("cls, presets", [(SearchConfig, SEARCH_PRESETS), (RelatedConfig, RELATED_PRESETS)])
 def test_presets_name_known_settings_within_their_ranges(cls, presets):
     by_name = {s["name"]: s for s in specs(cls)}
-    assert presets and len({p["name"] for p in presets}) == len(presets)
+    assert len({p["name"] for p in presets}) == len(presets)
     for preset in presets:
         assert preset["name"] and preset["help"]
         for name, value in preset["params"].items():

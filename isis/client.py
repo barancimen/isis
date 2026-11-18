@@ -132,14 +132,14 @@ def _read_json(text: str) -> dict:
     return value
 
 
-def preset_params(name: str, presets: list[dict]) -> dict:
+def preset_params(name: str, presets: list[dict], command: str = "") -> dict:
     """The settings of the built-in preset with this name, in any case."""
     for preset in presets:
         if preset.get("name", "").casefold() == name.casefold():
             return dict(preset.get("params") or {})
     names = [f"'{p.get('name')}'" for p in presets]
     known = f"The presets are {', '.join(names[:-1])} and {names[-1]}." if len(names) > 1 else \
-        f"The only preset is {names[0]}." if names else "This server has no built-in presets."
+        f"The only preset is {names[0]}." if names else f"isis {command} has no built-in presets."
     raise Failure(f"There's no built-in preset named '{name}'. {known}")
 
 
@@ -313,7 +313,7 @@ def main(argv: list[str]) -> int:
         if params or a.preset:
             listing = fetch(a.server, "GET", "/api/params")
             if a.preset:
-                params = {**preset_params(a.preset, listing.get("presets", {}).get(command, [])), **params}
+                params = {**preset_params(a.preset, listing.get("presets", {}).get(command, []), command), **params}
             check_params(params, listing[command])
         answer, groups = (run_search if command == "search" else run_related)(a, params)
         if a.output:

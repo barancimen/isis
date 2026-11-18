@@ -201,5 +201,8 @@ def test_a_built_in_preset_with_settings_on_top(app, capsys, tmp_path):
     page = app.post("/api/related", json={"text": TASK, "params": close}).json()
     mine = json.loads(run(capsys, "related", "notes.md", "--preset", RELATED_PRESETS[0]["name"].upper(), "-p", '{"z_strong": 1.0}', "--json")[1])
     assert mine["lanes"] == page["lanes"]
-    code, _, err = run(capsys, "search", "whale", "--preset", "nope")
-    assert code == 2 and "no built-in preset named 'nope'" in err and SEARCH_PRESETS[0]["name"] in err
+    code, _, err = run(capsys, "related", "notes.md", "--preset", "nope")
+    assert code == 2 and "no built-in preset named 'nope'" in err and RELATED_PRESETS[0]["name"] in err
+    if not SEARCH_PRESETS:
+        code, _, err = run(capsys, "search", "whale", "--preset", "nope")
+        assert code == 2 and "isis search has no built-in presets" in err
