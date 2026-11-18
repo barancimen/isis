@@ -9,7 +9,7 @@
   --border: #999999;
   --accent: #b3121f;
   --accent-fg: #ffffff;
-  --hit-line: rgba(0, 0, 0, 0.035);
+  --hit-line: rgba(0, 0, 0, 0.075);
   --mark: rgba(230, 40, 50, 0.2);
   --selection: rgba(0, 0, 0, 0.13);
   --active-line: rgba(0, 0, 0, 0.025);
@@ -37,7 +37,7 @@
     --border: #5e5e5e;
     --accent: #f07474;
     --accent-fg: #160b0b;
-    --hit-line: rgba(255, 255, 255, 0.035);
+    --hit-line: rgba(255, 255, 255, 0.09);
     --mark: rgba(255, 90, 90, 0.28);
     --selection: rgba(255, 255, 255, 0.16);
     --active-line: rgba(255, 255, 255, 0.03);

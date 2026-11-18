@@ -644,6 +644,12 @@ function taskExtensions() {
     markdown({ extensions: envelopedBlocks }),
     syntaxHighlighting(markdownStyle),
     theme,
+    // The cursor stays on show in red while you work elsewhere, so you can see where an added passage goes.
+    // It blinks only while the task has the focus.
+    EditorView.theme({
+      "&:not(.cm-focused) .cm-cursorLayer": { animation: "none !important" }, // CodeMirror sets the blink inline
+      "&:not(.cm-focused) .cm-cursorLayer .cm-cursor": { display: "block", borderLeftColor: "var(--accent)" },
+    }),
     reflow({ editable: true }),
     findInPane("Find in this task"),
     addedSlot.field,
