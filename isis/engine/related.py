@@ -106,7 +106,7 @@ class RelatedConfig:
         "Lower it to move results closer to your notes. At 0, collected passages aren't used.",
     )
     like_weight: float = tunable(
-        1.0, label="How strong More like this is", group=QUERY, min=0.0, max=3.0, step=0.1,
+        1.0, label="How strong *More like this* is", group=QUERY, min=0.0, max=3.0, step=0.1,
         help="When you choose More like this for a result, Related looks for more passages like it. "
         "This sets how strong that pull is, in meaning and in keywords.\n"
         "At 1, each passage marked this way counts the same as all of your task.\n"
@@ -171,47 +171,47 @@ class RelatedConfig:
         "In tests, this also pushed good results down.",
     )
     avoid_z: float = tunable(
-        3.5, label="How near for Less like this", group=FILTER, min=0.5, max=6.0, step=0.1,
+        3.5, label="How near for *Less like this*", group=FILTER, min=0.5, max=6.0, step=0.1,
         help="When you choose Less like this for a result, it's removed along with passages close to it in meaning. "
         "This sets how close they must be, as a meaning score measured from the removed passage.\n"
         "Raise it to remove only the closest passages.\n"
         "Lower it to remove more passages.",
     )
     rrf_k: int = tunable(
-        30, label="Good rank in both lists (Best results)", group=LANES_GROUP, min=1, max=100, step=1,
+        30, label="Good rank in both lists (*Best results*)", group=LANES_GROUP, min=1, max=100, step=1,
         help="\"Best results\" mixes each passage's keyword rank and meaning rank.\n"
         "Raise it to put passages that rank well in both lists first.\n"
         "Lower it to put the top passages of each list first, even if they rank badly in the other.",
     )
     unembedded_weight: float = tunable(
-        1.0, label="No meaning data (Best results)", group=LANES_GROUP, min=0.0, max=3.0, step=0.1,
+        1.0, label="No meaning data (*Best results*)", group=LANES_GROUP, min=0.0, max=3.0, step=0.1,
         help="Some passages may have no meaning data, so they have no meaning rank. "
         "Their keyword rank stands in for it, multiplied by this number.\n"
         "Raise it to rank these passages higher.\n"
         "Lower it to rank them lower. At 0, only their keyword rank counts.",
     )
     hidden_z: float = tunable(
-        2.5, label="Meaning score (Same meaning, different words)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
+        2.5, label="Meaning score (*Same meaning, different words*)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
         help="The meaning score a passage needs to join \"Same meaning, different words\".\n"
         "Raise it for fewer passages that are closer in meaning.\n"
         "Lower it to let more passages in.",
     )
     hidden_max_obviousness: float = tunable(
-        0.3, label="Keyword limit (Same meaning, different words)", group=LANES_GROUP, min=0.0, max=1.0, step=0.05,
+        0.3, label="Keyword limit (*Same meaning, different words*)", group=LANES_GROUP, min=0.0, max=1.0, step=0.05,
         help="The highest keyword score a passage can have and still join \"Same meaning, different words\". "
         "It's a share of the best keyword result's score, so 0.3 means 30%.\n"
         "Raise it to allow more words from your task in this group.\n"
         "Lower it to require more different wording.",
     )
     bridge_z: float = tunable(
-        1.5, label="Meaning score (Connections between topics)", group=LANES_GROUP, min=0.0, max=4.0, step=0.1,
+        1.5, label="Meaning score (*Connections between topics*)", group=LANES_GROUP, min=0.0, max=4.0, step=0.1,
         help="The meaning score a passage needs for two topics to join \"Connections between topics\". "
         "A passage with this score also passes the filter.\n"
         "Raise it for fewer passages that are more clearly related to both topics.\n"
         "Lower it to let more passages in, which can also add results to other groups.",
     )
     gap_z: float = tunable(
-        2.5, label="Meaning score (Small topics)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
+        2.5, label="Meaning score (*Small topics*)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
         help="The meaning score a passage needs to join a topic in \"Small topics\".\n"
         "Raise it for fewer passages that are closer to the topic.\n"
         "Lower it to let more passages in.",

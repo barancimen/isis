@@ -2343,6 +2343,11 @@ async function undoFeedback(action, id, element) {
 // ---------- feedback drawer ----------
 
 // The header of a collapsible section. Its reset button stays in view when the section is closed.
+// Text where *a name* refers to a button, menu item or group on the page, which shows in italics.
+function emphasized(text) {
+  return text.split(/\*([^*]+)\*/).map((part, i) => (i % 2 ? h("em", {}, part) : part));
+}
+
 function sectionHead(name, title, reset, count = "") {
   return h("summary", { title }, h("span", { class: "tune-title" }, name, h("span", { class: "tune-count" }, count)), reset);
 }
@@ -2420,12 +2425,12 @@ function renderFeedback(prefs, terms, lanes) {
         "No changes for this task yet. This list will show passages you add or want more or less of, passages and documents you hide, your word rules and keywords you stop using. They stay when you edit the task's text."),
       liked.length > 0 && [
         h("div", { class: "tune-group" }, "More of this"),
-        h("p", { class: "feedback-note" }, "Related looks for more passages like these, in meaning and in keywords. They aren't part of your task. \"How strong More like this is\" in Adjustments sets how much they count."),
+        h("p", { class: "feedback-note" }, emphasized("Related looks for more passages like these, in meaning and in keywords. They aren't part of your task. “How strong *More like this* is” in *Adjustments* sets how much they count.")),
         h("ul", { class: "feedback-list" }, liked),
       ],
       dismissed.length > 0 && [
         h("div", { class: "tune-group" }, "Removed passages"),
-        h("p", { class: "feedback-note" }, "These passages won't appear again. A passage marked Less like this takes nearby passages with it. \"How near for Less like this\" and \"Effect of removed passages\" in Adjustments control this."),
+        h("p", { class: "feedback-note" }, emphasized("These passages won't appear again. A passage marked *Less like this* takes nearby passages with it. “How near for *Less like this*” and “Effect of removed passages” in *Adjustments* control this.")),
         h("ul", { class: "feedback-list" }, dismissed),
       ],
       excludedDocs.length > 0 && [
@@ -2516,7 +2521,7 @@ function paramRow(kind, spec) {
   }, "default");
   input.id = `tune-${kind}-${spec.name}`;
   return h("div", { class: "tune-row", "data-name": spec.name, title: `${spec.help}\nThe default is ${spec.choice_labels?.[spec.default] ?? formatValue(spec, spec.default)}.` },
-    h("label", { class: "tune-label", for: input.id }, spec.label), input, spec.type === "choice" ? null : output, toDefault);
+    h("label", { class: "tune-label", for: input.id }, emphasized(spec.label)), input, spec.type === "choice" ? null : output, toDefault);
 }
 
 // Move a slider as if by hand.
@@ -2559,8 +2564,8 @@ function buildTuner(kind) {
         onclick: () => resetParams(kind),
       }, "Set all to default")),
     h("div", { class: "tune-body" },
-      h("p", { class: "feedback-note" },
-        `Move a slider to change the results and hover over it to see what it does. The “default” button puts it back. ${kind === "search" ? "Results update right away." : "Click Refresh to see the new results."} Your adjustments are saved in this browser.`),
+      h("p", { class: "feedback-note" }, emphasized(
+        `Move a slider to change the results and hover over it to see what it does. The “default” button puts it back. ${kind === "search" ? "Results update right away." : "Click *Refresh* to see the new results."} Your adjustments are saved in this browser.`)),
       rows,
     ),
   );

@@ -48,7 +48,7 @@ def specs(cls) -> list[dict]:
     for f, meta in _tunables(cls):
         value = getattr(defaults, f.name)
         if meta["keys"]:
-            entries = [(f"{f.name}.{k}", f"{meta['label']} ({shown})", value[k]) for k, shown in meta["keys"].items()]
+            entries = [(f"{f.name}.{k}", f"{meta['label']} (*{shown}*)", value[k]) for k, shown in meta["keys"].items()]
         else:
             entries = [(f.name, meta["label"], value)]
         for name, label, default in entries:

@@ -77,7 +77,7 @@ Each result is one line: `[path:line]` and then the whole passage, its line brea
 | `'QUERY'` (search) | One argument in quotes, written as in the page: words, `"phrases"`, `/regex/`, `+x` (required), `-x` (excluded) and `site:host`. It is sent as written, so a last word that no passage contains matches the words it starts, as while typing in the page. A `-word` or a second word outside the quotes is refused, so nothing is read two ways (a query that starts with a dash and has no space goes after `--`). |
 | `FILE ['RULES']` (related) | The task document, or `-` for stdin, then the word rules as one argument in quotes, as on the page's word rules line. |
 | `-n N` | Show only the first N results. Search asks for 50, as the page does, and Related shows all its results. Neither changes what is found: for more or fewer Related results, set `total_slots` with `-p`, as the page's *Number of results* does. |
-| `-p JSON` | Settings for this call, inline or as `@file.json`. The names are those of `/api/params`, which the page's Adjustments show. An unknown name or a value out of range is refused, with the list of names. |
+| `-p JSON` | Settings for this call, inline or as `@file.json`. The names are those of `/api/params`, which the page's Adjustments show. In a label there, words between asterisks name something else on the page, and the page shows them in italics. An unknown name or a value out of range is refused, with the list of names. |
 | `--preset NAME` | Start from one of the page's built-in presets (its name in any case), with any `-p` settings on top. |
 | `-o FILE` | Also save the results. `.json` saves the server's whole answer, `.md` Markdown with the matches in bold, anything else the plain lines. |
 | `-q` | Print nothing (with `-o`). |
