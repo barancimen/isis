@@ -32,7 +32,7 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
   - `--osiris DIR`: an osiris archive whose sources can be left out (repeatable; see above).
   - `--tasks DIR`: where task documents live (default `_tasks` in the first folder). Task folders are never indexed.
   - `--no-model`: keyword search only.
-  - `--model REPO`: offer only this embedding model (repeatable; the first one named is the default). Without it, isis offers every model in `MODELS` in `isis/engine/semantic.py`: `MongoDB/mdbr-leaf-ir` (the default, 23M parameters) and `TaylorAI/bge-micro-v2` (17M). Any Hugging Face model with ONNX weights and a `tokenizer.json` can join that list. Text a model wants in front of queries or passages comes from the `prompts` of its `config_sentence_transformers.json`, so mdbr-leaf-ir gets its query prefix without any setting. Task paragraphs in Related are embedded like passages. Each model's vectors are kept in `<corpus>/.isis/models/`, matched to passages by their text, so a model left out of a run keeps its vectors and only embeds what changed meanwhile when it comes back. The Related thresholds were calibrated with bge-micro-v2, so another model may need them redone (see CALIBRATE.md).
+  - `--model REPO`: offer only this embedding model (repeatable; the first one named is the default). Without it, isis offers every model in `MODELS` in `isis/engine/semantic.py`: `MongoDB/mdbr-leaf-ir` (the default, 23M parameters) and `TaylorAI/bge-micro-v2` (17M). Any Hugging Face model with ONNX weights and a `tokenizer.json` can join that list. Text a model wants in front of queries or passages comes from the `prompts` of its `config_sentence_transformers.json`, so mdbr-leaf-ir gets its query prefix without any setting. Task paragraphs in Related are embedded like passages. Each model's vectors are kept in `<corpus>/.isis/models/`, matched to passages by their text, so a model left out of a run keeps its vectors and only embeds what changed meanwhile when it comes back.
   - `--port`, `--host`.
   - `--allow-host NAME`: also answer requests addressed to this name (repeatable; see below).
   - `--public`: serve the public behind a proxy (see Public mode below).
@@ -130,13 +130,11 @@ The whole pipeline is in [`isis/engine/related.py`](isis/engine/related.py), and
    - Each lane is filled by MMR, so results differ from each other and from what you have collected, with at most two passages per file.
    - Slots per lane are drawn by Thompson sampling from your add/dismiss counts. The draw is seeded the same way for every task and for `isis related`, so the same text gives the same results anywhere until feedback moves it.
 
-The defaults were calibrated on the sample corpus with bge-micro-v2, against blind relevance judgments: 1,026 search results for 38 queries, and about 970 Related suggestions for 19 task documents (5 of them long, the size of a document after a session of collecting). That lowered BM25's length normalisation (b 0.35), raised the meaning thresholds of the Related filter (3.25 alone, 1.75 with a top keyword match), weighted your own notes above pasted excerpts, and turned the dismissal push off (it pushed relevant passages down as often as junk). The similarity scores of this model are compressed (robust z rarely passes 4); a different model or corpus may want different thresholds, so measure before changing them. With mdbr-leaf-ir, now the default, search scores 0.742 on the same judgments against 0.708, and the Related thresholds have not been recalibrated for it (see CALIBRATE.md).
+Among the defaults, BM25's length normalisation is low (b 0.35), the meaning thresholds of the Related filter are 3.25 alone and 1.75 with a top keyword match, and the dismissal push is off. Similarity scores from these small models are compressed (a robust z rarely passes 4), so a different model or corpus may want different thresholds.
 
 ## Playing with the algorithm
 
 **In the page:** open **Adjustments** in the Search or Related panel. Every slider re-runs the panel as you move it; hover one for what it does and its default. Your settings stay in this browser only and are sent with each request, so the server's defaults never change.
-
-**Against judgments:** [`CALIBRATE.md`](CALIBRATE.md) explains how the defaults were measured against about 1,800 graded results, and how to redo it with `calibration/` (for example after changing the embedding model).
 
 **In a notebook:** [`notebooks/explore.ipynb`](notebooks/explore.ipynb) walks through it: typed search, `related()` with different configs and preferences, the z-score distributions, and how to try another model.
 
@@ -169,7 +167,6 @@ isis/cli.py    `isis index` / `isis serve`; client.py: `isis search` / `isis rel
 native/        isis_native, the optional Rust extension (pyo3, built by maturin): highlights and phrase counts
 web/           index.html, app.js, style.css, insert.js, reflow.js, filetree.js, history.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
 scripts/       fetch_sample_corpus.py, browser_check.py
-calibration/   judged queries and tasks, and the scripts that score settings against them (see CALIBRATE.md)
 ```
 
 ## Development

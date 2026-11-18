@@ -619,7 +619,7 @@ def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: Relat
 def _clusters(vecs: np.ndarray, distance: float) -> np.ndarray:
     """Cluster ids for the paragraphs. A long task about one subject would otherwise split into
     a theme per paragraph. Small themes are kept: on long tasks, merging single paragraphs into
-    bigger themes cost relevance in the bridges and gaps lanes (CALIBRATE.md)."""
+    bigger themes cost relevance in the bridges and gaps lanes."""
     from scipy.cluster.hierarchy import fcluster, linkage
     from scipy.spatial.distance import pdist
 
