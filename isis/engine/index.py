@@ -19,6 +19,7 @@ import re
 import stat as statmode
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -142,8 +143,10 @@ class Snapshot:
     _typical: dict = field(default_factory=dict, repr=False)
     _typical_vectors: dict = field(default_factory=dict, repr=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # requests share snapshots
-    # The same index seen through each model, by model id. They share everything but the vectors
-    # and what is worked out from them.
+    # The same index seen through each other model, by model id. They share everything but the vectors
+    # and what is worked out from them. Neither this snapshot nor its views are in here, as that would
+    # make a reference cycle: Python then frees a replaced snapshot, with all its vectors, only at its
+    # next full garbage collection, which in a large corpus can be dozens of refreshes later.
     views: dict = field(default_factory=dict, repr=False)
 
     def __len__(self) -> int:
@@ -309,7 +312,7 @@ class Engine:
         self.links: set[str] = set()  # corpus-relative paths of the folder links the last scan met
         self._said: set[str] = set()  # one-time messages about links, so rescans stay quiet
         self._refreshed = False
-        self._sources: tuple = (None, [])  # the snapshot that sources() last described, and what it said
+        self._sources: tuple = (lambda: None, [])  # the snapshot that sources() last described, and what it said
         self._load()
         self._publish()
 
@@ -521,7 +524,7 @@ class Engine:
         from .osiris import describe, order
 
         snapshot = self.snapshot
-        if self._sources[0] is snapshot:
+        if self._sources[0]() is snapshot:
             return self._sources[1]
         counts: dict[str, int] = {}
         for source in snapshot.file_sources.values():
@@ -532,7 +535,7 @@ class Engine:
             lane, lane_name, name = describe(kind)
             out.append({"id": source, "folder": folder, "lane": f"{folder}/{lane}", "lane_name": lane_name, "name": name,
                         "documents": counts[source]})
-        self._sources = (snapshot, out)
+        self._sources = (weakref.ref(snapshot), out)  # a weak reference, so as not to keep an old snapshot
         return out
 
     # ---- refresh ----
@@ -749,12 +752,10 @@ class Engine:
             file_sources=sources,
         )
         for e in self.embedders:
-            if e is self.embedder:
-                snapshot.views[_model_id(e)] = snapshot
-            else:  # its own vectors, and its own caches of what depends on them
+            if e is not self.embedder:  # its own vectors, and its own caches of what depends on them
                 v, has = of(e)
                 snapshot.views[_model_id(e)] = replace(snapshot, vectors=v, has_vector=has, excerpt_matches={},
-                                                       theme_scores={}, _typical={}, _typical_vectors={})
+                                                       theme_scores={}, _typical={}, _typical_vectors={}, views={})
         return snapshot
 
     def view(self, embedder) -> Snapshot:

@@ -482,3 +482,25 @@ def test_a_cache_of_stemmed_terms_is_split_into_words_again_without_reading_or_e
     assert "whaling" in e.snapshot.words.words
     assert e.refresh()["embedded"] == 0  # and saves the new terms
     assert json.loads((index / "index.json").read_text())["terms"] == 2
+
+
+def test_a_replaced_snapshot_is_freed_at_once(tmp_path):
+    """Without a reference cycle, reference counting frees an old snapshot and its vectors as soon
+    as nothing uses it, instead of at Python's next full garbage collection."""
+    import gc
+    import weakref
+
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "# Whales\n\nThe white whale.\n", "b.md": "The sea and Ahab.\n"})
+    engine = Engine(corpus, embedder=[HashEmbedder(), HashEmbedder(dim=32)])
+    engine.refresh()
+    engine.sources()
+    old = weakref.ref(engine.snapshot)
+    other = weakref.ref(engine.view(HashEmbedder(dim=32)))
+    assert other() is not old()
+    gc.disable()
+    try:
+        (corpus / "c.md").write_text("A new note about the ship.\n")
+        engine.refresh()
+        assert old() is None and other() is None
+    finally:
+        gc.enable()
