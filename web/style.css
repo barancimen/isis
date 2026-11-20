@@ -582,7 +582,6 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
 }
 .status-pick[hidden] { display: none; }
-#model-box { margin-left: 10px; }
 .status-pick::after { content: ""; border: 4px solid transparent; border-top-width: 0; border-bottom-color: currentColor; }
 .status-pick:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
 .status-pick select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; font: inherit; cursor: pointer; }

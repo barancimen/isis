@@ -959,6 +959,7 @@ async function switchTask(name, view = loadTaskView(name)) {
   }
   state.task = name;
   store.set("task", name);
+  useSkipped(taskSkipped(view ?? loadTaskView(name))); // before Related asks for its results below
   taskView.setState(doc.state);
   measureWholeDocument(taskView);
   restoreTaskPlace(name, opening);
@@ -1014,9 +1015,10 @@ function saveTaskView() {
 }
 
 function currentView() {
-  if (state.pendingView) return state.pendingView;
+  if (state.pendingView) return { ...state.pendingView, skipped: [...state.skipped] };
   rememberSearchTop();
   return {
+    skipped: [...state.skipped],
     reader: state.readerPath,
     readerLocation: state.readerLocation,
     readerTop: state.readerPath ? topPlace(reader) : 0,
@@ -1110,7 +1112,8 @@ async function newTask() {
   if (!state.tasks.some((t) => t.name === task.name)) state.tasks.push({ name: task.name, mtime: task.mtime });
   state.docs.set(task.name, { state: taskState(task.content), mtime: task.mtime, dirty: false });
   renderTaskTabs();
-  await switchTask(task.name);
+  await switchTask(task.name, { skipped: [...state.skipped] }); // it starts with the open task's folders and sources
+  saveTaskView();
   return task.name;
 }
 
@@ -2790,7 +2793,7 @@ function showPanel(name) {
 
 // When several folders are served, Search and Related both show a box for each, to leave some of
 // them out. The boxes are one setting: unticking a folder in either panel leaves it out of both.
-// They are remembered in this browser, like the parameters.
+// Each task keeps its own, in this browser (see saveSkipped).
 function loadSkipped() {
   let saved = store.json("skip", null);
   if (!Array.isArray(saved)) {
@@ -2803,7 +2806,37 @@ function loadSkipped() {
   return new Set(saved.filter((name) => typeof name === "string"));
 }
 
-const saveSkipped = () => store.set("skip", JSON.stringify([...state.skipped]));
+// Each task keeps its own boxes, in its view. With no task open, they're kept on their own.
+function saveSkipped() {
+  if (state.task) saveTaskView();
+  else store.set("skip", JSON.stringify([...state.skipped]));
+}
+
+// A task's boxes: those its view keeps, or for a task from before each kept its own, the ones that
+// were shared by all of them.
+function taskSkipped(view) {
+  const saved = Array.isArray(view?.skipped) ? view.skipped : store.json("skip", []);
+  return new Set((Array.isArray(saved) ? saved : []).filter((name) => typeof name === "string"));
+}
+
+// Shows another task's boxes. Returns whether they differ from those on show.
+function useSkipped(skipped) {
+  if (settingsKey({ skipped: [...skipped] }) === settingsKey({ skipped: [...state.skipped] })) return false;
+  state.skipped = skipped;
+  renderFolderPicks(state.folders);
+  renderPresets("search");
+  renderPresets("related");
+  return true;
+}
+
+// The boxes used to be one setting for all tasks: every task that exists then keeps them as its own.
+function shareOutSkipped() {
+  const shared = store.json("skip", []);
+  for (const { name } of state.tasks) {
+    const view = loadTaskView(name) ?? {};
+    if (!Array.isArray(view.skipped)) store.set(viewKey(name), JSON.stringify({ ...view, skipped: shared }));
+  }
+}
 
 // Whether the page has a box for this folder or source now. One left out that the server doesn't
 // list at the moment, such as a source with no documents, stays left out for when it comes back.
@@ -3275,6 +3308,7 @@ async function init() {
   showPanel(resume?.panel || store.get("panel") || "search");
   await Promise.all([loadTasks(), loadFiles()]);
   shareOutHiddenDocs();
+  shareOutSkipped();
   const last = resume?.task ?? store.get("task");
   const name = state.tasks.find((t) => t.name === last)?.name ?? state.tasks[0]?.name;
   if (name) {
