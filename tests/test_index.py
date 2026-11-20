@@ -423,7 +423,7 @@ def test_a_failed_save_leaves_no_temporary_files(tmp_path, monkeypatch):
 
     monkeypatch.setattr("isis.engine.index.json.dumps", full)
     with pytest.raises(OSError):
-        e._save()
+        e._save_folder(next(iter(e.roots)))
     assert not [p.name for p in index.rglob("*") if ".tmp" in p.name]
 
 
@@ -569,6 +569,36 @@ def test_several_cached_folders_give_the_index_of_a_fresh_start(tmp_path):
     assert list(loaded.snapshot.passages) == list(fresh.snapshot.passages)
     assert same_index(loaded, fresh)
     assert paths(loaded.search("ship")) == paths(fresh.search("ship"))
+
+
+def test_a_change_saves_only_the_cache_of_its_own_folder(tmp_path):
+    a = write_corpus(tmp_path / "live" / "a", {"one.md": "Whale and ship.\n", "two.md": "# Sea\n\nThe sea and the whale.\n"})
+    b = write_corpus(tmp_path / "live" / "b", {"three.md": "Heron, ship and stoat.\n", "four.md": "Pikeword alone.\n"})
+    e = Engine([a, b], embedder=HashEmbedder())
+    e.refresh()
+
+    def tokens():
+        return {f.name: json.loads((f / ".isis" / "index.json").read_text())["token"] for f in (a, b)}
+
+    before = tokens()
+    (a / "one.md").write_text("Whale, ship and a long voyage.\n")
+    e.refresh()
+    after = tokens()
+    assert after["b"] == before["b"] and after["a"] != before["a"]
+    assert isinstance(e._postings["a"][1][1].base, np.memmap)  # made again for the change, then mapped from the cache
+
+    (b / "four.md").write_text("Pikeword and a whale.\n")  # a compile that uses the mapped postings of a
+    e.refresh()
+    assert tokens()["a"] == after["a"]
+    for name, files in (("a", {"one.md": "Whale, ship and a long voyage.\n", "two.md": "# Sea\n\nThe sea and the whale.\n"}),
+                        ("b", {"three.md": "Heron, ship and stoat.\n", "four.md": "Pikeword and a whale.\n"})):
+        write_corpus(tmp_path / "fresh" / name, files)
+    fresh = Engine([tmp_path / "fresh" / "a", tmp_path / "fresh" / "b"], embedder=HashEmbedder())
+    fresh.refresh()
+    assert same_index(e, fresh)
+    assert paths(e.search("whale")) == paths(fresh.search("whale"))
+    again = Engine([a, b], embedder=HashEmbedder())
+    assert again.refresh()["embedded"] == 0 and same_index(again, fresh)
 
 
 def same_index(one: Engine, other: Engine) -> bool:

@@ -450,7 +450,7 @@ class Engine:
         self.chunking = (target_words, max_words)
         self.vocab = Vocabulary()
         self.words = Words()
-        self._cache_unsaved = False  # words listed, or terms made again, from a cache loaded the old way
+        self._unsaved: set[str] = set()  # folders whose cache is out of date: files or vectors changed, or loaded the old way
         self.files: dict[str, FileRecord] = {}
         self.status = IndexStatus()
         self._lock = threading.Lock()
@@ -567,24 +567,26 @@ class Engine:
                     except OSError:  # deleted since os.walk listed it
                         pass
                 dirnames[:] = keep
+                base = label(here, root, prefix)  # the folder's, once: Path for each of many files is slow
+                lead = f"{base}/" if base else ""
                 for name in filenames:
-                    path = here / name
                     if name == NO_EMBED:
-                        no_embed.add(label(here, root, prefix))
+                        no_embed.add(base)
                     if name.startswith("."):
                         continue
                     if not name.lower().endswith(MARKDOWN):
+                        path = here / name
                         if path.is_symlink() and not path.exists():  # a linked folder that has gone away
-                            self._say_once(logging.WARNING, f"link {label(path, root, prefix)} skipped: its target doesn't exist")
+                            self._say_once(logging.WARNING, f"link {lead}{name} skipped: its target doesn't exist")
                         continue
                     try:
-                        st = path.lstat()
+                        st = os.lstat(os.path.join(dirpath, name))
                     except OSError:
                         continue
                     if statmode.S_ISLNK(st.st_mode):
-                        file_links.append((path, label(path, root, prefix)))
+                        file_links.append((here / name, lead + name))
                     else:
-                        found[label(path, root, prefix)] = st
+                        found[lead + name] = st
                         files.add((st.st_dev, st.st_ino))
 
         for prefix, root in self.roots.items():
@@ -726,6 +728,7 @@ class Engine:
         elif first:
             log.info("%s, no changes since the last run" if found else "no markdown files found in %s",
                      _count(len(found), "markdown file") if found else ", ".join(map(str, self.roots.values())))
+        self._unsaved.update(map(self._prefix, removed + changed))
         for path in removed:
             del self.files[path]
         for path in changed:
@@ -752,15 +755,15 @@ class Engine:
                 if record.vectors:  # the folder got its .no-embed file after it was embedded
                     record.vectors = {}
                     dropped += 1
+                    self._unsaved.add(self._prefix(path))
         touched = bool(removed or changed or dropped)
         if touched or relabeled:
             self._publish()
 
         embedded, filled = self._embed_missing(on_progress)
-        if touched or filled or self._cache_unsaved:
+        if filled:
             self._publish()
-            self._save()
-            self._cache_unsaved = False
+        self._save()  # the folders that changed: a large archive isn't written again for a change elsewhere
         self._set_state("ready", on_progress)
         if first or touched or filled:
             meaning = ", keywords only" if self.embedder is None else (
@@ -783,18 +786,20 @@ class Engine:
         work = []
         for embedder in self.embedders:
             name = embedder.name
-            pending = [r for path, r in self.files.items()
+            waiting = [path for path, r in self.files.items()
                        if self._embeds(path) and not self._is_unread(path) and name not in r.vectors]
+            pending = [self.files[path] for path in waiting]
+            folders = {id(r): self._prefix(path) for path, r in zip(waiting, pending)}  # whose cache the vectors go in
             todo = {id(r): [p.embed_text for p in r.passages if p.embed_text not in (r.reuse or {}).get(name, {})]
                     for r in pending}
-            work.append((embedder, pending, todo))
+            work.append((embedder, pending, todo, folders))
         self.status.embedded = 0
-        self.status.to_embed = sum(len(texts) for _, _, todo in work for texts in todo.values())
+        self.status.to_embed = sum(len(texts) for _, _, todo, _ in work for texts in todo.values())
         if self.status.to_embed:
             self._set_state("embedding", on_progress)
         begun = last_report = last_publish = last_save = time.monotonic()
 
-        for embedder, pending, todo in work:
+        for embedder, pending, todo, folders in work:
             name, dim = embedder.name, embedder.dim
             n = sum(map(len, todo.values()))
             if n:
@@ -811,6 +816,7 @@ class Engine:
                     rows = [kept[p.embed_text] if p.embed_text in kept else next(fresh) for p in r.passages]
                     r.vectors[name] = np.array(rows, np.float16).reshape(len(r.passages), dim)
                     r.reuse = r.reuse or None
+                    self._unsaved.add(folders[id(r)])
                 self.status.embedded += len(texts)
                 group.clear()
 
@@ -836,7 +842,7 @@ class Engine:
                     last_save = now
             if group:
                 flush()
-        return self.status.to_embed, sum(len(pending) for _, pending, _ in work)
+        return self.status.to_embed, sum(len(pending) for _, pending, _, _ in work)
 
     def _set_state(self, state: str, on_progress) -> None:
         self.status.state = state
@@ -1012,7 +1018,7 @@ class Engine:
                 if str(data["name"]) != embedder.name:
                     return None
                 keys, vectors = data["keys"], data["vectors"]
-            self._cache_unsaved = True  # saved the new way
+            self._unsaved.add(prefix)  # saved the new way
         else:
             return None
         return (keys, vectors) if vectors.shape[1:] == (embedder.dim,) else None
@@ -1062,8 +1068,11 @@ class Engine:
                 r.reuse = {**(r.reuse or {}), embedder.name: found}
 
     def _save(self) -> None:
+        """Saves the cache of each folder that changed since it was last saved or loaded."""
         for prefix in self.roots:
-            self._save_folder(prefix)
+            if prefix in self._unsaved:
+                self._save_folder(prefix)
+                self._unsaved.discard(prefix)
 
     def _save_folder(self, prefix: str) -> None:
         """Saves one folder's cache: index.json names the folder that holds it, cache.<token>, with
@@ -1181,6 +1190,15 @@ class Engine:
                     shutil.rmtree(old, ignore_errors=True)  # a file still open elsewhere stays, on Windows
                 else:
                     old.unlink(missing_ok=True)
+        kept = self._postings.get(prefix)
+        if kept is not None and len(kept[0]) == len(records) and all(a is b for a, b in zip(kept[0], records)):
+            # The folder's postings, made again in memory after a change, are mapped from the file just
+            # written instead, as when the cache is loaded: a large archive's take gigabytes.
+            def load(name: str) -> np.ndarray:
+                return np.load(cache / f"{name}.npy", mmap_mode="r", allow_pickle=False).view(np.ndarray)
+
+            self._postings[prefix] = (records, (load("post_indptr"), load("post_rows"), load("post_tf"),
+                                                used[np.asarray(alphabetical, np.int64)]))
         for embedder in self.embedders:
             self._save_vectors(prefix, embedder, records)
 
@@ -1204,7 +1222,7 @@ class Engine:
                 elif meta.get("version") == LEGACY_INDEX_VERSION:
                     files, legacy_vectors = self._load_legacy(folder, meta, lead)
                     legacy = meta.get("embedder")  # a cache from before each model had a file of its own
-                    self._cache_unsaved = True  # saved the new way
+                    self._unsaved.add(prefix)  # saved the new way
                 else:
                     return
                 break
@@ -1220,7 +1238,8 @@ class Engine:
                 site, source = self._front_matter_on_disk(path)
                 record.site = site if record.site is None else record.site
                 record.source = source if record.source is None else record.source
-                self._cache_unsaved = self._cache_unsaved or source is not None
+                if source is not None:
+                    self._unsaved.add(prefix)
         self.files.update(files)
         log.info("loaded the index cache%s: %s, %s", f" of {prefix}" if prefix else "", _count(len(files), "file"),
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
@@ -1332,7 +1351,7 @@ class Engine:
         log.info("splitting %s into words again, as search no longer uses word stems (only this once)", _count(n, "passage"))
         for record in files.values():
             record.indptr, record.term_ids, record.counts = self._terms_of(record.passages)
-        self._cache_unsaved = True
+        self._unsaved.update(map(self._prefix, files))
 
     def _list_words(self, files: dict[str, FileRecord]) -> None:
         """The words of a cache from before words were kept, from the passages it holds, so the
@@ -1348,7 +1367,7 @@ class Engine:
         words = [w for w in words if len(w) > 1]
         found_terms = [(w, self.vocab.get(w)) for w in words]
         self.words.extend([w for w, i in found_terms if i is not None], [i for _, i in found_terms if i is not None])
-        self._cache_unsaved = True
+        self._unsaved.update(map(self._prefix, files))
 
     @staticmethod
     def _records(entries: list[dict], arrays: dict, lead: str = "") -> tuple[dict[str, FileRecord], dict[str, np.ndarray]]:
