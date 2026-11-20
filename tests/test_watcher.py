@@ -29,23 +29,26 @@ class FakeWatch:
         self.started = []
         self.changes = queue.Queue()
 
-    def __call__(self, *roots, watch_filter, stop_event, debounce):
+    def __call__(self, *roots, watch_filter, stop_event, debounce, rust_timeout=5000, yield_on_timeout=False):
         self.started.append((roots, watch_filter))
         while not stop_event.is_set():
             try:
-                self.changes.get(timeout=0.005)
+                path = self.changes.get(timeout=0.005)
             except queue.Empty:
+                if yield_on_timeout:
+                    yield set()
                 continue
-            yield {("modified", "anything")}
+            yield {("modified", str(path))}
 
-    def change(self):
-        self.changes.put(True)
+    def change(self, path="anything"):  # "anything": outside the folders, so all of them are looked at
+        self.changes.put(path)
 
 
 @pytest.fixture
 def fake_watch(monkeypatch):
     fake = FakeWatch()
     monkeypatch.setattr("watchfiles.watch", fake)
+    monkeypatch.setattr("isis.server.app.REFRESH_EVERY", 0)
     return fake
 
 
@@ -132,3 +135,28 @@ def test_the_watcher_survives_an_error_and_keeps_checking(engine, corpus, monkey
             time.sleep(0.02)
         assert "fresh.md" in engine.files and len(calls) > 1
         assert c.get("/api/status").status_code == 200
+
+
+def test_changes_are_taken_up_at_most_every_so_often_and_only_where_they_are(tmp_path, fake_watch, monkeypatch):
+    monkeypatch.setattr("isis.server.app.REFRESH_EVERY", 1.0)
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (b / "big.md").write_text("Archive text.\n")
+    engine = Engine([a, b])
+    engine.refresh()
+    looked_at = []
+    real = engine.refresh
+    monkeypatch.setattr(engine, "refresh", lambda on_progress=None, only=None: (looked_at.append(only), real(on_progress, only))[1])
+    with watching(engine, tmp_path / "tasks"):
+        assert wait_until(lambda: fake_watch.started)
+        (a / "n.md").write_text("Quokkaword, saved once.\n")
+        fake_watch.change(a / "n.md")
+        assert wait_until(lambda: engine.search("quokkaword"), seconds=0.9)  # the first change goes at once
+        assert looked_at == [{"a"}]  # the folder without changes isn't looked at
+        (a / "n.md").write_text("Wombatword, saved again.\n")
+        fake_watch.change(a / "n.md")
+        time.sleep(0.4)
+        assert not engine.search("wombatword") and len(looked_at) == 1  # waits for the rest of the interval
+        assert wait_until(lambda: engine.search("wombatword"), seconds=3)
+        assert looked_at == [{"a"}, {"a"}]

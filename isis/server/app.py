@@ -37,6 +37,7 @@ WEB = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 WATCH_RETRY = 30  # seconds
 CATCH_UP_EVERY = 30  # seconds between checks whether osiris is done with an archive
+REFRESH_EVERY = 60  # seconds: the index takes up changed files at most this often
 PAGE_SETTLE_SECONDS = 5
 PAGE_VERSION_SLOT = '<meta name="page-version" content="">'
 # Seeds the draw that shares Related's results between its groups. It is the same for every task
@@ -176,9 +177,9 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
     public = isinstance(tasks, Workspaces)
     time_limit = (lambda: pattern_time_limit(PATTERN_SECONDS)) if public else nullcontext
 
-    def refresh() -> None:
+    def refresh(only: set[str] | None = None) -> None:
         try:
-            engine.refresh()  # it reports what changed
+            engine.refresh(only=only)  # it reports what changed
         except Exception:
             log.exception("index refresh failed")
 
@@ -203,12 +204,25 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             # moved folder is one event), and deleted paths, which may have been either.
             return p.suffix.lower() in MARKDOWN or not p.is_file()
 
-        said = ""
+        def folder_of(path: str) -> str | None:
+            p = Path(path)
+            return next((name for name, r in engine.roots.items() if r == p or r in p.parents), None)
+
+        # Changes are taken up at most once every REFRESH_EVERY seconds: an editor that saves as you
+        # type would otherwise have the whole index made again every second or two. The first change
+        # after a quiet spell goes at once, and the folders without changes aren't looked at.
+        said, waiting, last = "", set(), -REFRESH_EVERY
         while not stop.is_set():  # a watch covers the linked folders that exist when it starts
             links = engine.links
             try:
-                for _ in watch_files(*roots, watch_filter=relevant, stop_event=stop, debounce=800):
-                    refresh()
+                for changes in watch_files(*roots, watch_filter=relevant, stop_event=stop, debounce=800,
+                                           rust_timeout=1000, yield_on_timeout=True):
+                    waiting |= {folder_of(path) for _, path in changes}
+                    if not waiting or time.monotonic() - last < REFRESH_EVERY:
+                        continue
+                    only = None if None in waiting else set(waiting)  # None: a path outside the folders, look at all
+                    waiting, last = set(), time.monotonic()
+                    refresh(only)
                     if engine.links != links:
                         break
                 else:

@@ -760,17 +760,19 @@ class Engine:
 
     # ---- refresh ----
 
-    def refresh(self, on_progress: Callable[[IndexStatus], None] | None = None) -> dict:
-        """Re-read changed files, drop deleted ones, embed what isn't embedded yet."""
+    def refresh(self, on_progress: Callable[[IndexStatus], None] | None = None, only: set[str] | None = None) -> dict:
+        """Re-read changed files, drop deleted ones, embed what isn't embedded yet. `only`: the
+        folders (by name, as in roots) to look at, when the others are known not to have changed;
+        None looks at all of them."""
         with self._lock:
             self.status.error = ""
             try:
-                return self._refresh(on_progress)
+                return self._refresh(on_progress, only)
             except Exception as e:
                 self.status.state, self.status.error = "error", f"{type(e).__name__}: {e}"
                 raise
 
-    def _refresh(self, on_progress) -> dict:
+    def _refresh(self, on_progress, only: set[str] | None = None) -> dict:
         started = time.perf_counter()
         first = not self._refreshed
         self._refreshed = True
@@ -778,9 +780,10 @@ class Engine:
         if first:
             log.info("scanning %s", ", ".join(map(str, self.roots.values())))
         held = self._held_back() if not first else set()
-        found = self._scan(skip=held)
-        relabeled = any([manifest.refresh() for prefix, manifest in self.osiris.items() if prefix not in held])
-        removed = [p for p in self.files if p not in found and not self._is_unread(p) and self._prefix(p) not in held]
+        skip = held | (set() if first or only is None else set(self.roots) - only)  # not looked at this time
+        found = self._scan(skip=skip)
+        relabeled = any([manifest.refresh() for prefix, manifest in self.osiris.items() if prefix not in skip])
+        removed = [p for p in self.files if p not in found and not self._is_unread(p) and self._prefix(p) not in skip]
         changed = [
             p
             for p, st in found.items()
@@ -797,8 +800,9 @@ class Engine:
         self._unsaved.update(map(self._prefix, removed + changed))
         now = time.monotonic()
         for prefix in self.osiris:
-            if prefix in held:
-                self._archive_held.add(prefix)
+            if prefix in skip:
+                if prefix in held:
+                    self._archive_held.add(prefix)
                 continue
             self._archive_held.discard(prefix)
             if self.archive_busy(prefix):
