@@ -385,3 +385,62 @@ def test_related_word_rules_take_doc_clauses(homes_engine):
     assert "cottage.md" in plain and "cottage.md" not in steered and steered
     prefs.boost("house")  # a chip for the same word leaves the doc: rule alone
     assert prefs.steer == "-doc:house house"
+
+
+UMBRELLAS = {
+    "rain.md": "# Rain\n\nA red umbrella keeps the rain off.\n",
+    "shade.md": "# Shade\n\nSun UMBRELLAS line the beach.\n",
+    "hostages.md": "# News\n\nThe hostages were freed after the hostage-taking ended.\n",
+    "other.md": "# Other\n\nNothing about cover here, only a bumbrella-free zone.\n",
+}
+
+
+@pytest.fixture
+def umbrella_engine(tmp_path):
+    engine = Engine(write_corpus(tmp_path / "umbrellas", UMBRELLAS), index_dir=tmp_path / "umbrellas-index", target_words=0)
+    engine.refresh()
+    return engine
+
+
+def test_a_star_stands_for_any_letters_within_a_word(umbrella_engine):
+    def found(query):
+        return sorted(set(paths(umbrella_engine.search(query))))
+
+    assert found("umbrella*") == ["rain.md", "shade.md"]  # and any case
+    assert found("*mbrella") == ["other.md", "rain.md"]  # whole words: "bumbrella" but not "umbrellas"
+    assert found("*mbrella*") == ["other.md", "rain.md", "shade.md"]
+    assert found("umbre*la") == ["rain.md"]
+    assert found("u*a*s") == ["shade.md"]
+    assert found("hostage*") == ["hostages.md"]
+    assert found("rain +umbrel*") == ["rain.md", "shade.md"]  # rain only ranks
+    assert found("+rain +umbrel*") == ["rain.md"]
+    assert found("umbrella* -sun*") == ["rain.md"]
+    assert found("doc:umbrel* the") == ["rain.md", "shade.md"]
+    assert found('"red umbre*la"') == ["rain.md"]  # in phrases too
+    assert found('"sun umb*"') == ["shade.md"]
+    assert found('"red umbre*la keeps"') == ["rain.md"]
+    assert found('"blue umbre*la"') == []
+    assert found("*") == found("**") == []  # nothing yet
+    hit, = umbrella_engine.search("umbre*la")
+    assert hit.marks  # highlighted
+
+
+def test_wildcards_are_parsed_kept_and_not_corrected(umbrella_engine):
+    clauses = split_query('hostage* -*mbrella +doc:um*la "red umbre*la" *')
+    assert [(c.op, c.kind, c.value, c.doc) for c in clauses] == [
+        ("", "wildcard", "hostage*", False), ("-", "wildcard", "*mbrella", False), ("+", "wildcard", "um*la", True),
+        ("", "phrase", "red umbre*la", False)]
+    assert " ".join(map(str, clauses)) == 'hostage* -*mbrella +doc:um*la "red umbre*la"'
+    steer = steering(clauses)
+    assert steer.words == {} and len(steer.patterns) == 2 and len(steer.filters.excluded) == 1
+    assert correct_query(umbrella_engine.snapshot, "umbrela*") is None  # not "umbrella", which would lose the star
+    assert correct_query(umbrella_engine.snapshot, "umbrela") == "umbrella"
+
+
+def test_related_word_rules_take_wildcards(umbrella_engine):
+    from isis.engine.related import TaskPrefs
+
+    task = "# Cover\n\nUmbrellas and shade for the beach and the rain.\n"
+    plain = {h.path for lane in umbrella_engine.related(task).lanes for h in lane.items}
+    steered = {h.path for lane in umbrella_engine.related(task, prefs=TaskPrefs(steer="-umbrel*")).lanes for h in lane.items}
+    assert {"rain.md", "shade.md"} <= plain and not steered & {"rain.md", "shade.md"}

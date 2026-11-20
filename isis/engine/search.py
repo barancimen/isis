@@ -41,6 +41,7 @@ from .text import term_spans, tokenize, tokenize_with_surface
 # the end, a /regex still being typed, or a plain word.
 TOKEN = re.compile(r"""([-+]?)((?i:doc:))?(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))""")
 DOC = "doc:"
+WILDCARD = "*"  # in a word or phrase: any letters or digits, or none
 PREFER, REQUIRE, NEVER = "", "+", "-"
 SITE = re.compile(r"site:(.*)", re.IGNORECASE)
 MIN_PREFIX = 3
@@ -226,17 +227,29 @@ def compile_pattern(pattern: str) -> re.Pattern | TimedPattern:
     return compiled if _pattern_deadline.get() is None else timed_pattern(pattern, smart)
 
 
-def phrase_pattern(phrase: str) -> re.Pattern:
+def phrase_pattern(phrase: str) -> re.Pattern | TimedPattern:
     words = phrase.split()
+    if any(WILDCARD in w for w in words):  # "red umbre*la"
+        return compile_pattern("(?i)" + r"\s+".join(map(_wildcard_regex, words)))
     pattern = re.compile(r"\s+".join(map(re.escape, words)), re.IGNORECASE)
     native.remember_phrase(pattern, words)  # the Rust extension, if built, counts it in every passage
     return pattern
 
 
+def _wildcard_regex(word: str) -> str:
+    """A word as a regex in which each * stands for any letters or digits, or none."""
+    return r"\w*".join(map(re.escape, re.sub(r"\*+", WILDCARD, word).split(WILDCARD)))
+
+
+def wildcard_pattern(word: str) -> re.Pattern | TimedPattern:
+    """A word with wildcards (hostage*, *mbrella, umbre*la): whole words that fit it, in any case."""
+    return compile_pattern(rf"(?i)(?<!\w){_wildcard_regex(word)}(?!\w)")
+
+
 @dataclass(frozen=True)
 class Clause:
     op: str  # PREFER, REQUIRE or NEVER
-    kind: str  # "word", "phrase", "regex", "site", or "partial" (a regex still being typed: ignored)
+    kind: str  # "word", "wildcard" (a word with *), "phrase", "regex", "site", or "partial" (a regex still being typed: ignored)
     value: str
     doc: bool = False  # doc:x: about the whole document, which must contain it (or, with -, must not)
 
@@ -254,6 +267,8 @@ class Clause:
             return compile_pattern(self.value)
         if self.kind == "phrase":
             return phrase_pattern(self.value) if self.value.split() else None
+        if self.kind == "wildcard":
+            return wildcard_pattern(self.value)
         if self.kind == "word" and len(self.terms()) != 1:
             return re.compile(rf"(?<!\w){re.escape(self.value)}(?!\w)", re.IGNORECASE)
         return None
@@ -272,7 +287,10 @@ def split_query(query: str) -> list[Clause]:
             out.append(Clause(op, "partial", partial, doc))
         elif word and word not in (REQUIRE, NEVER):
             site = SITE.fullmatch(word)
-            if doc:
+            if WILDCARD in word and not site:
+                if word.strip(WILDCARD):  # a * alone is nothing yet
+                    out.append(Clause(op, "wildcard", word, doc))
+            elif doc:
                 out.append(Clause(op, "word", word, True))
             elif word.lower() == DOC:
                 out.append(Clause(op, "partial", word))  # still being typed
@@ -437,7 +455,7 @@ def steering(clauses: list[Clause]) -> Steering:
         if c.op == REQUIRE:
             out.filters.required.append(p)
         if c.kind == "phrase":
-            text.append(c.value)
+            text.append(c.value.replace(WILDCARD, ""))
     out.text = " ".join(text)
     return out
 
@@ -549,7 +567,8 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
     parts, at = [], 0
     for m in TOKEN.finditer(query):
         written = m.group(6)
-        pairs = tokenize_with_surface(written) if written and m.group(1) == PREFER and not m.group(2) else []
+        plain = written and m.group(1) == PREFER and not m.group(2) and WILDCARD not in written
+        pairs = tokenize_with_surface(written) if plain else []
         if len(pairs) != 1 or snapshot.term_id(pairs[0][0]) is not None:
             continue
         word = pairs[0][1]
