@@ -342,7 +342,7 @@ class Filters:
             has = np.zeros(len(snapshot), bool)
             tid = snapshot.term_id(term)
             if tid is not None:
-                has[snapshot.bm25.matrix[:, tid].indices] = True
+                has[snapshot.bm25.rows_with(tid)] = True
             return has[rows]
 
         for term in self.required_terms:
@@ -375,7 +375,7 @@ class Filters:
         def with_term(term: str) -> np.ndarray:
             has = np.zeros(n_docs, bool)
             if (tid := snapshot.term_id(term)) is not None:
-                has[document_of[snapshot.bm25.matrix[:, tid].indices]] = True
+                has[document_of[snapshot.bm25.rows_with(tid)]] = True
             return has
 
         def with_pattern(p: re.Pattern) -> np.ndarray:

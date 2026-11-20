@@ -136,6 +136,100 @@ class BM25:
         return self.matrix[:, np.asarray(term_ids)] @ np.asarray(weights, np.float32)
 
 
+class FolderPart:
+    """One folder's BM25, with its own columns. `terms` gives the term id of each column (None: the
+    column is the term id), as a folder's cache keeps only its own terms."""
+
+    def __init__(self, bm25: BM25, terms: np.ndarray | None, lookup: np.ndarray | None = None):
+        self.bm25, self.terms, self._lookup = bm25, terms, lookup
+
+    def columns(self, term_ids: np.ndarray) -> np.ndarray:
+        """The column of each term id, or -1 for a term this folder doesn't have."""
+        ids = np.asarray(term_ids, np.int64)
+        if self.terms is None:
+            return np.where(ids < self.bm25.n_terms, ids, -1)
+        if self._lookup is None:
+            self._lookup = np.full(int(self.terms.max()) + 1 if len(self.terms) else 0, -1, np.int64)
+            self._lookup[self.terms] = np.arange(len(self.terms))
+        out = np.full(len(ids), -1, np.int64)
+        inside = ids < len(self._lookup)
+        out[inside] = self._lookup[ids[inside]]
+        return out
+
+    def with_params(self, k1: float, b: float) -> FolderPart:
+        self.columns(np.zeros(0, np.int64))  # the lookup, made once and shared
+        return FolderPart(self.bm25.with_params(k1, b), self.terms, self._lookup)
+
+
+class FolderBM25:
+    """BM25 for the folders of a corpus, each weighed on its own: how rare a term is and how long
+    passages are count within the folder only, so that a change in one folder leaves the others'
+    weights alone and needn't weigh them again. A folder's passages are a run of rows, from its
+    offset. doc_freq and idf count the whole corpus, for what isn't scoring: choosing keywords,
+    weighing typos and completing words."""
+
+    def __init__(self, parts: list[tuple[int, FolderPart]], n_docs: int, n_terms: int, k1: float, b: float):
+        self.parts, self.n_docs, self.n_terms, self.k1, self.b = parts, n_docs, n_terms, k1, b
+        self._doc_freq: np.ndarray | None = None
+
+    @property
+    def doc_freq(self) -> np.ndarray:
+        """How many passages of the corpus each term is in."""
+        if self._doc_freq is None:
+            df = np.zeros(self.n_terms, np.int64)
+            for _, part in self.parts:
+                local = part.bm25.doc_freq
+                cols = np.arange(len(local)) if part.terms is None else np.asarray(part.terms, np.int64)
+                inside = cols < self.n_terms
+                df[cols[inside]] += local[inside]  # a folder has each term once
+            self._doc_freq = df
+        return self._doc_freq
+
+    @property
+    def idf(self) -> np.ndarray:
+        df = self.doc_freq
+        return np.log1p((self.n_docs - df + 0.5) / (df + 0.5)).astype(np.float32)
+
+    def with_params(self, k1: float, b: float) -> FolderBM25:
+        if (k1, b) == (self.k1, self.b):
+            return self
+        return FolderBM25([(offset, part.with_params(k1, b)) for offset, part in self.parts], self.n_docs, self.n_terms,
+                          k1, b)
+
+    def scores(self, term_ids, weights) -> np.ndarray:
+        """Each passage's BM25 score in its own folder, for a query given as term ids with weights."""
+        out = np.zeros(self.n_docs, np.float32)
+        if len(term_ids) == 0:
+            return out
+        weights = np.asarray(weights, np.float32)
+        for offset, part in self.parts:
+            cols = part.columns(term_ids)
+            keep = cols >= 0
+            if keep.any():
+                out[offset:offset + part.bm25.n_docs] = part.bm25.matrix[:, cols[keep]] @ weights[keep]
+        return out
+
+    def pattern_scores(self, counts: np.ndarray, rows: np.ndarray | None = None) -> np.ndarray:
+        """BM25 of a phrase or regex, in each folder from how often it matches there (see BM25)."""
+        out = np.zeros(self.n_docs, np.float32)
+        for offset, part in self.parts:
+            end = offset + part.bm25.n_docs
+            mine = None if rows is None else rows[(rows >= offset) & (rows < end)] - offset
+            if mine is None or len(mine):
+                out[offset:end] = part.bm25.pattern_scores(counts[offset:end], mine)
+        return out
+
+    def rows_with(self, term_id: int) -> np.ndarray:
+        """The passages that contain this term."""
+        found = []
+        for offset, part in self.parts:
+            col = int(part.columns([term_id])[0])
+            if col >= 0:
+                m = part.bm25.matrix
+                found.append(m.indices[m.indptr[col]:m.indptr[col + 1]].astype(np.int64) + offset)
+        return np.concatenate(found) if found else np.zeros(0, np.int64)
+
+
 def merge_postings(blocks, n_terms: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """One set of postings (CSC pieces) from several, each (indptr, rows, tf, terms, row offset): the
     passages of each are the next rows, and `terms` gives the term of each of its columns (None: the

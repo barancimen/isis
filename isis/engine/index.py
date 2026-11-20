@@ -40,7 +40,7 @@ except ImportError:  # Windows: no way to tell whether osiris is at work
 from . import native
 from .chunker import (MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, document_source,
                       split_lines)
-from .lexical import B, BM25, K1, Vocabulary, merge_postings, postings_of, term_counts
+from .lexical import B, BM25, K1, FolderBM25, FolderPart, Vocabulary, merge_postings, postings_of, term_counts
 from .osiris import Manifest
 from .text import STOPWORDS, WORD, tokenize_with_surface
 from .typos import WordView, Words
@@ -264,7 +264,7 @@ class Snapshot:
     running in another thread never changes data under it."""
 
     passages: Sequence[Passage]  # a PassageRows, whose passages are made when asked for
-    bm25: BM25
+    bm25: FolderBM25
     vocab: Vocabulary  # shared with the engine and only ever grows: look terms up with term_id()
     sorted_terms: list[str]  # every term of the vocabulary, sorted, for prefix expansion: some may not occur (doc_freq 0)
     words: WordView  # every word as written, with its term, for typo-tolerant search
@@ -293,7 +293,7 @@ class Snapshot:
     def __len__(self) -> int:
         return len(self.passages)
 
-    def bm25_for(self, k1: float, b: float) -> BM25:
+    def bm25_for(self, k1: float, b: float) -> FolderBM25:
         """BM25 with other parameters, built on first use; the last few are kept."""
         key = (round(float(k1), 4), round(float(b), 4))
         if key == (self.bm25.k1, self.bm25.b):
@@ -471,6 +471,7 @@ class Engine:
         # Each folder's postings (see BM25), with the files they were made from, in the order of the
         # snapshot's rows: a folder whose files are all the same next time needn't make them again.
         self._postings: dict[str, tuple[list[FileRecord], tuple]] = {}
+        self._parts: dict[str, tuple[list[FileRecord], FolderPart]] = {}  # and each folder's BM25, the same way
         self._sorted_terms: list[str] = []  # every term of the vocabulary, sorted, for prefix search
         self._sorted_upto = 0  # how many terms of the vocabulary it holds
         # While osiris writes to an archive, its changes are taken up every ARCHIVE_EVERY seconds and
@@ -964,6 +965,18 @@ class Engine:
         self._postings[prefix] = (records, block)
         return block
 
+    def _part(self, prefix: str, records: list[FileRecord]) -> FolderPart:
+        """The folder's BM25, weighed on its own (see FolderBM25). Kept for next time: a change in
+        another folder leaves it as it is."""
+        kept = self._parts.get(prefix)
+        if kept is not None and len(kept[0]) == len(records) and all(a is b for a, b in zip(kept[0], records)):
+            return kept[1]
+        indptr, rows, tf, terms = self._block(prefix, records)
+        n = sum(len(r.passages) for r in records)
+        part = FolderPart(BM25.from_postings(indptr, rows, tf, n, K1, B), None if terms is None else np.asarray(terms))
+        self._parts[prefix] = (records, part)
+        return part
+
     def _vocabulary_sorted(self) -> list[str]:
         """Every term so far, sorted. A cache keeps its terms sorted and the vocabulary only grows, so
         this is mostly sorted already, which a sort goes through in one pass."""
@@ -1003,12 +1016,12 @@ class Engine:
                 has[start:start + len(v)] = True
             return out, has
 
-        blocks, offset = [], 0
+        parts, offset = [], 0
         for prefix, paths in groupby(order, key=self._prefix):  # each folder's rows are together
             records = [self.files[p] for p in paths]
-            blocks.append((*self._block(prefix, records), offset))
+            parts.append((offset, self._part(prefix, records)))
             offset += sum(len(r.passages) for r in records)
-        bm25 = BM25.from_postings(*merge_postings(blocks, len(self.vocab)), len(passages), K1, B)
+        bm25 = FolderBM25(parts, len(passages), len(self.vocab), K1, B)
         default_vectors, default_has = of(self.embedder)
         snapshot = Snapshot(
             passages=passages,
@@ -1151,10 +1164,13 @@ class Engine:
     def _save(self) -> None:
         """Saves the cache of each folder that changed since it was last saved or loaded. An archive
         osiris is writing to waits until it's done: its cache can be gigabytes."""
+        self._remapped = False
         for prefix in self.roots:
             if prefix in self._unsaved and not self.archive_busy(prefix):
                 self._save_folder(prefix)
                 self._unsaved.discard(prefix)
+        if self._remapped:  # a snapshot whose folder BM25 reads the saved postings, so the copy is let go
+            self._publish()
 
     def _save_folder(self, prefix: str) -> None:
         """Saves one folder's cache: index.json names the folder that holds it, cache.<token>, with
@@ -1281,6 +1297,8 @@ class Engine:
 
             self._postings[prefix] = (records, (load("post_indptr"), load("post_rows"), load("post_tf"),
                                                 used[np.asarray(alphabetical, np.int64)]))
+            if self._parts.pop(prefix, None) is not None:  # its BM25 holds the copy in memory: made again from these
+                self._remapped = True
         for embedder in self.embedders:
             self._save_vectors(prefix, embedder, records)
 

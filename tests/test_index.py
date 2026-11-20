@@ -586,6 +586,7 @@ def test_a_change_saves_only_the_cache_of_its_own_folder(tmp_path):
     after = tokens()
     assert after["b"] == before["b"] and after["a"] != before["a"]
     assert isinstance(e._postings["a"][1][1].base, np.memmap)  # made again for the change, then mapped from the cache
+    assert isinstance(e._parts["a"][1].bm25.postings[1].base, np.memmap)  # and so is its BM25, letting the copy go
 
     (b / "four.md").write_text("Pikeword and a whale.\n")  # a compile that uses the mapped postings of a
     e.refresh()
@@ -604,8 +605,8 @@ def test_a_change_saves_only_the_cache_of_its_own_folder(tmp_path):
 def same_index(one: Engine, other: Engine) -> bool:
     """Whether two engines' BM25 scores are the same for every term, whatever their term ids."""
     def by_term(e):
-        m = e.snapshot.bm25.matrix
-        return {e.vocab.terms[i]: m[:, i].toarray().ravel() for i in range(m.shape[1]) if m[:, i].nnz}
+        bm25 = e.snapshot.bm25
+        return {e.vocab.terms[i]: bm25.scores([i], [1.0]) for i in np.flatnonzero(bm25.doc_freq)}
     a, b = by_term(one), by_term(other)
     return a.keys() == b.keys() and all(np.allclose(a[t], b[t]) for t in a)
 
@@ -625,3 +626,47 @@ def test_embeddings_saved_the_old_way_are_kept_and_saved_the_new_way(corpus, tmp
     assert saved.exists() and not saved.with_suffix(".npz").exists()
     again = RecordingEmbedder()
     assert Engine(corpus, embedder=again, index_dir=index).refresh()["embedded"] == 0 and not again.seen
+
+
+def test_each_folder_is_weighed_on_its_own(tmp_path):
+    from isis.engine.search import compile_pattern
+
+    a = write_corpus(tmp_path / "a", {"one.md": "The whale and the ship.\n", "two.md": "A ship alone.\n",
+                                      "three.md": "A storm at sea.\n"})
+    b = write_corpus(tmp_path / "b", {"four.md": "Whale, whale and more whale.\n", "five.md": "A whale and a heron.\n"})
+    both = Engine([a, b], index_dir=None)
+    both.refresh()
+    for folder in (a, b):  # each folder's scores are the ones it would have alone
+        alone = Engine([folder])
+        alone.refresh()
+        start, end = min(both.snapshot.file_rows[f"{folder.name}/{p}"][0] for p in alone.snapshot.file_rows), None
+        end = start + len(alone.snapshot)
+        for word in ("whale", "ship", "heron"):
+            mine = both.snapshot.bm25.scores([both.vocab.get(word)], [1.0])[start:end]
+            if alone.vocab.get(word) is None:
+                assert not mine.any()
+                continue
+            rows = [both.snapshot.file_rows[f"{folder.name}/{p}"][0] - start for p in alone.snapshot.file_rows]
+            theirs = alone.snapshot.bm25.scores([alone.vocab.get(word)], [1.0])
+            assert np.allclose(mine[rows], theirs[[r for r, _ in alone.snapshot.file_rows.values()]])
+        pattern = compile_pattern("whale")
+        counts = both.snapshot.pattern_counts(pattern)
+        assert np.allclose(sorted(both.snapshot.bm25.pattern_scores(counts)[start:end]),
+                           sorted(alone.snapshot.bm25.pattern_scores(alone.snapshot.pattern_counts(pattern))))
+        tuned = both.snapshot.bm25_for(2.0, 0.9).scores([both.vocab.get("whale")], [1.0])[start:end]
+        assert np.allclose(sorted(tuned), sorted(alone.snapshot.bm25_for(2.0, 0.9).scores([alone.vocab.get("whale")], [1.0])))
+    assert both.snapshot.bm25.doc_freq[both.vocab.get("whale")] == 3  # counted over the whole corpus
+    assert sorted(both.snapshot.bm25.rows_with(both.vocab.get("ship")).tolist()) == sorted(
+        both.snapshot.file_rows[f"a/{p}"][0] for p in ("one.md", "two.md"))
+
+
+def test_a_change_in_one_folder_leaves_the_others_weights_alone(tmp_path):
+    a = write_corpus(tmp_path / "a", {"one.md": "Whale and ship.\n"})
+    b = write_corpus(tmp_path / "b", {"two.md": "Heron and stoat.\n"})
+    e = Engine([a, b])
+    e.refresh()
+    kept = e._parts["b"][1]
+    (a / "one.md").write_text("Whale, ship and a storm.\n")
+    e.refresh()
+    assert e._parts["b"][1] is kept and e.snapshot.bm25.parts[1][1] is kept  # not weighed again
+    assert paths(e.search("storm")) == ["a/one.md"] and paths(e.search("heron")) == ["b/two.md"]
