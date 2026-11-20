@@ -3172,6 +3172,7 @@ function rememberOpen(drawer, key) {
 function bind() {
   for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-tune`), `tune-${kind}`);
   rememberOpen($("#related-feedback"), "feedback");
+  for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-help`), `help-${kind}`);
   bindResizers();
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
   bindTaskTabs();

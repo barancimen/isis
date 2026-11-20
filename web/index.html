@@ -40,8 +40,58 @@
         </div>
         <button id="search-meaning" type="button" class="meaning-btn" aria-pressed="true" title="When this is on, Search also finds passages close to your words in meaning, even if they use different words. When it's off, Search matches your words only. That's the same as setting &quot;How important meaning is&quot; to 0 in Adjustments.">Meaning</button>
       </div>
+      <details id="search-help" class="tune help">
+        <summary><span class="tune-title">How to search</span></summary>
+        <div class="help-body">
+          <h4>The basics</h4>
+          <p>Search looks through passages, the short sections of up to about 180 words that your documents are cut into. A long section is cut into passages that overlap by about 20 words. Results update as you type.</p>
+          <p>Passages with more of your words rank higher. A word counts for more when it's rare in your documents. A match counts for less in a long passage.</p>
+          <ul>
+            <li>Words match whole and in any case. Endings aren't removed, so <code>whale</code> doesn't find "whales", but <code>whale*</code> finds both.</li>
+            <li>A word is a run of letters and digits. A hyphen or an apostrophe splits it in two.</li>
+            <li>Very common words such as "the" and "of" are ignored. So are single letters.</li>
+            <li>A last word that isn't in your documents, such as one you're still typing, matches the longer words that start with it.</li>
+            <li>A word that no passage contains is replaced with the closest word in your documents. The line above the results says so and has a link to search exactly what you typed.</li>
+            <li>Your words also find close misspellings in your documents, which rank below the right spelling.</li>
+          </ul>
+          <h4>Meaning</h4>
+          <p>With <em>Meaning</em> on, Search also finds passages that are close to your words in meaning, even if they use different words. Each result then shows its rank by keywords and its rank by meaning. The order of results combines the two. Passages without meaning data are ranked by keywords alone. Turn <em>Meaning</em> off to match your words only. The menu in the status bar picks the meaning model.</p>
+          <h4>Phrases</h4>
+          <p><code>"red door"</code> finds those words next to each other and in that order, in any case. Any spaces or line breaks can come between them but punctuation can't. Common words count in a phrase. A phrase can also match inside longer words, so <code>"red door"</code> finds "red doors" too.</p>
+          <h4>Wildcards</h4>
+          <p>A <code>*</code> in a word stands for any number of letters or digits, including none. It can go anywhere in the word, as in <code>hostage*</code>, <code>*mbrella</code> or <code>umbre*la</code>. A wildcard matches whole words only, so <code>umbre*la</code> doesn't match "umbrellas". It works in phrases too, as in <code>"red umbre*la"</code>.</p>
+          <h4>Regular expressions</h4>
+          <p><code>/text/</code> is a regular expression in Python's syntax. It ignores case unless it has a capital letter in it.</p>
+          <ul>
+            <li>It searches each passage's text, with the passage's heading as the first line.</li>
+            <li><code>.</code> doesn't match a line break. <code>^</code> and <code>$</code> mark the start and end of the whole passage.</li>
+            <li><code>\b</code> marks the edge of a word and <code>\w</code> matches one letter, digit or underscore. So <code>/\bhostage\w*/</code> finds the words that start with "hostage".</li>
+            <li>Spaces are allowed inside, as in <code>/red door/</code>. Write a slash inside it as <code>\/</code>.</li>
+            <li>The closing slash must be followed by a space or the end of the query. Until you type it, the expression is ignored.</li>
+            <li>On the public site an expression that runs too long stops with an error.</li>
+          </ul>
+          <p>A phrase, wildcard or regular expression counts like one more word in the ranking. Each match adds to the score. On its own it lists only the passages that match. The first search with one checks every passage, which can take a few seconds in a large collection. After that its matches are remembered.</p>
+          <h4>Keeping and removing</h4>
+          <ul>
+            <li><code>+word</code> keeps only the passages that contain the word and <code>-word</code> removes them. Both work with phrases, wildcards and regular expressions, as in <code>-"red door"</code> or <code>+/\d{4}/</code>. Words after <code>+</code> and <code>-</code> match exactly, without misspellings.</li>
+            <li><code>site:github.com</code> keeps only documents whose <code>url:</code> line at the top is on that website or one of its subdomains. Several of them mean any of those sites. <code>-site:github.com</code> removes the site.</li>
+            <li><code>doc:word</code> keeps the passages of documents that contain the word in any passage. <code>-doc:word</code> removes every passage of those documents. It takes phrases, wildcards and regular expressions too, so <code>homes -doc:house -doc:/decor\w*/</code> finds homes only in documents that never mention a house or decoration. <code>doc:word</code> means the same as <code>+doc:word</code>.</li>
+          </ul>
+          <p>These rules apply before anything is ranked, so meaning never brings back a passage they rule out. <code>site:</code> and <code>doc:</code> rules don't change the order of results. On their own they list every passage they allow. <code>-</code> rules on their own find nothing.</p>
+          <h4>Good to know</h4>
+          <ul>
+            <li>The block between <code>---</code> lines at the top of a document isn't searched.</li>
+            <li>A phrase split between two passages can be missed, although the overlap between passages catches most of them.</li>
+            <li>Search shows the best 50 passages.</li>
+            <li>Click a result to open it in the reader with the passage highlighted. Click its title to open the document at the top. Its <em>+</em> button adds the passage to your task.</li>
+            <li>The ⋯ menu on a result hides that passage or its whole document from this task's searches. They're listed under <em>Hidden in Search</em>.</li>
+            <li>The folder boxes leave folders or sources out of Search and Related alike.</li>
+            <li><em>Adjustments</em> has sliders for the ranking. A preset saves the sliders, the folders, the hidden documents, the <em>Meaning</em> button and the search box under a name.</li>
+            <li>Press Ctrl/⌘+K to come back to the search box. Press ↓ in the box or click the empty box to pick a recent search.</li>
+          </ul>
+        </div>
+      </details>
       <div id="search-folders" class="folder-picks" hidden></div>
-      <div class="hint">Type the words you want to find. Passages (short sections of a document) with more of your words rank higher. <code>"two words"</code> finds a phrase and <code>/text/</code> is a regular expression. A <code>*</code> in a word stands for any letters, as in <code>hostage*</code>, <code>*mbrella</code> or <code>umbre*la</code>, and works in phrases too. <code>+word</code> keeps only passages with that word and <code>-word</code> removes them. <code>site:github.com</code> keeps only documents with that website in the <code>url:</code> line at their top and <code>-site:github.com</code> removes them. <code>doc:word</code> keeps only documents that have that word anywhere and <code>-doc:word</code> removes them. It takes phrases and regular expressions too, as in <code>-doc:/decor\w*/</code>. Press Ctrl/⌘+K to come back here. Press ↓ in the box, or click it while it's empty, to pick one of your recent searches in this tab.</div>
       <div id="search-presets" class="preset-bar"></div>
       <details id="search-tune" class="tune"></details>
       <details id="search-hidden" class="tune" hidden></details>
@@ -60,7 +110,45 @@
       <form id="related-steer" class="steer-row" hidden>
         <div class="hint">These keywords come from your task. Click one to boost it or click × to stop using it.</div>
         <input id="steer-input" type="search" spellcheck="false" placeholder='Word rules  word  +word  -word  "two words"  /text/' aria-label="Word rules for the results">
-        <div class="hint">Word rules change the results. <code>word</code> ranks passages with that word higher, <code>+word</code> keeps only those passages and <code>-word</code> removes them. <code>site:github.com</code>, <code>doc:word</code>, phrases, regular expressions and <code>word*</code> work here too. Press Enter to save. The rules stay with this task.</div>
+        <details id="related-help" class="tune help">
+          <summary><span class="tune-title">How Related and word rules work</span></summary>
+          <div class="help-body">
+            <h4>What Related does</h4>
+            <p>Related suggests passages for your whole task, using all of its text as the query. It looks for passages that match the task in both words and meaning. It sorts them into groups such as <em>Best results</em> and <em>Same meaning, different words</em>. Passages already in your task are left out.</p>
+            <p>Suggestions stay as they are while you work. After you edit the task or change anything here, click <em>Refresh</em> to update them.</p>
+            <h4>Keywords</h4>
+            <p>The keywords above this box are the most distinctive words of your task, the ones it uses often and your documents use rarely. Passages with them rank higher.</p>
+            <ul>
+              <li>Click a keyword to boost it, so it always counts at full weight.</li>
+              <li>Click × to stop using it. Passages with it can still be suggested.</li>
+              <li>Click ⊘ after that to remove the passages that contain it.</li>
+            </ul>
+            <p>Boosting or removing a keyword writes <code>word</code> or <code>-word</code> into the word rules.</p>
+            <h4>Word rules</h4>
+            <p>Word rules change the suggestions. They're written like a search.</p>
+            <ul>
+              <li><code>word</code> adds the word to the keywords at full weight.</li>
+              <li><code>+word</code> keeps only passages with the word and <code>-word</code> removes them.</li>
+              <li>Phrases such as <code>"red door"</code>, wildcards such as <code>umbre*la</code> and regular expressions such as <code>/\bhome\w*/</code> work as they do in Search. Their matches add to a passage's keyword score. With <code>+</code> or <code>-</code> they keep or remove passages.</li>
+              <li><code>site:github.com</code> keeps only documents from that website and <code>doc:word</code> keeps only documents that contain the word, as in Search. Put <code>-</code> in front to remove them instead.</li>
+            </ul>
+            <p>A few things differ from Search.</p>
+            <ul>
+              <li>Words match exactly. Misspellings and half-typed words don't count.</li>
+              <li>Press Enter to save the rules, then click <em>Refresh</em>. Escape undoes an edit you haven't saved. A rule with a broken regular expression shows an error and isn't saved.</li>
+              <li>The rules belong to this task and are kept on the server, so they still apply after you rewrite the task.</li>
+              <li>Passages without meaning data can only appear in <em>Best results</em>, which takes a strong keyword match.</li>
+            </ul>
+            <h4>Teaching Related</h4>
+            <ul>
+              <li><em>More like this</em> in a suggestion's ⋯ menu pulls the suggestions toward that passage. <em>Less like this</em> hides it along with the passages close to it in meaning.</li>
+              <li>The same menu can hide one passage or every passage from its document for this task. Hiding teaches Related which groups you find useful.</li>
+              <li><em>Your changes</em> lists everything Related remembers about this task, each with a way to undo it.</li>
+              <li><em>Adjustments</em> has sliders for every threshold. A preset saves the sliders, the folders, the word rules, the keywords not in use and the hidden documents.</li>
+              <li>The folder boxes are shared with Search.</li>
+            </ul>
+          </div>
+        </details>
         <div id="steer-error" class="steer-error" hidden></div>
       </form>
       <div id="related-lanes" class="results"></div>
