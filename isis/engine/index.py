@@ -898,29 +898,32 @@ class Engine:
         parts: list[Sequence[Passage]] = []
         file_rows = {}
         rows = 0
-        vectors = {e.name: ([], []) for e in self.embedders}  # model name -> (arrays, has)
+        vectors: dict[str, list] = {e.name: [] for e in self.embedders}  # model name -> [(first row, vectors)]
         order = self._ordered_paths()
         sources = {path: self._source_id(path, r) for path, r in self.files.items() if self._prefix(path) in self.osiris}
         for path in order:
             r = self.files[path]
             n = len(r.passages)
             file_rows[path] = (rows, rows + n)
-            rows += n
             parts.append(r.passages)
             for e in self.embedders:
                 v = r.vectors.get(e.name)
-                ok = v is not None and v.shape == (n, e.dim)
-                vectors[e.name][0].append(v if ok else np.zeros((n, e.dim), np.float16))
-                vectors[e.name][1].append(np.full(n, ok))
+                if n and v is not None and v.shape == (n, e.dim):
+                    vectors[e.name].append((rows, v))
+            rows += n
 
         passages = PassageRows(parts)
 
         def of(e) -> tuple[np.ndarray, np.ndarray]:
             if e is None:
                 return np.zeros((len(passages), 0), np.float32), np.zeros(len(passages), bool)
-            arrays, has = vectors[e.name]
-            return (np.concatenate(arrays).astype(np.float32) if arrays else np.zeros((0, e.dim), np.float32),
-                    np.concatenate(has) if has else np.zeros(0, bool))
+            # Zeroed by the system, so the rows of passages without embeddings, which are never
+            # written, take no memory: a large keywords-only archive would otherwise fill gigabytes.
+            out, has = np.zeros((len(passages), e.dim), np.float32), np.zeros(len(passages), bool)
+            for start, v in vectors[e.name]:
+                out[start:start + len(v)] = v
+                has[start:start + len(v)] = True
+            return out, has
 
         blocks, offset = [], 0
         for prefix, paths in groupby(order, key=self._prefix):  # each folder's rows are together

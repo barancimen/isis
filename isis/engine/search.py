@@ -667,7 +667,8 @@ def search(
     lexical = np.where(allowed, lexical_scores(snapshot, bm25, q.term_ids, q.weights, q.patterns, rows), 0.0)
 
     if embeddings and q.text.strip():
-        semantic = similarities(snapshot.vectors, embedder.embed([q.text], cache=True, query=True)[0], scope,
+        embedded = snapshot.has_vector if scope is None else scope & snapshot.has_vector  # only rows that have vectors
+        semantic = similarities(snapshot.vectors, embedder.embed([q.text], cache=True, query=True)[0], embedded,
                                 snapshot.has_vector & allowed)
         lex_rank = {int(row): rank for rank, row in enumerate(top_rows(lexical, config.candidates, positive=True))}
         sem_rank = {int(row): rank for rank, row in enumerate(top_rows(semantic, config.candidates))}

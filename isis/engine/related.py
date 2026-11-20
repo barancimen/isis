@@ -751,16 +751,10 @@ def zscores(snapshot: Snapshot, vecs: np.ndarray, scope: np.ndarray | None = Non
     and standard deviation, these are not dragged around by a large on-topic cluster. Passages
     without embeddings, or outside `scope` (None: none are), get -inf. The median is the whole
     corpus's either way, so a z-score means the same with folders left out."""
-    rows = snapshot.typical_rows()
-    if scope is None or len(rows) == int(snapshot.has_vector.sum()):  # a corpus small enough to use all of it
-        cos = snapshot.vectors @ vecs.T
-        typical = cos[rows]
-        if scope is not None:
-            cos[~scope] = -np.inf
-    else:
-        cos = scoped_product(snapshot.vectors, vecs.T, scope)
-        typical = snapshot.typical_vectors() @ vecs.T
+    rows = snapshot.typical_rows()  # all of them have vectors
     has = snapshot.has_vector
+    cos = scoped_product(snapshot.vectors, vecs.T, has if scope is None else scope & has)  # only rows that have vectors
+    typical = cos[rows] if scope is None else snapshot.typical_vectors() @ vecs.T
     median = np.median(typical, axis=0)
     spread = 1.4826 * np.median(np.abs(typical - median), axis=0) + 1e-6
     z = (cos - median) / spread
