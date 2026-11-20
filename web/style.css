@@ -23,32 +23,32 @@
   --avoided-border: #e3bbb3;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --round: 0.3;
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #131313;
-    --panel: #1b1b1b;
-    --panel-2: #2c2c2c;
-    --fg: #f2f2f2;
-    --muted: #d4d4d4;
-    --faint: #adadad;
-    --border: #5e5e5e;
-    --accent: #f07474;
-    --accent-fg: #160b0b;
-    --hit-line: rgba(255, 255, 255, 0.09);
-    --mark: rgba(255, 90, 90, 0.28);
-    --selection: rgba(255, 255, 255, 0.16);
-    --active-line: rgba(255, 255, 255, 0.03);
-    --added: rgba(240, 116, 116, 0.16);
-    --danger: #ee8a80;
-    --ok: #8fcf84;
-    --liked-bg: #1d2a1d;
-    --liked-border: #3f5e3c;
-    --avoided-bg: #2e1f1d;
-    --avoided-border: #6a3e38;
-  }
+/* Light unless the theme menu at the bottom left picks dark (theme.js sets it before the page is drawn). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131313;
+  --panel: #1b1b1b;
+  --panel-2: #2c2c2c;
+  --fg: #f2f2f2;
+  --muted: #d4d4d4;
+  --faint: #adadad;
+  --border: #5e5e5e;
+  --accent: #f07474;
+  --accent-fg: #160b0b;
+  --hit-line: rgba(255, 255, 255, 0.09);
+  --mark: rgba(255, 90, 90, 0.28);
+  --selection: rgba(255, 255, 255, 0.16);
+  --active-line: rgba(255, 255, 255, 0.03);
+  --added: rgba(240, 116, 116, 0.16);
+  --danger: #ee8a80;
+  --ok: #8fcf84;
+  --liked-bg: #1d2a1d;
+  --liked-border: #3f5e3c;
+  --avoided-bg: #2e1f1d;
+  --avoided-border: #6a3e38;
 }
 
 * { box-sizing: border-box; }
@@ -391,9 +391,7 @@ button.tree-fold:hover { color: var(--fg); }
 .menu-item .icon-less, .menu-item .icon-hide, .menu-item .icon-doc { color: var(--danger); }
 .menu-item .icon-check { color: var(--accent); }
 .menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
-@media (prefers-color-scheme: dark) {
-  .hit-menu { box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5); }
-}
+:root[data-theme="dark"] .hit-menu { box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5); }
 .hit-loc { color: var(--faint); font-size: 12.5px; }
 .hit-body { margin-top: 4px; font-size: 14px; }
 .hit-body p { margin: 0 0 4px; overflow-wrap: anywhere; text-align: justify; }
@@ -584,6 +582,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
 }
 .status-pick[hidden] { display: none; }
+#model-box { margin-left: 10px; }
 .status-pick::after { content: ""; border: 4px solid transparent; border-top-width: 0; border-bottom-color: currentColor; }
 .status-pick:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
 .status-pick select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; font: inherit; cursor: pointer; }

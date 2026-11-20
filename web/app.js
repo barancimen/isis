@@ -3163,6 +3163,21 @@ function bindResizers() {
 
 // ---------- wiring ----------
 
+// The theme menu at the bottom left: light unless dark is chosen, and kept in this browser.
+// theme.js applies the kept choice before the page is drawn.
+function bindTheme() {
+  const pick = $("#theme-pick");
+  const show = () => ($("#theme-name").textContent = pick.selectedOptions[0].textContent);
+  pick.value = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  show();
+  pick.addEventListener("change", () => {
+    if (pick.value === "dark") document.documentElement.dataset.theme = "dark";
+    else delete document.documentElement.dataset.theme;
+    store.set("theme", pick.value);
+    show();
+  });
+}
+
 // Drawers stay open or closed across reloads.
 function rememberOpen(drawer, key) {
   drawer.open = store.get(key) === "open";
@@ -3170,6 +3185,7 @@ function rememberOpen(drawer, key) {
 }
 
 function bind() {
+  bindTheme();
   for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-tune`), `tune-${kind}`);
   rememberOpen($("#related-feedback"), "feedback");
   for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-help`), `help-${kind}`);
