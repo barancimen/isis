@@ -72,6 +72,15 @@
             <li>On the public site an expression that runs too long stops with an error.</li>
           </ul>
           <p>A phrase, wildcard or regular expression counts like one more word in the ranking. Each match adds to the score. On its own it lists only the passages that match. The first search with one checks every passage, which can take a few seconds in a large collection. After that its matches are remembered.</p>
+          <h4>Capital letters</h4>
+          <p>Case is ignored everywhere except in a regular expression that has a capital letter in it.</p>
+          <ul>
+            <li>Words ignore case, with or without <code>+</code> and <code>-</code>, so <code>nasa</code> finds "NASA" and "Nasa". So do the corrections and close misspellings Search finds for them.</li>
+            <li>Phrases and wildcards ignore case, so <code>"red door"</code> finds "Red Door".</li>
+            <li>A regular expression ignores case unless it has a capital letter in it. <code>/nasa/</code> finds "NASA" and "nasa" but <code>/NASA/</code> finds only "NASA". Escapes such as <code>\B</code> and <code>\W</code> don't count as capitals.</li>
+            <li>To ignore case in an expression with a capital letter, start it with <code>(?i)</code>, as in <code>/(?i)NASA \d+/</code>. To match the case of just one part, wrap that part in <code>(?-i:…)</code>, as in <code>/(?-i:nasa) rocket/</code>.</li>
+            <li><code>site:</code> ignores case. <code>doc:</code> follows the rule for the word, phrase, wildcard or expression after it.</li>
+          </ul>
           <h4>Keeping and removing</h4>
           <ul>
             <li><code>+word</code> keeps only the passages that contain the word and <code>-word</code> removes them. Both work with phrases, wildcards and regular expressions, as in <code>-"red door"</code> or <code>+/\d{4}/</code>. Words after <code>+</code> and <code>-</code> match exactly, without misspellings.</li>
@@ -139,6 +148,8 @@
               <li>The rules belong to this task and are kept on the server, so they still apply after you rewrite the task.</li>
               <li>Passages without meaning data can only appear in <em>Best results</em>, which takes a strong keyword match.</li>
             </ul>
+            <h4>Capital letters</h4>
+            <p>Keywords and word rules ignore case, including <code>+word</code>, <code>-word</code>, phrases and wildcards. A regular expression ignores case unless it has a capital letter in it, as in Search. Start it with <code>(?i)</code> to ignore case anyway, or wrap a part in <code>(?-i:…)</code> to match that part's case.</p>
             <h4>Teaching Related</h4>
             <ul>
               <li><em>More like this</em> in a suggestion's ⋯ menu pulls the suggestions toward that passage. <em>Less like this</em> hides it along with the passages close to it in meaning.</li>
