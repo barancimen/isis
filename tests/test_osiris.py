@@ -199,3 +199,52 @@ def test_the_command_line_takes_an_archive(tmp_path, monkeypatch):
     cli.main(["index", str(data), str(notes), "--osiris", str(data)])  # named first, it stays first
     assert cli.folders_of(seen["corpus"], seen["osiris"]) == [data / "md", notes]
     assert cli.archives_of([str(data / "md")]) == {data / "md": data / "manifest.sqlite"}
+
+
+def test_an_archive_osiris_is_writing_to_is_saved_when_it_is_done(tmp_path):
+    import fcntl
+
+    from isis.engine import index
+
+    notes = write_corpus(tmp_path / "notes", {"n.md": "# Notes\n\nMy own notes on the whale.\n"})
+    data = make_archive(tmp_path / "data")
+    (data / "md" / ".no-embed").write_text("")
+    md, manifest = archive_folders(data)
+    engine = Engine([notes, md], embedder=HashEmbedder(), target_words=0, osiris={md: manifest})
+    engine.refresh()
+
+    def token():
+        return json.loads((md / ".isis" / "index.json").read_text())["token"]
+
+    def found(word):
+        return {h.path for h in engine.search(word)}
+
+    saved = token()
+    assert not engine.archive_busy("md")  # an osiris without the file is never busy
+    lock = open(data / index.OSIRIS_BUSY, "a")
+    fcntl.flock(lock, fcntl.LOCK_SH)  # as osiris holds it while a command runs
+    assert engine.archive_busy("md")
+
+    write_corpus(md, {"dd/dd01.md": doc("html", "Narwhalword in the first batch.")})
+    engine.refresh()  # the first look during a run takes the change up at once
+    assert found("narwhalword") == {"md/dd/dd01.md"} and token() == saved and not engine.waiting()
+
+    write_corpus(md, {"dd/dd02.md": doc("html", "Belugaword in the next batch.")})
+    (notes / "n.md").write_text("# Notes\n\nMy own notes on the orcaword.\n")
+    engine.refresh()  # the archive waits, the notes don't
+    assert found("belugaword") == set() and found("orcaword") == {"notes/n.md"}
+    assert "md" in engine.no_embed and not engine.waiting()
+
+    engine._archive_read["md"] -= index.ARCHIVE_EVERY  # as if the minutes had passed
+    assert engine.waiting()
+    engine.refresh()
+    assert found("belugaword") == {"md/dd/dd02.md"} and token() == saved
+    assert not engine.snapshot.has_vector[slice(*engine.snapshot.file_rows["md/dd/dd02.md"])].any()  # still keywords only
+
+    fcntl.flock(lock, fcntl.LOCK_UN)  # osiris is done
+    lock.close()
+    assert engine.waiting()
+    engine.refresh()
+    assert token() != saved and not engine.waiting()
+    again = Engine([notes, md], embedder=HashEmbedder(), target_words=0, osiris={md: manifest})
+    assert again.refresh()["changed"] == 0 and {h.path for h in again.search("belugaword")} == {"md/dd/dd02.md"}

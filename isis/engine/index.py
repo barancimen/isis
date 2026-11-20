@@ -32,6 +32,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import fcntl
+except ImportError:  # Windows: no way to tell whether osiris is at work
+    fcntl = None
+
 from . import native
 from .chunker import (MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, document_source,
                       split_lines)
@@ -54,6 +59,8 @@ NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it ar
 EMBED_GROUP = 256  # passages per embedding call while indexing
 PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
 SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
+OSIRIS_BUSY = ".osiris-busy"  # in an osiris archive's data folder: locked while osiris writes to it
+ARCHIVE_EVERY = 300.0  # seconds between looks at an archive osiris is writing to
 REPORT_EVERY = 10.0  # seconds between progress messages during a long embedding run
 SAMPLE_ABOVE = 50_000  # embedded passages; above this, "typical" similarity comes from a sample
 TYPICAL_SAMPLE = 20_000
@@ -466,6 +473,12 @@ class Engine:
         self._postings: dict[str, tuple[list[FileRecord], tuple]] = {}
         self._sorted_terms: list[str] = []  # every term of the vocabulary, sorted, for prefix search
         self._sorted_upto = 0  # how many terms of the vocabulary it holds
+        # While osiris writes to an archive, its changes are taken up every ARCHIVE_EVERY seconds and
+        # its cache is saved once osiris is done (see archive_busy). Off: as any other folder.
+        self.defer_archives = True
+        self._archive_read: dict[str, float] = {}  # archive -> when its changes were last taken up (monotonic)
+        self._archive_held: set[str] = set()  # archives left out of a scan since then
+        self._archive_noted: set[str] = set()  # archives said to be busy, to say when osiris is done
         self._load()
         self._publish()
 
@@ -517,11 +530,12 @@ class Engine:
             self._said.add(message)
             log.log(level, message)
 
-    def _scan(self) -> dict[str, os.stat_result]:
+    def _scan(self, skip: set[str] = frozenset()) -> dict[str, os.stat_result]:
         """Every markdown file under the corpus folders, following symlinks. The real folders come
         first and links after them, and each folder or file is taken once (by device and inode), so
         a link loop ends and something reachable both ways keeps its real path. Folders it could
-        not read go in self._unread."""
+        not read go in self._unread. The folders in `skip` aren't looked at, and keep what the last
+        scan found in them."""
         found: dict[str, os.stat_result] = {}
         unread: list[str] = []
         folders, files = set(), set()
@@ -590,6 +604,8 @@ class Engine:
                         files.add((st.st_dev, st.st_ino))
 
         for prefix, root in self.roots.items():
+            if prefix in skip:
+                continue
             try:
                 if first_visit(root):
                     walk(root, root, prefix)
@@ -615,7 +631,10 @@ class Engine:
                 continue
             self._say_once(logging.INFO, f"following link {rel} -> {link.resolve()}")
             walk(link, root, prefix)
-        self.links = links
+        def kept(paths):  # what the last scan found in the folders not looked at
+            return {p for p in paths if self._prefix(p) in skip} if skip else set()
+
+        self.links = links | kept(self.links)
         for link, rel in file_links:
             try:
                 st = link.stat()
@@ -627,9 +646,55 @@ class Engine:
             elif (st.st_dev, st.st_ino) not in files:
                 found[rel] = st
                 files.add((st.st_dev, st.st_ino))
-        self.no_embed = no_embed
-        self._unread = unread
+        self.no_embed = no_embed | kept(self.no_embed)
+        self._unread = unread + sorted(kept(self._unread))
         return found
+
+    def archive_busy(self, prefix: str) -> bool:
+        """Whether osiris is writing to this archive now: it holds a lock on .osiris-busy in the
+        archive's data folder while a command runs, which the system drops when the command ends.
+        An archive of an osiris without that file, or a system without locks, is never busy."""
+        if not self.defer_archives or prefix not in self.osiris or fcntl is None:
+            return False
+        try:
+            f = open(self.roots[prefix].parent / OSIRIS_BUSY, "rb")
+        except OSError:
+            return False
+        with f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(f, fcntl.LOCK_UN)
+            return False
+
+    def _held_back(self) -> set[str]:
+        """The archives osiris is writing to whose changes were taken up less than ARCHIVE_EVERY ago:
+        this refresh leaves them out, so that a long run doesn't rebuild their index for every batch."""
+        now = time.monotonic()
+        held = set()
+        for prefix in self.osiris:
+            busy = self.archive_busy(prefix)
+            if busy and prefix not in self._archive_noted:
+                self._archive_noted.add(prefix)
+                log.info("osiris is writing to %s: its new documents join the index every %d minutes, and its index "
+                         "cache is saved once osiris is done", prefix or "the corpus", ARCHIVE_EVERY // 60)
+            elif not busy and prefix in self._archive_noted:
+                self._archive_noted.discard(prefix)
+                log.info("osiris is done with %s", prefix or "the corpus")
+            if busy and now - self._archive_read.get(prefix, -ARCHIVE_EVERY) < ARCHIVE_EVERY:
+                held.add(prefix)
+        return held
+
+    def waiting(self) -> bool:
+        """Whether a refresh now would take up an archive's changes held back while osiris wrote to
+        it, or save its cache: osiris is done, or ARCHIVE_EVERY has passed. The server checks it now
+        and then, since nothing else would call refresh when osiris stops."""
+        now = time.monotonic()
+        for prefix in self._archive_held:
+            if now - self._archive_read.get(prefix, -ARCHIVE_EVERY) >= ARCHIVE_EVERY or not self.archive_busy(prefix):
+                return True
+        return any(prefix in self.osiris and not self.archive_busy(prefix) for prefix in self._unsaved)
 
     def _is_unread(self, path: str) -> bool:
         """Whether this file is under a folder the last scan could not read. It may only be away
@@ -712,9 +777,10 @@ class Engine:
         self._set_state("scanning", on_progress)
         if first:
             log.info("scanning %s", ", ".join(map(str, self.roots.values())))
-        found = self._scan()
-        relabeled = any([manifest.refresh() for manifest in self.osiris.values()])  # osiris wrote to it
-        removed = [p for p in self.files if p not in found and not self._is_unread(p)]
+        held = self._held_back() if not first else set()
+        found = self._scan(skip=held)
+        relabeled = any([manifest.refresh() for prefix, manifest in self.osiris.items() if prefix not in held])
+        removed = [p for p in self.files if p not in found and not self._is_unread(p) and self._prefix(p) not in held]
         changed = [
             p
             for p, st in found.items()
@@ -729,6 +795,14 @@ class Engine:
             log.info("%s, no changes since the last run" if found else "no markdown files found in %s",
                      _count(len(found), "markdown file") if found else ", ".join(map(str, self.roots.values())))
         self._unsaved.update(map(self._prefix, removed + changed))
+        now = time.monotonic()
+        for prefix in self.osiris:
+            if prefix in held:
+                self._archive_held.add(prefix)
+                continue
+            self._archive_held.discard(prefix)
+            if self.archive_busy(prefix):
+                self._archive_read[prefix] = now  # looked at during a run: the next ARCHIVE_EVERY waits
         for path in removed:
             del self.files[path]
         for path in changed:
@@ -1071,9 +1145,10 @@ class Engine:
                 r.reuse = {**(r.reuse or {}), embedder.name: found}
 
     def _save(self) -> None:
-        """Saves the cache of each folder that changed since it was last saved or loaded."""
+        """Saves the cache of each folder that changed since it was last saved or loaded. An archive
+        osiris is writing to waits until it's done: its cache can be gigabytes."""
         for prefix in self.roots:
-            if prefix in self._unsaved:
+            if prefix in self._unsaved and not self.archive_busy(prefix):
                 self._save_folder(prefix)
                 self._unsaved.discard(prefix)
 

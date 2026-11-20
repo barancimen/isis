@@ -47,6 +47,7 @@ def cmd_index(args) -> None:
     tasks_dir = Path(args.tasks).resolve() if args.tasks else folders[0] / "_tasks"
     embedders = [] if args.no_model else [Embedder(m) for m in models(args)]
     engine = Engine(folders, embedder=embedders, exclude=corpus_exclude(folders, tasks_dir), osiris=archives_of(args.osiris))
+    engine.defer_archives = False  # a single run: save everything, whatever osiris is doing
     engine.refresh()  # it reports its progress
 
 

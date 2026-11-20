@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 WEB = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 WATCH_RETRY = 30  # seconds
+CATCH_UP_EVERY = 30  # seconds between checks whether osiris is done with an archive
 PAGE_SETTLE_SECONDS = 5
 PAGE_VERSION_SLOT = '<meta name="page-version" content="">'
 # Seeds the draw that shares Related's results between its groups. It is the same for every task
@@ -219,6 +220,13 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                 if not stop.wait(WATCH_RETRY):
                     refresh()
 
+    def catch_up(stop: threading.Event) -> None:
+        """Takes up an osiris archive's changes, and saves its cache, once osiris is done writing to
+        it or ARCHIVE_EVERY has passed: no file event says so (see Engine.waiting)."""
+        while not stop.wait(CATCH_UP_EVERY):
+            if engine.waiting():
+                refresh()
+
     @asynccontextmanager
     async def lifespan(_):
         stop = threading.Event()
@@ -226,6 +234,8 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             threading.Thread(target=refresh, daemon=True, name="isis-index").start()
         if watch:
             threading.Thread(target=watch_corpus, args=(stop,), daemon=True, name="isis-watch").start()
+            if engine.osiris:
+                threading.Thread(target=catch_up, args=(stop,), daemon=True, name="isis-catch-up").start()
         if public and background:
             threading.Thread(target=tasks.keep_clean, args=(stop,), daemon=True, name="isis-clean").start()
         if build_native:  # the Rust extension, when it is missing or outdated
