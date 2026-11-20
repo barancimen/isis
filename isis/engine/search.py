@@ -394,9 +394,9 @@ def expand_prefix(snapshot: Snapshot, prefix: str, limit: int = MAX_EXPANSIONS) 
     terms = snapshot.sorted_terms
     lo = bisect.bisect_left(terms, prefix)
     hi = bisect.bisect_left(terms, prefix + "￿")
-    found = terms[lo:hi]
     df = snapshot.bm25.doc_freq
-    return sorted(found, key=lambda t: -df[snapshot.term_id(t)])[:limit]
+    found = [(t, df[i]) for t in terms[lo:hi] if (i := snapshot.term_id(t)) is not None and df[i]]
+    return [t for t, _ in sorted(found, key=lambda f: -f[1])][:limit]
 
 
 def parse_query(snapshot: Snapshot, query: str, typo_weight: float = 0.0) -> Query:

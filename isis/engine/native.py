@@ -23,9 +23,12 @@ import sys
 import sysconfig
 import threading
 from collections.abc import Callable, Iterable
+from itertools import islice
 from pathlib import Path
 
 from .text import STOPWORDS
+
+PHRASE_CHUNK = 4096  # texts per call of the Rust extension
 
 log = logging.getLogger(__name__)
 NATIVE_DIR = Path(__file__).resolve().parents[2] / "native"  # only in a checkout of the repository
@@ -62,17 +65,21 @@ def remember_phrase(pattern: re.Pattern, words: list[str]) -> None:
 
 def phrase_counts(pattern, texts: Iterable[str]) -> list[int] | None:
     """How often a pattern noted by remember_phrase matches in each text. None for any other
-    pattern, and `texts` is then left untouched."""
+    pattern, and `texts` is then left untouched, or for text the extension can't take, and `texts`
+    may then be partly used."""
     if isis_native is None:
         return None
     with _lock:
         words = _phrases.get((pattern.pattern, pattern.flags))
     if not words:
         return None
+    words, found, texts = list(words), [], iter(texts)
     try:
-        return isis_native.count_phrase(list(texts), list(words))
+        while chunk := list(islice(texts, PHRASE_CHUNK)):  # a few at a time: the texts may be made as they go
+            found.extend(isis_native.count_phrase(chunk, words))
     except (ValueError, UnicodeError):  # text it can't take, such as half of a surrogate pair
         return None
+    return found
 
 
 # ---- building it ----

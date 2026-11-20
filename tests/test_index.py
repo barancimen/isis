@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from conftest import paths, write_corpus
+from conftest import legacy_cache, paths, write_corpus
 from isis.engine.index import Engine, corpus_exclude
 from isis.engine.search import SearchConfig
 from isis.engine.semantic import HashEmbedder
@@ -146,10 +146,14 @@ def test_a_failed_refresh_is_reported(corpus, tmp_path, monkeypatch):
 def test_a_cache_with_missing_parts_is_rebuilt(corpus, tmp_path):
     index = tmp_path / "index"
     Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    (next(index.glob("cache.*")) / "texts.bin").unlink()
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)  # no crash
+    assert e.refresh()["changed"] == 3
+    legacy_cache(index)
     meta = json.loads((index / "index.json").read_text())
     del meta["vocab"]
     (index / "index.json").write_text(json.dumps(meta))
-    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)  # no crash
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=index)  # an old cache too
     assert e.refresh()["changed"] == 3
 
 
@@ -470,6 +474,7 @@ def test_a_cache_split_the_old_way_is_read_again_keeping_embeddings(tmp_path, mo
 def test_a_cache_of_stemmed_terms_is_split_into_words_again_without_reading_or_embedding(corpus, tmp_path, monkeypatch):
     index = tmp_path / "index"
     Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    legacy_cache(index)
     meta = json.loads((index / "index.json").read_text())
     del meta["terms"]  # as written when terms were stems
     meta["vocab"] = [{"whale": "whal", "whales": "whal", "whaling": "whal"}.get(t, t) for t in meta["vocab"]]
@@ -504,3 +509,89 @@ def test_a_replaced_snapshot_is_freed_at_once(tmp_path):
         assert old() is None and other() is None
     finally:
         gc.enable()
+
+
+def test_the_cache_keeps_passages_in_a_text_file_read_when_needed(tmp_path, monkeypatch):
+    from isis.engine.index import StoredPassages
+
+    files = {"a.md": "# Whales\n\nThe white whale “swims”.\n\nAhab hunted it.\n", "b/c.md": "Pikeword is here.\n",
+             "d.md": "---\nurl: https://example.org/x\n---\n\n# Héron\n\nA heron stands still.\n"}
+    corpus = write_corpus(tmp_path / "corpus", files)
+    index = tmp_path / "index"
+    first = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    first.refresh()
+    expected = list(first.snapshot.passages)
+
+    with monkeypatch.context() as m:
+        m.setattr(Engine, "_read", lambda *a: pytest.fail("a file was read again"))
+        m.setattr("isis.engine.index.postings_of", lambda *a: pytest.fail("the postings were made again"))
+        again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+        assert all(isinstance(r.passages, StoredPassages) for r in again.files.values())
+        assert list(again.snapshot.passages) == expected and again.snapshot.passages[-1] == expected[-1]
+        assert again.snapshot.file_sites == first.snapshot.file_sites
+        assert paths(again.search("heron", mode="hybrid")) == paths(first.search("heron", mode="hybrid"))
+        assert again.refresh()["embedded"] == 0  # the vectors came back too
+
+    assert same_index(again, first)
+    assert again.snapshot.sorted_terms == sorted(again.vocab.terms)
+
+    (corpus / "b" / "c.md").write_text("Pikeword moved.\n\nTroutword is new.\n")
+    again.refresh()  # saves loaded and freshly read files together
+    rows = again.snapshot.passages
+    assert list(rows.search_texts(range(len(rows)))) == [p.search_text for p in rows]
+    assert list(rows.search_texts([2, 0], chunk=1)) == [rows[2].search_text, rows[0].search_text]
+    assert len(list(index.glob("cache.*"))) == 1  # the old one is gone
+    third = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    assert list(third.snapshot.passages) == list(again.snapshot.passages)
+    assert paths(third.search("troutword")) == ["b/c.md"] and paths(third.search("whale")) == ["a.md"]
+
+
+def test_an_old_cache_is_loaded_and_saved_the_new_way(corpus, tmp_path, monkeypatch):
+    index = tmp_path / "index"
+    first = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    first.refresh()
+    legacy_cache(index)
+    with monkeypatch.context() as m:
+        m.setattr(Engine, "_read", lambda *a: pytest.fail("a file was read again"))
+        old = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+        assert list(old.snapshot.passages) == list(first.snapshot.passages)
+        assert old.refresh()["embedded"] == 0
+    assert json.loads((index / "index.json").read_text())["version"] == 3 and not (index / "index.npz").exists()
+    assert list(Engine(corpus, embedder=HashEmbedder(), index_dir=index).snapshot.passages) == list(first.snapshot.passages)
+
+
+def test_several_cached_folders_give_the_index_of_a_fresh_start(tmp_path):
+    a = write_corpus(tmp_path / "a", {"one.md": "Whale and ship.\n", "two.md": "# Sea\n\nThe sea and the whale.\n"})
+    b = write_corpus(tmp_path / "b", {"three.md": "Heron, ship and stoat.\n", "four.md": "Pikeword alone.\n"})
+    fresh = Engine([a, b])
+    fresh.refresh()
+    loaded = Engine([a, b])  # the second folder's terms get other ids than in its own cache
+    assert list(loaded.snapshot.passages) == list(fresh.snapshot.passages)
+    assert same_index(loaded, fresh)
+    assert paths(loaded.search("ship")) == paths(fresh.search("ship"))
+
+
+def same_index(one: Engine, other: Engine) -> bool:
+    """Whether two engines' BM25 scores are the same for every term, whatever their term ids."""
+    def by_term(e):
+        m = e.snapshot.bm25.matrix
+        return {e.vocab.terms[i]: m[:, i].toarray().ravel() for i in range(m.shape[1]) if m[:, i].nnz}
+    a, b = by_term(one), by_term(other)
+    return a.keys() == b.keys() and all(np.allclose(a[t], b[t]) for t in a)
+
+
+def test_embeddings_saved_the_old_way_are_kept_and_saved_the_new_way(corpus, tmp_path):
+    index = tmp_path / "index"
+    Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    saved, = (index / "models").glob("*.npy")
+    rows = np.load(saved)
+    np.savez(saved.with_suffix(".npz"), name=np.array(json.loads(saved.with_suffix(".json").read_text())["name"]),
+             keys=rows["key"], vectors=rows["vector"])
+    saved.unlink()
+    saved.with_suffix(".json").unlink()
+    embedder = RecordingEmbedder()
+    e = Engine(corpus, embedder=embedder, index_dir=index)
+    assert e.refresh()["embedded"] == 0 and not embedder.seen
+    assert saved.exists() and not saved.with_suffix(".npz").exists()
+    again = RecordingEmbedder()
+    assert Engine(corpus, embedder=again, index_dir=index).refresh()["embedded"] == 0 and not again.seen

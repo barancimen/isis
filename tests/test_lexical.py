@@ -109,3 +109,22 @@ def test_snapshot_keeps_a_few_variants(engine):
     for k1 in (0.1, 0.2, 0.3, 0.4, 0.6):
         snap.bm25_for(k1, 0.5)
     assert len(snap._bm25_variants) <= 4
+
+
+def test_merged_postings_are_those_of_all_the_passages_together():
+    from isis.engine.lexical import merge_postings, postings_of
+
+    rng = np.random.default_rng(0)
+    vocab = Vocabulary()
+    docs = [[f"w{rng.integers(30)}" for _ in range(rng.integers(0, 12))] for _ in range(40)]
+    whole = postings_of(*term_counts(docs, vocab), len(vocab))
+    first, second = docs[:15], docs[15:]
+    a = postings_of(*term_counts(first, vocab), len(vocab))
+    # the second block names its terms by their own column numbers, as a cache loaded into a vocabulary does
+    order = rng.permutation(len(vocab))
+    pieces = term_counts(second, vocab)
+    local = np.argsort(order)[pieces[1]]
+    b = postings_of(pieces[0], local, pieces[2], len(vocab))
+    merged = merge_postings([(*a, None, 0), (*b, order, len(first))], len(vocab))
+    for got, want in zip(merged, whole):
+        assert np.array_equal(got, want)

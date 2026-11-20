@@ -1,5 +1,8 @@
+import json
+import shutil
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,6 +26,38 @@ def write_corpus(root: Path, files: dict[str, str] = FILES) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     return root
+
+
+def legacy_cache(root: Path) -> list[Path]:
+    """Rewrites every index cache under `root` the way caches were saved before the passages' text
+    had a file of its own (version 2: all of it in index.json), and returns their index.json files."""
+    from isis.engine.index import UNKNOWN, _split
+
+    written = []
+    for json_path in sorted(root.rglob("index.json")):
+        folder, meta = json_path.parent, json.loads(json_path.read_text())
+        cache, counts = folder / f"cache.{meta['token']}", meta["counts"]
+        a = {path.stem: np.load(path) for path in cache.glob("*.npy")}
+        texts = (cache / "texts.bin").read_bytes()
+        headings, starts = _split(a["headings"], counts["headings"]), a["text_starts"]
+        files, at = [], 0
+        for path, mtime, size, n, site, source in zip(
+            _split(a["file_paths"], counts["files"]), a["file_mtime"].tolist(), a["file_size"].tolist(),
+            a["file_passages"].tolist(), _split(a["file_sites"], counts["files"]), _split(a["file_sources"], counts["files"]),
+        ):
+            passages = [[headings[a["heading_ids"][i]], int(a["start_lines"][i]), int(a["end_lines"][i]),
+                         texts[starts[i]:starts[i + 1]].decode()] for i in range(at, at + n)]
+            files.append({"path": path, "mtime_ns": mtime, "size": size, "site": None if site == UNKNOWN else site,
+                          "source": None if source == UNKNOWN else source, "passages": passages})
+            at += n
+        old = {"version": 2, "chunking": meta["chunking"], "chunker": meta["chunker"], "terms": meta["terms"],
+               "vocab": _split(a["vocab"], counts["vocab"]), "words": _split(a["words"], counts["words"]), "files": files}
+        np.savez(folder / "index.npz", indptr=a["indptr"], term_ids=a["term_ids"], counts=a["counts"],
+                 vectors=np.zeros((0, 0), np.float16), word_terms=a["word_terms"], word_masks=a["word_masks"])
+        json_path.write_text(json.dumps(old))
+        shutil.rmtree(cache)
+        written.append(json_path)
+    return written
 
 
 def paths(hits) -> list[str]:

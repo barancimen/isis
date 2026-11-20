@@ -14,14 +14,19 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mmap
 import os
 import re
+import secrets
+import shutil
 import stat as statmode
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from bisect import bisect_right
+from collections.abc import Callable, Sequence
 from contextlib import suppress
+from itertools import groupby
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -30,14 +35,16 @@ import numpy as np
 from . import native
 from .chunker import (MAX_FRONT_MATTER, MAX_WORDS, TARGET_WORDS, Passage, chunk_markdown, document_site, document_source,
                       split_lines)
-from .lexical import B, BM25, K1, Vocabulary, term_counts
+from .lexical import B, BM25, K1, Vocabulary, merge_postings, postings_of, term_counts
 from .osiris import Manifest
 from .text import STOPWORDS, WORD, tokenize_with_surface
 from .typos import WordView, Words
 
 log = logging.getLogger(__name__)
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3  # the passages' text in a file of its own, read when needed
+LEGACY_INDEX_VERSION = 2  # everything in index.json: still read, and saved the new way
+UNKNOWN = "\x01"  # a site or source not known yet, in the lists a cache keeps
 FRONT_MATTER_CHARS = 65536  # enough to hold the frontmatter of any file
 CHUNKER_VERSION = 3  # raise it when files split differently: they are read again, and keep their embeddings
 TERMS_VERSION = 2  # raise it when text becomes terms differently: cached passages are split into terms again
@@ -97,11 +104,137 @@ def _model_id(embedder) -> str:
     return getattr(embedder, "model_id", embedder.name)
 
 
+def _join(strings) -> np.ndarray:
+    """Strings as one array of UTF-8 bytes, for a cache: they can't contain NUL."""
+    return np.frombuffer("\0".join(strings).encode("utf-8", "surrogatepass"), np.uint8)
+
+
+def _split(joined: np.ndarray, n: int) -> list[str]:
+    strings = joined.tobytes().decode("utf-8", "surrogatepass").split("\0") if n else []
+    if len(strings) != n:
+        raise ValueError("a list in the index cache has the wrong length")
+    return strings
+
+
+def _map(path: Path):
+    """A file's bytes, read from disk only where they are used."""
+    with path.open("rb") as f:
+        if not os.fstat(f.fileno()).st_size:
+            return b""
+        try:
+            return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except (OSError, ValueError):  # a file system that can't map files
+            return f.read()
+
+
+class TextStore:
+    """The passages a cache holds: their text in one file of UTF-8, the rest in arrays. A passage
+    is only made, and its text only read, when it is asked for, so loading a large corpus doesn't
+    make millions of objects, and its text stays out of memory until it is used."""
+
+    def __init__(self, texts, starts: np.ndarray, headings: list[str], heading_ids: np.ndarray,
+                 start_lines: np.ndarray, end_lines: np.ndarray):
+        self.texts, self.starts, self.headings = texts, starts, headings
+        self.heading_ids, self.start_lines, self.end_lines = heading_ids, start_lines, end_lines
+
+    def passage(self, path: str, i: int) -> Passage:
+        text = self.texts[self.starts[i]:self.starts[i + 1]]
+        return Passage(path, self.headings[self.heading_ids[i]], int(self.start_lines[i]), int(self.end_lines[i]),
+                       bytes(text).decode("utf-8", "surrogatepass"))
+
+
+class StoredPassages(Sequence):
+    """One file's passages in a TextStore, made when asked for."""
+
+    __slots__ = ("store", "path", "lo", "hi")
+
+    def __init__(self, store: TextStore, path: str, lo: int, hi: int):
+        self.store, self.path, self.lo, self.hi = store, path, lo, hi
+
+    def __len__(self) -> int:
+        return self.hi - self.lo
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(len(self)))]
+        i = int(i)
+        if i < 0:
+            i += len(self)
+        if not 0 <= i < len(self):
+            raise IndexError(i)
+        return self.store.passage(self.path, self.lo + i)
+
+    def __iter__(self):
+        for i in range(self.lo, self.hi):
+            yield self.store.passage(self.path, i)
+
+
+class PassageRows(Sequence):
+    """Every passage of a snapshot by row, from its files' passages in order."""
+
+    def __init__(self, parts: list[Sequence[Passage]]):
+        self.parts = parts
+        self.starts = [0]
+        for part in parts:
+            self.starts.append(self.starts[-1] + len(part))
+
+    def __len__(self) -> int:
+        return self.starts[-1]
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(len(self)))]
+        i = int(i)
+        if i < 0:
+            i += len(self)
+        if not 0 <= i < len(self):
+            raise IndexError(i)
+        k = bisect_right(self.starts, i) - 1
+        return self.parts[k][i - self.starts[k]]
+
+    def __iter__(self):
+        for part in self.parts:
+            yield from part
+
+    def search_texts(self, rows, chunk: int = 4096):
+        """The search_text of these passages, in order, without making the passages: read in
+        batches from each TextStore, which a scan of the whole corpus for a phrase or regex needs."""
+        rows = np.asarray(rows, np.int64)
+        if not hasattr(self, "_parts_of"):
+            stores = {}
+            self._starts_np = np.asarray(self.starts, np.int64)
+            self._store_of = np.array([stores.setdefault(id(p.store), len(stores)) if isinstance(p, StoredPassages) else -1
+                                       for p in self.parts], np.int64)
+            self._lo_of = np.array([p.lo if isinstance(p, StoredPassages) else 0 for p in self.parts], np.int64)
+            self._parts_of = {i: p.store for p in self.parts if isinstance(p, StoredPassages) for i in [stores[id(p.store)]]}
+        for begin in range(0, len(rows), chunk):
+            block = rows[begin:begin + chunk]
+            part = np.searchsorted(self._starts_np, block, side="right") - 1
+            local = block - self._starts_np[part]
+            which = self._store_of[part]
+            out: list[str] = [""] * len(block)
+            for s in np.unique(which).tolist():
+                at = np.flatnonzero(which == s)
+                if s < 0:  # a file read since the cache was saved: its passages are in a list
+                    for j in at.tolist():
+                        out[j] = self.parts[part[j]][local[j]].search_text
+                    continue
+                store = self._parts_of[s]
+                index = self._lo_of[part[at]] + local[at]
+                texts, headings = store.texts, store.headings
+                for j, a, b, h in zip(at.tolist(), store.starts[index].tolist(), store.starts[index + 1].tolist(),
+                                      store.heading_ids[index].tolist()):
+                    text = texts[a:b].decode("utf-8", "surrogatepass")
+                    heading = headings[h]
+                    out[j] = f"{heading}\n{text}" if heading else text
+            yield from out
+
+
 @dataclass
 class FileRecord:
     mtime_ns: int
     size: int
-    passages: list[Passage]
+    passages: Sequence[Passage]  # a list, or StoredPassages for a file loaded from the cache
     indptr: np.ndarray  # this file's rows of the BM25 matrix, as CSR pieces
     term_ids: np.ndarray
     counts: np.ndarray
@@ -123,10 +256,10 @@ class Snapshot:
     """An immutable view of the index. A search uses one snapshot throughout, so a refresh
     running in another thread never changes data under it."""
 
-    passages: list[Passage]
+    passages: Sequence[Passage]  # a PassageRows, whose passages are made when asked for
     bm25: BM25
     vocab: Vocabulary  # shared with the engine and only ever grows: look terms up with term_id()
-    sorted_terms: list[str]  # terms that occur in the corpus, for prefix expansion
+    sorted_terms: list[str]  # every term of the vocabulary, sorted, for prefix expansion: some may not occur (doc_freq 0)
     words: WordView  # every word as written, with its term, for typo-tolerant search
     vectors: np.ndarray  # float32 [n, dim] from one model; zero rows where has_vector is False
     has_vector: np.ndarray  # bool [n]
@@ -170,10 +303,15 @@ class Snapshot:
         todo = np.flatnonzero(~done) if rows is None else rows[~done[rows]]
         if len(todo):
             passages = self.passages  # a pattern that runs out of time raises before anything is marked done
-            texts = (passages[i].search_text for i in todo.tolist())
-            found = native.phrase_counts(pattern, texts)  # a phrase, with the Rust extension
+
+            def texts():
+                if isinstance(passages, PassageRows):
+                    return passages.search_texts(todo)
+                return (passages[i].search_text for i in todo.tolist())
+
+            found = native.phrase_counts(pattern, texts())  # a phrase, with the Rust extension
             if found is None:
-                found = np.fromiter((sum(1 for m in pattern.finditer(text) if m.end() > m.start()) for text in texts),
+                found = np.fromiter((sum(1 for m in pattern.finditer(text) if m.end() > m.start()) for text in texts()),
                                     np.float32, len(todo))
             counts[todo] = found
             done[todo] = True
@@ -313,6 +451,11 @@ class Engine:
         self._said: set[str] = set()  # one-time messages about links, so rescans stay quiet
         self._refreshed = False
         self._sources: tuple = (lambda: None, [])  # the snapshot that sources() last described, and what it said
+        # Each folder's postings (see BM25), with the files they were made from, in the order of the
+        # snapshot's rows: a folder whose files are all the same next time needn't make them again.
+        self._postings: dict[str, tuple[list[FileRecord], tuple]] = {}
+        self._sorted_terms: list[str] = []  # every term of the vocabulary, sorted, for prefix search
+        self._sorted_upto = 0  # how many terms of the vocabulary it holds
         self._load()
         self._publish()
 
@@ -699,29 +842,62 @@ class Engine:
         self.status.unembedded = len(self.snapshot) - int(self.snapshot.has_vector.sum())
         self.status.updated = time.time()
 
-    def _compile(self) -> Snapshot:
-        passages: list[Passage] = []
-        file_rows = {}
-        indptrs, term_ids, counts = [np.zeros(1, np.int64)], [], []
-        vectors = {e.name: ([], []) for e in self.embedders}  # model name -> (arrays, has)
-        nnz = 0
-        # The files of an osiris archive go by source, so that each source's passages are together,
-        # and a search that leaves some sources out compares the others by meaning at little cost.
-        sources = {path: self._source_id(path, r) for path, r in self.files.items() if self._prefix(path) in self.osiris}
-        for path in sorted(self.files, key=lambda p: (self._prefix(p), sources[p], p) if p in sources else (self._prefix(p), "", p)):
-            r = self.files[path]
-            n = len(r.passages)
-            file_rows[path] = (len(passages), len(passages) + n)
-            passages.extend(r.passages)
+    def _ordered_paths(self, prefix: str | None = None) -> list[str]:
+        """The files in the order of a snapshot's rows, and of a folder's cache: by folder, and the
+        files of an osiris archive by source, so that each source's passages are together and a
+        search that leaves some sources out compares the others by meaning at little cost."""
+        paths = self.files if prefix is None else [p for p in self.files if self._prefix(p) == prefix]
+
+        def key(path: str) -> tuple[str, str, str]:
+            folder = self._prefix(path)
+            return (folder, self._source_id(path, self.files[path]) or "", path) if folder in self.osiris else (folder, "", path)
+
+        return sorted(paths, key=key)
+
+    def _block(self, prefix: str, records: list[FileRecord]) -> tuple:
+        """The postings of one folder's files, in this order: (indptr, rows, tf, terms), where terms
+        gives each column's term id (None: the column is the term id). Kept for next time."""
+        kept = self._postings.get(prefix)
+        if kept is not None and len(kept[0]) == len(records) and all(a is b for a, b in zip(kept[0], records)):
+            return kept[1]
+        indptrs, nnz = [np.zeros(1, np.int64)], 0
+        for r in records:
             indptrs.append(r.indptr[1:] + nnz)
             nnz += int(r.indptr[-1])
-            term_ids.append(r.term_ids)
-            counts.append(r.counts)
+        term_ids = np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32)
+        counts = np.concatenate([r.counts for r in records]) if records else np.zeros(0, np.float32)
+        block = (*postings_of(np.concatenate(indptrs), term_ids, counts, len(self.vocab)), None)
+        self._postings[prefix] = (records, block)
+        return block
+
+    def _vocabulary_sorted(self) -> list[str]:
+        """Every term so far, sorted. A cache keeps its terms sorted and the vocabulary only grows, so
+        this is mostly sorted already, which a sort goes through in one pass."""
+        if self._sorted_upto < len(self.vocab):
+            self._sorted_terms = sorted(self._sorted_terms + self.vocab.terms[self._sorted_upto:])
+            self._sorted_upto = len(self.vocab)
+        return self._sorted_terms
+
+    def _compile(self) -> Snapshot:
+        parts: list[Sequence[Passage]] = []
+        file_rows = {}
+        rows = 0
+        vectors = {e.name: ([], []) for e in self.embedders}  # model name -> (arrays, has)
+        order = self._ordered_paths()
+        sources = {path: self._source_id(path, r) for path, r in self.files.items() if self._prefix(path) in self.osiris}
+        for path in order:
+            r = self.files[path]
+            n = len(r.passages)
+            file_rows[path] = (rows, rows + n)
+            rows += n
+            parts.append(r.passages)
             for e in self.embedders:
                 v = r.vectors.get(e.name)
                 ok = v is not None and v.shape == (n, e.dim)
                 vectors[e.name][0].append(v if ok else np.zeros((n, e.dim), np.float16))
                 vectors[e.name][1].append(np.full(n, ok))
+
+        passages = PassageRows(parts)
 
         def of(e) -> tuple[np.ndarray, np.ndarray]:
             if e is None:
@@ -730,20 +906,18 @@ class Engine:
             return (np.concatenate(arrays).astype(np.float32) if arrays else np.zeros((0, e.dim), np.float32),
                     np.concatenate(has) if has else np.zeros(0, bool))
 
-        bm25 = BM25(
-            np.concatenate(indptrs),
-            np.concatenate(term_ids) if term_ids else np.zeros(0, np.int32),
-            np.concatenate(counts) if counts else np.zeros(0, np.float32),
-            n_terms=len(self.vocab),
-            k1=K1,
-            b=B,
-        )
+        blocks, offset = [], 0
+        for prefix, paths in groupby(order, key=self._prefix):  # each folder's rows are together
+            records = [self.files[p] for p in paths]
+            blocks.append((*self._block(prefix, records), offset))
+            offset += sum(len(r.passages) for r in records)
+        bm25 = BM25.from_postings(*merge_postings(blocks, len(self.vocab)), len(passages), K1, B)
         default_vectors, default_has = of(self.embedder)
         snapshot = Snapshot(
             passages=passages,
             bm25=bm25,
             vocab=self.vocab,
-            sorted_terms=sorted(self.vocab.terms[i] for i in np.flatnonzero(bm25.doc_freq)),
+            sorted_terms=self._vocabulary_sorted(),
             words=self.words.view(),
             vectors=default_vectors,
             has_vector=default_has,
@@ -778,8 +952,10 @@ class Engine:
         total = 0
         for prefix in self.roots:
             folder = self._cache_dir(prefix)
-            vectors = [] if embedder is not None else (folder / "models").glob("*.npz")
-            for path in [folder / "index.json", folder / "index.npz", *vectors]:
+            vectors = [] if embedder is not None else [p for p in (folder / "models").glob("*.np[yz]") if ".tmp" not in p.name]
+            caches = [d for d in folder.glob("cache.*") if not d.name.endswith(".tmp")]
+            parts = [p for d in caches for p in d.glob("*")]
+            for path in [folder / "index.json", folder / "index.npz", *parts, *vectors]:
                 with suppress(OSError):  # not saved yet, or being replaced
                     total += path.stat().st_size
         if embedder is not None:  # a float16 vector and an 8-byte text key per passage
@@ -787,22 +963,49 @@ class Engine:
             total += embedded * (2 * embedder.dim + 8)
         return total
 
-    def _vectors_path(self, prefix: str, name: str) -> Path:
-        """Where a model's vectors are saved, one file per model."""
+    def _vectors_path(self, prefix: str, name: str, suffix: str = ".npy") -> Path:
+        """Where a model's vectors are saved, one file per model: each passage's text key and vector,
+        in a .npy file mapped from disk when loaded, with the model's name in a .json file beside it
+        (.npz: the way they were saved before, still read)."""
         slug = re.sub(r"[^\w.-]+", "_", name)[:150]
-        return self._cache_dir(prefix) / "models" / f"{slug}.npz"
+        return self._cache_dir(prefix) / "models" / f"{slug}{suffix}"
 
     def _write_vectors(self, prefix: str, name: str, keys: np.ndarray, vectors: np.ndarray) -> None:
         path = self._vectors_path(prefix, name)
-        tmp = path.with_name(f"{path.stem}.{os.getpid()}-{threading.get_ident()}.tmp.npz")
+        unique = f"{os.getpid()}-{threading.get_ident()}"
+        tmp, tmp_json = path.with_name(f"{path.stem}.{unique}.tmp.npy"), path.with_name(f"{path.stem}.{unique}.tmp.json")
+        rows = np.empty(len(keys), [("key", np.uint64), ("vector", np.float16, (vectors.shape[1],))])
+        rows["key"], rows["vector"] = keys, vectors
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(tmp, name=np.array(name), keys=keys, vectors=vectors)
+            tmp_json.write_text(json.dumps({"name": name}), encoding="utf-8")
+            os.replace(tmp_json, path.with_suffix(".json"))
+            np.save(tmp, rows, allow_pickle=False)
             os.replace(tmp, path)
+            self._vectors_path(prefix, name, ".npz").unlink(missing_ok=True)
         except OSError as e:
             log.warning("could not save the embeddings of %s: %s", name, e)
         finally:  # a full disk must not also keep a copy
             tmp.unlink(missing_ok=True)
+            tmp_json.unlink(missing_ok=True)
+
+    def _read_vectors(self, prefix: str, embedder) -> tuple[np.ndarray, np.ndarray] | None:
+        """(keys, vectors) of this model's saved vectors, or None if there are none for it."""
+        path = self._vectors_path(prefix, embedder.name)
+        if path.exists():
+            if json.loads(path.with_suffix(".json").read_text(encoding="utf-8")).get("name") != embedder.name:
+                return None
+            rows = np.load(path, mmap_mode="r", allow_pickle=False).view(np.ndarray)
+            keys, vectors = rows["key"], rows["vector"]
+        elif (old := self._vectors_path(prefix, embedder.name, ".npz")).exists():
+            with np.load(old, allow_pickle=False) as data:
+                if str(data["name"]) != embedder.name:
+                    return None
+                keys, vectors = data["keys"], data["vectors"]
+            self._cache_unsaved = True  # saved the new way
+        else:
+            return None
+        return (keys, vectors) if vectors.shape[1:] == (embedder.dim,) else None
 
     def _save_vectors(self, prefix: str, embedder, records: list[FileRecord]) -> None:
         """Saves one model's vectors for these files, with those loaded for it but not yet taken up."""
@@ -818,25 +1021,30 @@ class Engine:
                     vectors.append(np.stack([kept[r.passages[i].embed_text] for i in rows]).astype(np.float16))
         if keys:
             self._write_vectors(prefix, embedder.name, np.concatenate(keys), np.concatenate(vectors))
-        elif self._vectors_path(prefix, embedder.name).exists():  # none left, as when a .no-embed file came
+        elif any(self._vectors_path(prefix, embedder.name, x).exists() for x in (".npy", ".npz")):  # none left, as when a .no-embed file came
             self._write_vectors(prefix, embedder.name, np.zeros(0, np.uint64), np.zeros((0, embedder.dim), np.float16))
 
     def _load_vectors(self, prefix: str, embedder, files: dict[str, FileRecord]) -> None:
         """Gives each file its vectors from this model's saved ones. A file with some passages
         missing (changed while the model was not in use) keeps the ones found, to embed only the rest."""
-        path = self._vectors_path(prefix, embedder.name)
-        if not path.exists():
-            return
         try:
-            with np.load(path, allow_pickle=False) as data:
-                if str(data["name"]) != embedder.name or data["vectors"].shape[1:] != (embedder.dim,):
-                    return
-                keys, vectors = data["keys"], data["vectors"]
+            found = self._read_vectors(prefix, embedder)
         except Exception as e:
-            log.warning("ignoring unreadable embeddings in %s: %s", path, e)
+            log.warning("ignoring unreadable embeddings of %s in %s: %s", embedder.name, self._cache_dir(prefix), e)
+            return
+        if found is None:
+            return
+        keys, vectors = found
+        records = list(files.values())
+        ours = np.concatenate([r.keys() for r in records]) if records else np.zeros(0, np.uint64)
+        if np.array_equal(ours, keys):  # saved with these files, in this order: no need to match them up
+            at = 0
+            for r in records:
+                r.vectors[embedder.name] = vectors[at:at + len(r.passages)]
+                at += len(r.passages)
             return
         row_of = dict(zip(keys.tolist(), range(len(keys))))
-        for r in files.values():
+        for r in records:
             rows = [row_of.get(k) for k in r.keys().tolist()]
             if None not in rows:
                 r.vectors[embedder.name] = vectors[rows]
@@ -848,52 +1056,121 @@ class Engine:
             self._save_folder(prefix)
 
     def _save_folder(self, prefix: str) -> None:
+        """Saves one folder's cache: index.json names the folder that holds it, cache.<token>, with
+        each array in a .npy file and the passages' text in texts.bin, so that loading maps them
+        instead of reading them. A new cache gets a new token and index.json is written last, so
+        another process reading the cache meanwhile sees the old one or the new."""
         folder = self._cache_dir(prefix)
         folder.mkdir(parents=True, exist_ok=True)
         lead = f"{prefix}/" if prefix else ""
-        paths = sorted(p for p in self.files if p.startswith(lead))
+        paths = self._ordered_paths(prefix)  # the order of the snapshot's rows, so its postings can be used as they are
         records = [self.files[p] for p in paths]
+        indptr, rows, tf, terms = self._block(prefix, records)
+        # The cache names only its own terms, in alphabetical order: loaded into an empty vocabulary,
+        # it is then sorted already (see _vocabulary_sorted).
+        sizes = np.diff(indptr)
+        used = (np.arange(len(sizes)) if terms is None else np.asarray(terms))[sizes > 0]
+        names = [self.vocab.terms[i] for i in used.tolist()]
+        alphabetical = sorted(range(len(names)), key=names.__getitem__)
+        local = np.empty(len(names), np.int32)
+        local[alphabetical] = np.arange(len(names), dtype=np.int32)
+        lookup = np.full(len(self.vocab), -1, np.int32)
+        lookup[used] = local
+        columns = np.zeros(len(sizes), np.int64)
+        columns[sizes > 0] = local
+        post_indptr, post_rows, post_tf = merge_postings([(indptr, rows, tf, columns, 0)], len(names))
         term_ids = np.concatenate([r.term_ids for r in records]) if records else np.zeros(0, np.int32)
-        used, local_ids = np.unique(term_ids, return_inverse=True)  # the cache names only its own terms
-        words, word_terms, word_masks = self.words.of_terms(used)
-        meta = {
-            "version": INDEX_VERSION,
-            "chunking": list(self.chunking),
-            "chunker": self._chunker_from.get(prefix, CHUNKER_VERSION),
-            "terms": TERMS_VERSION,
-            "vocab": [self.vocab.terms[i] for i in used],
-            "words": words,  # as written, each with its term in word_terms
-            "files": [
-                {
-                    "path": path[len(lead):],
-                    "mtime_ns": r.mtime_ns,
-                    "size": r.size,
-                    "site": r.site,
-                    "source": r.source,
-                    "passages": [[p.heading, p.start_line, p.end_line, p.text] for p in r.passages],
-                }
-                for path, r in zip(paths, records)
-            ],
-        }
-        arrays = {
-            "indptr": np.concatenate([r.indptr for r in records]) if records else np.zeros(0, np.int64),
-            "term_ids": local_ids.astype(np.int32),
-            "counts": np.concatenate([r.counts for r in records]) if records else np.zeros(0, np.float32),
-            "vectors": np.zeros((0, 0), np.float16),  # each model's are in a file of their own
-            "word_terms": word_terms,
-            "word_masks": word_masks,  # their letters, so loading needn't work them out again
-        }
-        # The arrays go first: a cache is only used when its JSON matches them (see _load).
-        unique = f"{os.getpid()}-{threading.get_ident()}"  # another process may share the folder
-        tmp_npz, tmp_json = folder / f"index.{unique}.tmp.npz", folder / f"index.{unique}.tmp"
+        ordered = np.sort(used)
+        words, word_terms, word_masks, word_lengths, word_firsts = self.words.of_terms(ordered)
+
+        token = secrets.token_hex(8)
+        tmp_dir, cache = folder / f"cache.{os.getpid()}-{threading.get_ident()}.tmp", folder / f"cache.{token}"
+        tmp_json = folder / f"index.{os.getpid()}-{threading.get_ident()}.tmp"
+        done = False
         try:
-            np.savez(tmp_npz, **arrays)
-            os.replace(tmp_npz, folder / "index.npz")
+            tmp_dir.mkdir()
+            headings: dict[str, int] = {}
+            starts, heading_ids, start_lines, end_lines = [np.zeros(1, np.int64)], [], [], []
+            remaps: dict[int, np.ndarray] = {}  # id of a TextStore -> its heading ids in this cache
+            offset = 0
+            with (tmp_dir / "texts.bin").open("wb") as f:
+                for r in records:
+                    ps = r.passages
+                    if isinstance(ps, StoredPassages):  # copied as it is, without making the passages
+                        store = ps.store
+                        a, b = int(store.starts[ps.lo]), int(store.starts[ps.hi])
+                        f.write(store.texts[a:b])
+                        starts.append(store.starts[ps.lo + 1:ps.hi + 1] - a + offset)
+                        offset += b - a
+                        if id(store) not in remaps:
+                            remaps[id(store)] = np.array([headings.setdefault(h, len(headings)) for h in store.headings],
+                                                         np.int32)
+                        heading_ids.append(remaps[id(store)][store.heading_ids[ps.lo:ps.hi]])
+                        start_lines.append(store.start_lines[ps.lo:ps.hi])
+                        end_lines.append(store.end_lines[ps.lo:ps.hi])
+                    else:
+                        encoded = [p.text.encode("utf-8", "surrogatepass") for p in ps]
+                        f.write(b"".join(encoded))
+                        starts.append(offset + np.cumsum(np.fromiter(map(len, encoded), np.int64, len(encoded))))
+                        offset += sum(map(len, encoded))
+                        heading_ids.append(np.fromiter((headings.setdefault(p.heading, len(headings)) for p in ps),
+                                                       np.int32, len(ps)))
+                        start_lines.append(np.fromiter((p.start_line for p in ps), np.int32, len(ps)))
+                        end_lines.append(np.fromiter((p.end_line for p in ps), np.int32, len(ps)))
+
+            def concat(parts, dtype):
+                return np.concatenate(parts).astype(dtype, copy=False) if parts else np.zeros(0, dtype)
+
+            arrays = {
+                "file_paths": _join(path[len(lead):] for path in paths),
+                "file_mtime": np.array([r.mtime_ns for r in records], np.int64),
+                "file_size": np.array([r.size for r in records], np.int64),
+                "file_passages": np.array([len(r.passages) for r in records], np.int64),
+                "file_sites": _join(UNKNOWN if r.site is None else r.site for r in records),
+                "file_sources": _join(UNKNOWN if r.source is None else r.source for r in records),
+                "indptr": concat([r.indptr for r in records], np.int64),  # each file's rows (CSR pieces)
+                "term_ids": lookup[term_ids],
+                "counts": concat([r.counts for r in records], np.float32),
+                "post_indptr": post_indptr,  # and the same as postings, by term
+                "post_rows": post_rows,
+                "post_tf": post_tf,
+                "keys": concat([r.keys() for r in records], np.uint64),
+                "vocab": _join(names[i] for i in alphabetical),
+                "words": _join(words),  # as written, each with its term in word_terms
+                "word_terms": lookup[ordered[word_terms]] if len(word_terms) else np.zeros(0, np.int32),
+                "word_masks": word_masks,  # their letters, lengths and first characters, so loading needn't work them out
+                "word_lengths": word_lengths,
+                "word_firsts": word_firsts,
+                "headings": _join(headings),
+                "heading_ids": concat(heading_ids, np.int32),
+                "start_lines": concat(start_lines, np.int32),
+                "end_lines": concat(end_lines, np.int32),
+                "text_starts": concat(starts, np.int64),
+            }
+            for name, array in arrays.items():
+                np.save(tmp_dir / f"{name}.npy", array, allow_pickle=False)
+            os.replace(tmp_dir, cache)
+            meta = {
+                "version": INDEX_VERSION,
+                "chunking": list(self.chunking),
+                "chunker": self._chunker_from.get(prefix, CHUNKER_VERSION),
+                "terms": TERMS_VERSION,
+                "token": token,
+                "counts": {"files": len(records), "vocab": len(names), "words": len(words), "headings": len(headings)},
+            }
             tmp_json.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp_json, folder / "index.json")
+            done = True
         finally:  # a full disk must not also keep a copy of the index
-            tmp_npz.unlink(missing_ok=True)
             tmp_json.unlink(missing_ok=True)
+            for path in (tmp_dir, *(() if done else (cache,))):
+                shutil.rmtree(path, ignore_errors=True)
+        for old in [*folder.glob("cache.*"), folder / "index.npz"]:
+            if old.name != cache.name and not old.name.endswith(".tmp"):  # the cache saved before this one
+                if old.is_dir():
+                    shutil.rmtree(old, ignore_errors=True)  # a file still open elsewhere stays, on Windows
+                else:
+                    old.unlink(missing_ok=True)
         for embedder in self.embedders:
             self._save_vectors(prefix, embedder, records)
 
@@ -903,36 +1180,31 @@ class Engine:
 
     def _load_folder(self, prefix: str) -> None:
         folder = self._cache_dir(prefix)
-        json_path, npz_path = folder / "index.json", folder / "index.npz"
-        if not json_path.exists() or not npz_path.exists():
+        json_path = folder / "index.json"
+        if not json_path.exists():
             return
-        try:
-            meta = json.loads(json_path.read_text(encoding="utf-8"))
-            if meta.get("version") != INDEX_VERSION or tuple(meta.get("chunking", ())) != self.chunking:
-                return
-            with np.load(npz_path, allow_pickle=False) as data:
-                arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
-                word_terms = data["word_terms"] if "word_terms" in data else None
-                word_masks = data["word_masks"] if "word_masks" in data else None
-            legacy = meta.get("embedder")  # a cache from before each model had a file of its own
-            lead = f"{prefix}/" if prefix else ""
-            if meta.get("terms", 1) != TERMS_VERSION:  # its terms are made the old way: make them again
-                files, legacy_vectors = self._records(meta["files"], arrays, lead)
-                self._make_terms_again(files)  # which lists the words too
-            else:
-                terms = list(meta["vocab"])
-                ids = np.fromiter((self.vocab.add(t) for t in terms), np.int32, len(terms))  # into the shared vocabulary
-                arrays["term_ids"] = ids[arrays["term_ids"]] if len(ids) else arrays["term_ids"]
-                files, legacy_vectors = self._records(meta["files"], arrays, lead)
-                if word_terms is not None and word_masks is not None and "words" in meta:
-                    if not len(meta["words"]) == len(word_terms) == len(word_masks):
-                        raise ValueError("the word list doesn't match its terms")
-                    self.words.extend(meta["words"], ids[word_terms].tolist(), word_masks)
+        lead = f"{prefix}/" if prefix else ""
+        for attempt in range(3):  # another process may save the cache while this one reads it
+            try:
+                meta = json.loads(json_path.read_text(encoding="utf-8"))
+                if tuple(meta.get("chunking", ())) != self.chunking:
+                    return
+                if meta.get("version") == INDEX_VERSION:
+                    files, legacy, legacy_vectors = self._load_stored(folder, meta, prefix), None, None
+                elif meta.get("version") == LEGACY_INDEX_VERSION:
+                    files, legacy_vectors = self._load_legacy(folder, meta, lead)
+                    legacy = meta.get("embedder")  # a cache from before each model had a file of its own
+                    self._cache_unsaved = True  # saved the new way
                 else:
-                    self._list_words(files)
-        except Exception as e:
-            log.warning("ignoring unreadable index cache in %s: %s", folder, e)
-            return
+                    return
+                break
+            except FileNotFoundError:
+                if attempt == 2:
+                    log.warning("ignoring the index cache in %s: it keeps changing while it is read", folder)
+                    return
+            except Exception as e:
+                log.warning("ignoring unreadable index cache in %s: %s", folder, e)
+                return
         for path, record in files.items():  # a cache from before sites or sources were kept
             if record.site is None or (record.source is None and prefix in self.osiris):
                 site, source = self._front_matter_on_disk(path)
@@ -942,7 +1214,7 @@ class Engine:
         self.files.update(files)
         log.info("loaded the index cache%s: %s, %s", f" of {prefix}" if prefix else "", _count(len(files), "file"),
                  _count(sum(len(r.passages) for r in files.values()), "passage"))
-        if legacy and legacy_vectors and not self._vectors_path(prefix, legacy).exists():
+        if legacy and legacy_vectors and not any(self._vectors_path(prefix, legacy, x).exists() for x in (".npy", ".npz")):
             self._write_vectors(prefix, legacy, np.concatenate([files[path].keys() for path in legacy_vectors]),
                                 np.concatenate(list(legacy_vectors.values())))
         for embedder in self.embedders:
@@ -955,6 +1227,93 @@ class Engine:
                 log.info("files are split differently now: reading them again (unchanged passages keep their embeddings)")
                 for record in files.values():
                     record.mtime_ns = 0  # looks changed to the next refresh
+
+    def _load_stored(self, folder: Path, meta: dict, prefix: str) -> dict[str, FileRecord]:
+        """The files of a cache saved by _save_folder. Its arrays and text are mapped from disk, and
+        read only where they are used."""
+        lead = f"{prefix}/" if prefix else ""
+        token, counts = meta["token"], meta["counts"]
+        if not re.fullmatch(r"[0-9a-f]{16}", token):
+            raise ValueError("the index cache names its files oddly")
+        cache = folder / f"cache.{token}"
+
+        def load(name: str) -> np.ndarray:  # a plain array over the mapped file: slicing a np.memmap is slow
+            return np.load(cache / f"{name}.npy", mmap_mode="r", allow_pickle=False).view(np.ndarray)
+
+        a = {name: load(name) for name in (
+            "file_paths", "file_mtime", "file_size", "file_passages", "file_sites", "file_sources", "indptr", "term_ids",
+            "counts", "post_indptr", "post_rows", "post_tf", "keys", "vocab", "words", "word_terms", "word_masks",
+            "word_lengths", "word_firsts", "headings", "heading_ids", "start_lines", "end_lines", "text_starts")}
+        texts = _map(cache / "texts.bin")
+        n_files = counts["files"]
+        paths = _split(a["file_paths"], n_files)
+        sites, sources = _split(a["file_sites"], n_files), _split(a["file_sources"], n_files)
+        per_file = np.asarray(a["file_passages"])
+        n = int(per_file.sum())
+        starts = a["text_starts"]
+        if not (len(starts) == n + 1 == len(a["keys"]) + 1 == len(a["heading_ids"]) + 1 == len(a["start_lines"]) + 1
+                and len(a["indptr"]) == n + n_files and int(starts[-1]) == len(texts)
+                and len(a["post_indptr"]) == counts["vocab"] + 1 and len(a["post_rows"]) == len(a["term_ids"])):
+            raise ValueError("the index arrays don't match the file list")
+        store = TextStore(texts, starts, _split(a["headings"], counts["headings"]), a["heading_ids"],
+                          a["start_lines"], a["end_lines"])
+        term_ids, term_counts_ = a["term_ids"], a["counts"]
+        current = meta.get("terms", 1) == TERMS_VERSION
+        if current:
+            ids = self.vocab.extend(_split(a["vocab"], counts["vocab"]))  # into the shared vocabulary
+            term_ids = ids[term_ids] if len(ids) else np.asarray(term_ids)
+        files = {}
+        at_passage = at_indptr = at_nnz = 0
+        for path, mtime, size, count, site, source in zip(paths, a["file_mtime"].tolist(), a["file_size"].tolist(),
+                                                          per_file.tolist(), sites, sources):
+            path = lead + path
+            indptr = a["indptr"][at_indptr:at_indptr + count + 1]
+            nnz = int(indptr[-1])
+            record = FileRecord(mtime, size, StoredPassages(store, path, at_passage, at_passage + count), indptr,
+                                term_ids[at_nnz:at_nnz + nnz], term_counts_[at_nnz:at_nnz + nnz],
+                                site=None if site == UNKNOWN else site, source=None if source == UNKNOWN else source)
+            record._keys = a["keys"][at_passage:at_passage + count]
+            files[path] = record
+            at_passage += count
+            at_indptr += count + 1
+            at_nnz += nnz
+        if at_nnz != len(term_ids) or len(term_counts_) != len(term_ids):
+            raise ValueError("the index arrays don't match the file list")
+        if not current:  # its terms are made the old way: make them again
+            self._make_terms_again(files)
+            return files
+        words = _split(a["words"], counts["words"])
+        if not len(words) == len(a["word_terms"]) == len(a["word_masks"]) == len(a["word_lengths"]) == len(a["word_firsts"]):
+            raise ValueError("the word list doesn't match its terms")
+        self.words.extend(words, ids[a["word_terms"]], a["word_masks"], a["word_lengths"], a["word_firsts"])
+        # Its postings, in the order the files were saved, which is the order of a snapshot's rows
+        # unless something moved meanwhile: _block then makes them again.
+        same = np.array_equal(ids, np.arange(len(ids)))
+        self._postings[prefix] = (list(files.values()), (a["post_indptr"], a["post_rows"], a["post_tf"], None if same else ids))
+        return files
+
+    def _load_legacy(self, folder: Path, meta: dict, lead: str) -> tuple[dict[str, FileRecord], dict[str, np.ndarray]]:
+        """The files of a cache saved before the passages' text had a file of its own, with all of it in
+        index.json, and the vectors an even older cache kept in index.npz."""
+        with np.load(folder / "index.npz", allow_pickle=False) as data:
+            arrays = {k: data[k] for k in ("indptr", "term_ids", "counts", "vectors")}
+            word_terms = data["word_terms"] if "word_terms" in data else None
+            word_masks = data["word_masks"] if "word_masks" in data else None
+        if meta.get("terms", 1) != TERMS_VERSION:  # its terms are made the old way: make them again
+            files, legacy_vectors = self._records(meta["files"], arrays, lead)
+            self._make_terms_again(files)  # which lists the words too
+        else:
+            terms = list(meta["vocab"])
+            ids = self.vocab.extend(terms)  # into the shared vocabulary
+            arrays["term_ids"] = ids[arrays["term_ids"]] if len(ids) else arrays["term_ids"]
+            files, legacy_vectors = self._records(meta["files"], arrays, lead)
+            if word_terms is not None and word_masks is not None and "words" in meta:
+                if not len(meta["words"]) == len(word_terms) == len(word_masks):
+                    raise ValueError("the word list doesn't match its terms")
+                self.words.extend(meta["words"], ids[word_terms].tolist(), word_masks)
+            else:
+                self._list_words(files)
+        return files, legacy_vectors
 
     def _make_terms_again(self, files: dict[str, FileRecord]) -> None:
         """New BM25 rows for a cache whose terms were made differently (stems, before), from the

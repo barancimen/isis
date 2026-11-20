@@ -16,7 +16,7 @@ from isis.engine.semantic import HashEmbedder
 from isis.server.app import create_app
 from isis.server.tasks import TaskStore
 
-from conftest import write_corpus
+from conftest import legacy_cache, write_corpus
 
 # doc id -> (lane in the manifest, source in the frontmatter, text)
 DOCS = {
@@ -142,7 +142,7 @@ def test_a_changed_manifest_relabels_documents(tmp_path):
 def test_sources_are_cached_and_read_for_an_older_cache(tmp_path):
     md, manifest = archive_folders(make_archive(tmp_path / "data"))
     Engine(md, osiris={md: manifest}).refresh()
-    cache = md / ".isis" / "index.json"
+    cache, = legacy_cache(md / ".isis")
     meta = json.loads(cache.read_text())
     assert {f["path"]: f["source"] for f in meta["files"]}["aa/aa01.md"] == "youtube:transcript:human"
     again = Engine(md, osiris={md: manifest})
@@ -153,6 +153,7 @@ def test_sources_are_cached_and_read_for_an_older_cache(tmp_path):
     older = Engine(md, osiris={md: manifest})
     assert sources_of(older)["aa02.md"] == "/youtube:auto"  # read from the files' frontmatter
     older.refresh()
+    legacy_cache(md / ".isis")
     assert all(f.get("source") for f in json.loads(cache.read_text())["files"])  # and kept from now on
 
 

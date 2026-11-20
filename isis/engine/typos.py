@@ -109,10 +109,21 @@ class Words:
         self.ids[word] = n
         self.words.append(word)
 
-    def extend(self, words: list[str], terms, masks: np.ndarray | None = None) -> None:
-        """add() for many words at once, as when a cache is loaded. `masks` are their letter_masks
-        if known, as a cache keeps them; otherwise they are worked out in numpy."""
+    def extend(self, words: list[str], terms, masks: np.ndarray | None = None, lengths: np.ndarray | None = None,
+               firsts: np.ndarray | None = None) -> None:
+        """add() for many words at once, as when a cache is loaded. `masks`, `lengths` and `firsts` are
+        their letter_masks, lengths and first characters if known, as a cache keeps them; otherwise
+        they are worked out."""
         n = len(self.words)
+        if not n and masks is not None and lengths is not None and firsts is not None:  # the first cache loaded
+            ids = dict(zip(words, range(len(words))))
+            if len(ids) == len(words) and all(words) and (not len(lengths) or lengths.max() <= MAX_WORD_LENGTH):
+                self.ids, self.words = ids, list(words)
+                self._terms = np.asarray(terms, np.int32).copy()
+                self._masks = np.asarray(masks, np.uint64).copy()
+                self._lengths = np.asarray(lengths, np.uint8).copy()
+                self._firsts = np.asarray(firsts, np.uint32).copy()
+                return
         keep, fresh, fresh_terms = [], [], []
         for i, (w, t) in enumerate(zip(words, terms)):
             if w and len(w) <= MAX_WORD_LENGTH and w not in self.ids:
@@ -143,10 +154,11 @@ class Words:
         n = len(self.words)
         return WordView(self.words, self._terms[:n], self._masks[:n], self._lengths[:n], self._firsts[:n])
 
-    def of_terms(self, terms: np.ndarray) -> tuple[list[str], np.ndarray, np.ndarray]:
-        """The words whose term is one of the sorted `terms`, with each one's index in `terms` and
-        its letter_mask."""
+    def of_terms(self, terms: np.ndarray) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """The words whose term is one of the sorted `terms`, with each one's index in `terms`, its
+        letter_mask, its length and its first character."""
         n = len(self.words)
         where = np.searchsorted(terms, self._terms[:n]).clip(0, max(len(terms) - 1, 0))
         rows = np.flatnonzero(terms[where] == self._terms[:n]) if len(terms) else np.zeros(0, np.int64)
-        return [self.words[i] for i in rows], where[rows].astype(np.int32), self._masks[rows]
+        return ([self.words[i] for i in rows], where[rows].astype(np.int32), self._masks[rows], self._lengths[rows],
+                self._firsts[rows])

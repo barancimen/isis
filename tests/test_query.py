@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from conftest import paths, write_corpus
+from conftest import legacy_cache, paths, write_corpus
 from isis.engine.index import Engine
 from isis.engine.search import QueryError, SearchConfig, correct_query, split_query, steering
 from isis.engine.semantic import HashEmbedder
@@ -223,13 +223,14 @@ def test_words_survive_the_cache_and_old_caches_get_them(tmp_path):
     again = Engine(tmp_path / "typos", index_dir=tmp_path / "typo-index")
     assert set(again.snapshot.words.words) == words
     index = tmp_path / "typo-index"
-    meta_path = next(index.rglob("index.json"))
+    meta_path, = legacy_cache(index)
     meta = json.loads(meta_path.read_text())
     del meta["words"]  # a cache from before words were kept
     meta_path.write_text(json.dumps(meta))
     old = Engine(tmp_path / "typos", index_dir=index)
     assert set(old.snapshot.words.words) == words
     old.refresh()  # saves them
+    legacy_cache(index)
     assert "words" in json.loads(meta_path.read_text())
 
 
@@ -290,7 +291,7 @@ def test_site_is_not_corrected_or_kept_as_a_word(site_engine):
 
 def test_a_cache_from_before_sites_finds_them(site_engine, tmp_path):
     site_engine._save()
-    cache = next((tmp_path / "index").rglob("index.json"))
+    cache, = legacy_cache(tmp_path / "index")
     meta = json.loads(cache.read_text())
     for entry in meta["files"]:
         del entry["site"]
