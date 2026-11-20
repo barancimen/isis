@@ -108,7 +108,11 @@ def cmd_serve(args) -> None:
     os.environ["ISIS_HOSTS"] = ",".join(allowed_hosts(args.host, args.allow_host))
     os.environ["ISIS_BUILD_NATIVE"] = "0" if args.no_build else "1"
     package = Path(__file__).parent
-    print(f"isis: http://{args.host}:{args.port}", flush=True)
+    url = f"http://{args.host}:{args.port}"
+    if sys.stderr.isatty():
+        os.environ["ISIS_URL"] = url  # the server shows it at the bottom, with its memory and disk use
+    else:
+        print(f"isis: {url}", flush=True)
     uvicorn.run(
         "isis.server.app:app_from_env",
         factory=True,
@@ -117,6 +121,7 @@ def cmd_serve(args) -> None:
         reload=args.reload,
         reload_dirs=[str(package)] if args.reload else None,
         log_level="warning",
+        log_config=None,  # its messages go where isis's own do, above the line at the bottom
     )
 
 

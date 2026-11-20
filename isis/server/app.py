@@ -449,10 +449,15 @@ def app_from_env() -> FastAPI:
     separated by "|", the manifest empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
     this machine only), ISIS_PUBLIC ("1": serve the public, see public.py), ISIS_BASE_PATH (with
     ISIS_PUBLIC: where the site lives on its domain, such as /isis) and ISIS_BUILD_NATIVE ("1": build
-    the Rust extension when it is missing or outdated, see native.start_build)."""
+    the Rust extension when it is missing or outdated, see native.start_build) and ISIS_URL (when
+    set, the address to show at the bottom of the terminal, see terminal.py)."""
     from ..engine.semantic import Embedder
 
     configure_logging()
+    if url := os.environ.get("ISIS_URL"):
+        from .terminal import start
+
+        start(url)
     folders = [Path(d) for d in os.environ["ISIS_CORPUS"].split(os.pathsep)]
     tasks_dir = Path(os.environ.get("ISIS_TASKS") or folders[0] / "_tasks")
     models = [m for m in os.environ.get("ISIS_MODELS", "").split(",") if m]
