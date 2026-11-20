@@ -2604,7 +2604,7 @@ const savePresets = () => store.set("presets", JSON.stringify(state.presets));
 const sortedList = (list) => [...new Set(list ?? [])].sort();
 
 function currentSettings(kind, prefs = state.prefsFor === state.task ? state.prefs : null) {
-  const settings = { params: { ...state.params[kind] }, skipped: sortedList(state.skipped) };
+  const settings = { params: { ...state.params[kind] }, skipped: shownSkipped(state.skipped) };
   if (kind === "search") return { ...settings, query: $("#search-input").value, hidden_docs: sortedList(state.hiddenDocs) };
   return { ...settings, steer: prefs?.steer ?? "", ignored: sortedList(prefs?.ignored), excluded_docs: sortedList(prefs?.excluded_docs) };
 }
@@ -2635,7 +2635,7 @@ function renderPresets(kind) {
   const current = currentSettings(kind);
   const key = settingsKey(current);
   const paramsKey = settingsKey({ params: changedParams(kind, current.params) });
-  const same = (preset) => preset.builtin ? settingsKey({ params: changedParams(kind, preset.settings.params) }) === paramsKey : settingsKey(preset.settings) === key;
+  const same = (preset) => preset.builtin ? settingsKey({ params: changedParams(kind, preset.settings.params) }) === paramsKey : settingsKey({ ...preset.settings, skipped: shownSkipped(preset.settings.skipped) }) === key;
   const active = builtin.find((p) => p.name === state.activePreset[kind]) ?? own.find((p) => p.name === state.activePreset[kind]);
   const showing = active && same(active) ? active : own.find(same) ?? builtin.find(same);
   if (showing) state.activePreset[kind] = showing.name;
@@ -2696,7 +2696,8 @@ async function applyPreset(kind, name) {
     return;
   }
   const skippedBefore = settingsKey({ skipped: [...state.skipped] });
-  state.skipped = new Set(settings.skipped ?? []);
+  // The preset's boxes, keeping what is left out that has no box now.
+  state.skipped = new Set([...(settings.skipped ?? []), ...[...state.skipped].filter((name) => !shownPick(name))]);
   renderFolderPicks(state.folders);
   saveSkipped();
   if (settingsKey({ skipped: [...state.skipped] }) !== skippedBefore) settingChanged(kind === "search" ? "related" : "search");
@@ -2804,19 +2805,17 @@ function loadSkipped() {
 
 const saveSkipped = () => store.set("skip", JSON.stringify([...state.skipped]));
 
+// Whether the page has a box for this folder or source now. One left out that the server doesn't
+// list at the moment, such as a source with no documents, stays left out for when it comes back.
+const shownPick = (name) => state.folders.includes(name) || state.sources.some((s) => s.id === name || s.folder === name);
+const shownSkipped = (names) => sortedList(names).filter(shownPick);
+
 // The boxes of an osiris archive's sources: `sources` as /api/status lists them, each with its id
 // ("md/youtube:auto"), its folder, its lane ("md/youtube"), the lane's name, its own name and its
 // number of documents. The skipped set holds the ids of the sources left out.
 function renderFolderPicks(folders, sources = state.sources) {
   state.folders = folders;
   state.sources = sources;
-  const ids = new Set(sources.map((s) => s.id));
-  const archives = new Set(sources.map((s) => s.folder));
-  for (const name of [...state.skipped]) {
-    const [folder, kind] = name.split("/");
-    // A source that has no documents now is forgotten, but not while its archive lists none yet.
-    if (kind === undefined ? !folders.includes(name) : archives.has(folder) && !ids.has(name)) state.skipped.delete(name);
-  }
   for (const panel of ["search", "related"]) {
     const box = $(`#${panel}-folders`);
     box.hidden = folders.length < 2 && !sources.length;
