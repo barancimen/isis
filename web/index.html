@@ -41,7 +41,7 @@
         <button id="search-meaning" type="button" class="meaning-btn" aria-pressed="true" title="When this is on, Search also finds passages close to your words in meaning, even if they use different words. When it's off, Search matches your words only. That's the same as setting &quot;How important meaning is&quot; to 0 in Adjustments.">Meaning</button>
       </div>
       <div id="search-folders" class="folder-picks" hidden></div>
-      <div class="hint">Type the words you want to find. Passages (short sections of a document) with more of your words rank higher. <code>"two words"</code> finds a phrase and <code>/text/</code> is a regular expression. <code>+word</code> keeps only passages with that word and <code>-word</code> removes them. <code>site:github.com</code> keeps only documents with that website in the <code>url:</code> line at their top and <code>-site:github.com</code> removes them. Press Ctrl/⌘+K to come back here. Press ↓ in the box, or click it while it's empty, to pick one of your recent searches in this tab.</div>
+      <div class="hint">Type the words you want to find. Passages (short sections of a document) with more of your words rank higher. <code>"two words"</code> finds a phrase and <code>/text/</code> is a regular expression. <code>+word</code> keeps only passages with that word and <code>-word</code> removes them. <code>site:github.com</code> keeps only documents with that website in the <code>url:</code> line at their top and <code>-site:github.com</code> removes them. <code>doc:word</code> keeps only documents that have that word anywhere and <code>-doc:word</code> removes them. It takes phrases and regular expressions too, as in <code>-doc:/decor\w*/</code>. Press Ctrl/⌘+K to come back here. Press ↓ in the box, or click it while it's empty, to pick one of your recent searches in this tab.</div>
       <div id="search-presets" class="preset-bar"></div>
       <details id="search-tune" class="tune"></details>
       <details id="search-hidden" class="tune" hidden></details>
@@ -60,7 +60,7 @@
       <form id="related-steer" class="steer-row" hidden>
         <div class="hint">These keywords come from your task. Click one to boost it or click × to stop using it.</div>
         <input id="steer-input" type="search" spellcheck="false" placeholder='Word rules  word  +word  -word  "two words"  /text/' aria-label="Word rules for the results">
-        <div class="hint">Word rules change the results. <code>word</code> ranks passages with that word higher, <code>+word</code> keeps only those passages and <code>-word</code> removes them. <code>site:github.com</code> works here too. Press Enter to save. The rules stay with this task.</div>
+        <div class="hint">Word rules change the results. <code>word</code> ranks passages with that word higher, <code>+word</code> keeps only those passages and <code>-word</code> removes them. <code>site:github.com</code> and <code>doc:word</code> work here too. Press Enter to save. The rules stay with this task.</div>
         <div id="steer-error" class="steer-error" hidden></div>
       </form>
       <div id="related-lanes" class="results"></div>

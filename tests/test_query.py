@@ -328,3 +328,60 @@ def test_a_search_in_some_folders_only_looks_at_them(tmp_path, monkeypatch):
     for (q, mode), hits in scoped.items():
         assert hits and all(path.startswith("a/") for path, _, _ in hits), q
         assert [(h.path, h.start_line, h.score) for h in e.search(q, mode=mode, skip_folders=["b"])] == hits, (q, mode)
+
+
+HOMES = {
+    "cottage.md": "# Cottage\n\nSmall homes by the sea.\n\nThe house has a red door.\n",
+    "flats.md": "# Flats\n\nHomes in the city are small.\n\nTheir decorations are modern.\n",
+    "farm.md": "# Farm\n\nHomes on the farm are old.\n\nNothing else to say.\n",
+}
+
+
+@pytest.fixture
+def homes_engine(tmp_path):
+    engine = Engine(write_corpus(tmp_path / "homes", HOMES), index_dir=tmp_path / "homes-index", target_words=0)
+    engine.refresh()
+    return engine
+
+
+def test_doc_clauses_filter_whole_documents(homes_engine):
+    def found(query):
+        return sorted(set(paths(homes_engine.search(query))))
+
+    assert found("homes") == ["cottage.md", "farm.md", "flats.md"]
+    assert found("homes -house") == ["cottage.md", "farm.md", "flats.md"]  # a passage-level rule: "house" is in another passage
+    assert found("homes -doc:house") == ["farm.md", "flats.md"]
+    assert found("homes -doc:house -doc:/decor\\w*/") == ["farm.md"]
+    assert found('homes -doc:"red door"') == ["farm.md", "flats.md"]
+    assert found("homes -doc:/red door/") == ["farm.md", "flats.md"]  # a regex with a space
+    assert found("homes doc:house") == found("homes +doc:house") == ["cottage.md"]
+    assert found("homes DOC:house") == ["cottage.md"]
+    assert found("+doc:decorations") == ["flats.md"]  # on its own, every passage of the documents that match
+    assert len(homes_engine.search("+doc:decorations")) == 2  # the passage without the word too
+    assert found("-doc:house") == []  # only an exclusion: nothing to look for
+    assert found("homes doc:") == found("homes")  # still being typed
+    assert found("homes -doc:/zz") == found("homes")
+    assert found("homes -doc:the") == []  # a stopword is matched as written, and every document has one
+
+
+def test_doc_clauses_are_parsed_kept_and_not_corrected(homes_engine):
+    clauses = split_query('-doc:house +doc:"red door" doc:/decor/ doc:')
+    assert [(c.op, c.kind, c.value, c.doc) for c in clauses] == [
+        ("-", "word", "house", True), ("+", "phrase", "red door", True), ("", "regex", "decor", True), ("", "partial", "doc:", False)]
+    assert " ".join(map(str, clauses[:3])) == '-doc:house +doc:"red door" doc:/decor/'
+    filters = steering(clauses).filters
+    assert filters.doc_excluded_terms == {"house"} and len(filters.doc_required) == 2 and not filters.required
+    assert steering(clauses).words == {}  # they don't rank
+    assert correct_query(homes_engine.snapshot, "homes doc:hosue") is None
+
+
+def test_related_word_rules_take_doc_clauses(homes_engine):
+    from isis.engine.related import TaskPrefs
+
+    task = "# Homes\n\nSmall homes and their rooms.\n"
+    plain = {h.path for lane in homes_engine.related(task).lanes for h in lane.items}
+    prefs = TaskPrefs(steer="-doc:house")
+    steered = {h.path for lane in homes_engine.related(task, prefs=prefs).lanes for h in lane.items}
+    assert "cottage.md" in plain and "cottage.md" not in steered and steered
+    prefs.boost("house")  # a chip for the same word leaves the doc: rule alone
+    assert prefs.steer == "-doc:house house"

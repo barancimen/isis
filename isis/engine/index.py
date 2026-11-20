@@ -270,6 +270,7 @@ class Snapshot:
     _pattern_counts: dict = field(default_factory=dict, repr=False)
     _folder_rows: dict = field(default_factory=dict, repr=False)
     _source_rows: dict = field(default_factory=dict, repr=False)
+    _document_rows: dict = field(default_factory=dict, repr=False)
     near_words: dict = field(default_factory=dict, repr=False)  # for search.near_words
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
@@ -373,6 +374,15 @@ class Snapshot:
             return {key: np.concatenate(parts) for key, parts in found.items()}
 
         return self.cached(self._source_rows, "rows", 1, rows)
+
+    def document_of_rows(self) -> np.ndarray:
+        """The document of each passage, as its position in file_rows, whose spans are in row order."""
+
+        def documents() -> np.ndarray:
+            sizes = [end - start for start, end in self.file_rows.values()]
+            return np.repeat(np.arange(len(sizes), dtype=np.int32), sizes)
+
+        return self.cached(self._document_rows, "rows", 1, documents)
 
     def outside_folders(self, skip) -> np.ndarray:
         """Which passages are not in these corpus folders, nor of these sources of an osiris

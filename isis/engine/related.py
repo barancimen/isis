@@ -363,14 +363,14 @@ class TaskPrefs:
         clauses = _complete_clauses(text)
         steering(clauses)
         self._set_clauses(clauses)
-        named = {term for c in clauses for term in c.terms()}
+        named = {term for c in clauses if not c.doc for term in c.terms()}
         self.ignored = [t for t in self.ignored if t not in named]
 
     def _set_clauses(self, clauses: list[Clause]) -> None:
         self.steer = " ".join(map(str, clauses))
 
     def _without(self, term: str, ops) -> list[Clause]:
-        return [c for c in self.clauses() if not (c.kind == "word" and c.op in ops and c.terms() == [term])]
+        return [c for c in self.clauses() if not (c.kind == "word" and not c.doc and c.op in ops and c.terms() == [term])]
 
     def _put_word(self, word: str, op: str, instead_of: tuple[str, ...]) -> None:
         """Put a word on the steer line with this operator, in place of the operators `instead_of`.
@@ -379,7 +379,7 @@ class TaskPrefs:
         if len(terms) != 1:
             return
         clauses = self._without(terms[0], instead_of)
-        if not any(c.kind == "word" and c.terms() == terms for c in clauses):
+        if not any(c.kind == "word" and not c.doc and c.terms() == terms for c in clauses):
             clauses.append(Clause(op, "word", word))
         self._set_clauses(clauses)
         self.unignore(terms[0])

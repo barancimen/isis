@@ -36,9 +36,11 @@ from .lexical import B, K1
 from .params import Group, tunable
 from .text import term_spans, tokenize, tokenize_with_surface
 
-# One clause: an optional operator, then a "phrase" (its closing quote may still be missing), a
-# /regex/ that ends at a space or the end, a /regex still being typed, or a plain word.
-TOKEN = re.compile(r"""([-+]?)(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))""")
+# One clause: an optional operator, an optional doc: (the whole document must contain it, or must
+# not), then a "phrase" (its closing quote may still be missing), a /regex/ that ends at a space or
+# the end, a /regex still being typed, or a plain word.
+TOKEN = re.compile(r"""([-+]?)((?i:doc:))?(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))""")
+DOC = "doc:"
 PREFER, REQUIRE, NEVER = "", "+", "-"
 SITE = re.compile(r"site:(.*)", re.IGNORECASE)
 MIN_PREFIX = 3
@@ -236,9 +238,11 @@ class Clause:
     op: str  # PREFER, REQUIRE or NEVER
     kind: str  # "word", "phrase", "regex", "site", or "partial" (a regex still being typed: ignored)
     value: str
+    doc: bool = False  # doc:x: about the whole document, which must contain it (or, with -, must not)
 
     def __str__(self) -> str:
-        return self.op + {"phrase": f'"{self.value}"', "regex": f"/{self.value}/", "site": f"site:{self.value}"}.get(self.kind, self.value)
+        body = {"phrase": f'"{self.value}"', "regex": f"/{self.value}/", "site": f"site:{self.value}"}.get(self.kind, self.value)
+        return self.op + (DOC if self.doc else "") + body
 
     def terms(self) -> list[str]:
         return tokenize(self.value) if self.kind == "word" else []
@@ -258,16 +262,21 @@ class Clause:
 def split_query(query: str) -> list[Clause]:
     out = []
     for m in TOKEN.finditer(query):
-        op, phrase, regex, partial, word = m.groups()
+        op, doc, phrase, regex, partial, word = m.groups()
+        doc = doc is not None
         if phrase is not None:
-            out.append(Clause(op, "phrase", phrase))
+            out.append(Clause(op, "phrase", phrase, doc))
         elif regex is not None:
-            out.append(Clause(op, "regex", regex))
+            out.append(Clause(op, "regex", regex, doc))
         elif partial is not None:
-            out.append(Clause(op, "partial", partial))
+            out.append(Clause(op, "partial", partial, doc))
         elif word and word not in (REQUIRE, NEVER):
             site = SITE.fullmatch(word)
-            if not site:
+            if doc:
+                out.append(Clause(op, "word", word, True))
+            elif word.lower() == DOC:
+                out.append(Clause(op, "partial", word))  # still being typed
+            elif not site:
                 out.append(Clause(op, "word", word))
             elif site.group(1):
                 out.append(Clause(op, "site", site.group(1)))
@@ -287,13 +296,24 @@ class Filters:
     excluded: list[re.Pattern] = field(default_factory=list)
     sites: set[str] = field(default_factory=set)
     excluded_sites: set[str] = field(default_factory=set)
+    # The same about whole documents (doc:x): a passage passes if its document contains these terms
+    # and patterns somewhere, and none of the excluded ones anywhere.
+    doc_required_terms: set[str] = field(default_factory=set)
+    doc_required: list[re.Pattern] = field(default_factory=list)
+    doc_excluded_terms: set[str] = field(default_factory=set)
+    doc_excluded: list[re.Pattern] = field(default_factory=list)
 
     def __bool__(self) -> bool:
-        return bool(self.requires or self.excluded_terms or self.excluded or self.sites or self.excluded_sites)
+        return bool(self.requires or self.excluded_terms or self.excluded or self.sites or self.excluded_sites
+                    or self.doc_requires or self.doc_excluded_terms or self.doc_excluded)
 
     @property
     def requires(self) -> bool:
         return bool(self.required_terms or self.required)
+
+    @property
+    def doc_requires(self) -> bool:
+        return bool(self.doc_required_terms or self.doc_required)
 
     def allowed(self, snapshot: Snapshot, rows=None) -> np.ndarray:
         """Which of `rows` (default: every passage) pass, as a boolean array aligned with them."""
@@ -319,7 +339,43 @@ class Filters:
             ok &= snapshot.at_sites(self.sites)[rows]
         if self.excluded_sites:
             ok &= ~snapshot.at_sites(self.excluded_sites)[rows]
+        if self.doc_requires or self.doc_excluded_terms or self.doc_excluded:
+            ok &= self._documents_allowed(snapshot, rows)
         return ok
+
+    def _documents_allowed(self, snapshot: Snapshot, rows: np.ndarray) -> np.ndarray:
+        """Which of `rows` pass the doc: clauses. A phrase or regex is matched in every passage of
+        their documents, and the counts are cached per snapshot like those of the other patterns."""
+        document_of = snapshot.document_of_rows()
+        n_docs = len(snapshot.file_rows)
+        documents = document_of[rows]
+        if self.doc_required or self.doc_excluded:
+            touched = np.zeros(n_docs, bool)
+            touched[documents] = True
+            scan = np.flatnonzero(touched[document_of])  # every passage of those documents
+
+        def with_term(term: str) -> np.ndarray:
+            has = np.zeros(n_docs, bool)
+            if (tid := snapshot.term_id(term)) is not None:
+                has[document_of[snapshot.bm25.matrix[:, tid].indices]] = True
+            return has
+
+        def with_pattern(p: re.Pattern) -> np.ndarray:
+            has = np.zeros(n_docs, bool)
+            counts = snapshot.pattern_counts(p, scan)
+            has[document_of[scan[counts[scan] > 0]]] = True
+            return has
+
+        ok = np.ones(n_docs, bool)
+        for term in self.doc_required_terms:
+            ok &= with_term(term)
+        for term in self.doc_excluded_terms:
+            ok &= ~with_term(term)
+        for p in self.doc_required:
+            ok &= with_pattern(p)
+        for p in self.doc_excluded:
+            ok &= ~with_pattern(p)
+        return ok[documents]
 
 
 @dataclass
@@ -343,6 +399,15 @@ def steering(clauses: list[Clause]) -> Steering:
     out, text = Steering(), []
     for c in clauses:
         if c.kind == "partial":
+            continue
+        if c.doc:  # doc:x and +doc:x both require it, -doc:x excludes it; neither ranks
+            own = c.terms()
+            f = out.filters
+            terms, patterns = (f.doc_excluded_terms, f.doc_excluded) if c.op == NEVER else (f.doc_required_terms, f.doc_required)
+            if c.kind == "word" and len(own) == 1:
+                terms.add(own[0])
+            elif (p := c.pattern()) is not None:
+                patterns.append(p)
             continue
         if c.kind == "site":
             (out.filters.excluded_sites if c.op == NEVER else out.filters.sites).add(web_host(c.value))
@@ -483,8 +548,8 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
     df = snapshot.bm25.doc_freq
     parts, at = [], 0
     for m in TOKEN.finditer(query):
-        written = m.group(5)
-        pairs = tokenize_with_surface(written) if written and m.group(1) == PREFER else []
+        written = m.group(6)
+        pairs = tokenize_with_surface(written) if written and m.group(1) == PREFER and not m.group(2) else []
         if len(pairs) != 1 or snapshot.term_id(pairs[0][0]) is not None:
             continue
         word = pairs[0][1]
@@ -494,8 +559,8 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
             continue  # still being typed
         near = near_words(snapshot, word)
         if near:  # the closest, then the one whose term is in the most passages
-            parts += [query[at:m.start(5)], min(near, key=lambda n: (n[2], -df[n[1]], n[0]))[0]]
-            at = m.end(5)
+            parts += [query[at:m.start(6)], min(near, key=lambda n: (n[2], -df[n[1]], n[0]))[0]]
+            at = m.end(6)
     return "".join(parts) + query[at:] if parts else None
 
 
@@ -576,7 +641,7 @@ def search(
     if not len(snapshot) or not query.strip():
         return []
     q = parse_query(snapshot, query, config.typo_weight)
-    if not q.term_ids and not q.patterns and not q.filters.requires and not q.filters.sites and not q.unknown:
+    if not (q.term_ids or q.patterns or q.filters.requires or q.filters.sites or q.filters.doc_requires or q.unknown):
         return []  # only exclusions, or a regex still being typed: nothing to look for
     # The passages this search may show: all of them, or those outside the folders and documents
     # left out. Only these are scanned for patterns and compared by meaning.
@@ -630,9 +695,9 @@ def search(
         def why(row: int) -> dict:
             return {"bm25": float(lexical[row])}
 
-    # Passages that match every + clause but none of the others. A site only narrows what other
-    # clauses find, and on its own lists what the site has.
-    if q.filters.requires or (q.filters.sites and not q.term_ids and not q.patterns and not q.unknown):
+    # Passages that match every + clause but none of the others. A site or doc: clause only narrows
+    # what other clauses find, and on its own lists what the site has, or the documents that match.
+    if q.filters.requires or ((q.filters.sites or q.filters.doc_requires) and not q.term_ids and not q.patterns and not q.unknown):
         seen = {r for r, _ in ranked}
         ranked += [(int(r), 0.0) for r in np.flatnonzero(allowed) if r not in seen]
 
