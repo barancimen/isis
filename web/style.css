@@ -440,7 +440,7 @@ button.tree-fold:hover { color: var(--fg); }
 .tune-reset:disabled { opacity: 0.5; cursor: default; }
 .tune[open] > summary { border-bottom: 1px solid var(--border); }
 .tune-count { color: var(--accent); }
-.llm-help { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 2px 12px 10px; border-bottom: 1px solid var(--border); }
+.llm-help { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 9px 12px 15px;  /* 15px above the box, with the title's 6px */ border-bottom: 1px solid var(--border); }
 .llm-help textarea {
   font: inherit;
   color: inherit;
