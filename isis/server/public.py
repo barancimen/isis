@@ -67,6 +67,7 @@ class Limits:
         "related": (30, 0.5),
         "write": (120, 2.0),
         "read": (300, 10.0),
+        "llm": (10, 1 / 120),  # LLM help, which costs money for every call: llm.py also has a budget for everybody
     })
     related_bytes_per_token: int = 16 * 1024  # a long Related request counts as several
     # Seconds that one address's searches and Related refreshes may run: (burst, seconds per second
@@ -286,6 +287,8 @@ def body_limit(limits: Limits, kind: str, method: str, path: str) -> int:
 def kind_of(method: str, path: str) -> str:
     if path == "/api/search":
         return "search"
+    if path == "/api/llm/query":
+        return "llm"
     if method == "POST" and (path == "/api/related" or path.startswith("/api/tasks/") and path.endswith("/related")):
         return "related"
     if path.startswith("/api/tasks") and method in ("POST", "PUT", "DELETE", "PATCH"):

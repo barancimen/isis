@@ -108,6 +108,8 @@ def cmd_serve(args) -> None:
     os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args))
     os.environ["ISIS_HOSTS"] = ",".join(allowed_hosts(args.host, args.allow_host))
     os.environ["ISIS_BUILD_NATIVE"] = "0" if args.no_build else "1"
+    if args.llm_key_file:
+        os.environ["ISIS_LLM_KEY_FILE"] = str(Path(args.llm_key_file).resolve())
     package = Path(__file__).parent
     url = f"http://{args.host}:{args.port}"
     if sys.stderr.isatty():
@@ -164,6 +166,9 @@ def main(argv: list[str] | None = None) -> None:
                    help="also answer requests addressed to this host name or IP (repeatable)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--reload", action="store_true", help="restart when the Python code changes")
+    p.add_argument("--llm-key-file", metavar="FILE",
+                   help="the DeepSeek API key for LLM help with writing queries (default: DEEPSEEK_API_KEY, "
+                        "or .deepseek_api_key in the isis folder; without one, LLM help is off)")
     p.add_argument("--no-build", action="store_true",
                    help="don't build the Rust extension when it is missing or older than native/")
     p.add_argument("--public", action="store_true",

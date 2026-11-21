@@ -1947,6 +1947,82 @@ function bindSearchHistory() {
   });
 }
 
+// ---------- LLM help for query synthesis ----------
+
+// The menu under the search box and the one under the word rules hold the guide to their syntax.
+// When the server has a DeepSeek key, they also hold a box to describe a query in English, and are
+// named for it.
+function showLlmHelp(available) {
+  for (const box of document.querySelectorAll(".llm-help")) {
+    box.hidden = !available;
+    const menu = box.closest("details");
+    const title = menu.querySelector(".tune-title");
+    title.dataset.guideTitle ??= title.textContent;
+    title.textContent = available ? title.dataset.llmTitle : title.dataset.guideTitle;
+    menu.querySelector(".help-title").hidden = !available;
+  }
+}
+
+function bindLlmHelp() {
+  for (const box of document.querySelectorAll(".llm-help")) {
+    const text = box.querySelector("textarea");
+    box.querySelector(".llm-generate").addEventListener("click", () => generateQuery(box).catch(fail));
+    text.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+      e.preventDefault(); // in Related it would also send the word rules
+      generateQuery(box).catch(fail);
+    });
+    text.addEventListener("input", () => (box.querySelector(".llm-error").hidden = true));
+  }
+}
+
+// Asks the server for a query (or word rules) written from the English in the box, and puts it in
+// the search box (or saves it as the word rules). The server checks the answer and asks again when
+// it can't be used, so this waits for one answer or one error.
+async function generateQuery(box) {
+  if (box.classList.contains("busy")) return;
+  const target = box.dataset.target;
+  const status = box.querySelector(".llm-status");
+  const error = box.querySelector(".llm-error");
+  const button = box.querySelector(".llm-generate");
+  const request = box.querySelector("textarea").value.trim();
+  const field = target === "search" ? $("#search-input") : $("#steer-input");
+  const showError = (message) => {
+    error.textContent = `⚠ ${message.charAt(0).toUpperCase()}${message.slice(1)}`;
+    error.hidden = false;
+  };
+  error.hidden = true;
+  if (!request) return showError(target === "search" ? "describe what you want to find first" : "describe how to steer the suggestions first");
+  const task = state.task;
+  box.classList.add("busy");
+  box.setAttribute("aria-busy", "true");
+  button.disabled = true;
+  const stop = stopwatch((t) => { status.textContent = `Waiting for the LLM… ${t}`; });
+  try {
+    const answer = await api("POST", "api/llm/query", { target, request, current: field.value });
+    const took = stop();
+    if (target === "related") {
+      if (state.task !== task) { // the rules were for another task
+        status.textContent = "";
+        return;
+      }
+      field.value = answer.query;
+      await saveSteer({ preventDefault() {} });
+    } else {
+      useHistory(answer.query);
+    }
+    status.textContent = `Written in ${took}${answer.attempts > 1 ? ` after ${answer.attempts} tries` : ""}`;
+  } catch (e) {
+    stop();
+    status.textContent = "";
+    showError(e.message);
+  } finally {
+    box.classList.remove("busy");
+    box.removeAttribute("aria-busy");
+    button.disabled = false;
+  }
+}
+
 // ---------- related panel ----------
 
 const NO_TASK_RELATED = "Create a task to see related passages.";
@@ -3235,6 +3311,7 @@ function bind() {
   window.addEventListener("pagehide", saveResume);
   $("#search-input").addEventListener("input", runSearch);
   bindSearchHistory();
+  bindLlmHelp();
   $("#search-meaning").addEventListener("click", toggleMeaning);
   $("#search-input").addEventListener("input", () => renderPresets("search"));
   $("#related-refresh").addEventListener("click", () => refreshRelated().then(scrollToBestResults).catch(fail));
@@ -3290,6 +3367,7 @@ async function init() {
   // The version these files came with. Asking the server now would make an old page look current.
   state.pageVersion = $('meta[name="page-version"]')?.content || String(status.page_version);
   renderFolderPicks(status.folders, status.sources ?? []);
+  showLlmHelp(Boolean(status.llm));
   renderModelPick(status.models ?? []);
   $("#model-pick").addEventListener("change", (e) => pickModel(e.target.value));
   if (!status.model) {

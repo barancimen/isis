@@ -440,6 +440,34 @@ button.tree-fold:hover { color: var(--fg); }
 .tune-reset:disabled { opacity: 0.5; cursor: default; }
 .tune[open] > summary { border-bottom: 1px solid var(--border); }
 .tune-count { color: var(--accent); }
+.llm-help { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 2px 12px 10px; border-bottom: 1px solid var(--border); }
+.llm-help textarea {
+  font: inherit;
+  color: inherit;
+  width: 100%;
+  min-height: 4.6em;
+  padding: 6px 8px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: calc(6px * var(--round));
+}
+.llm-help textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.llm-row { display: flex; gap: 8px; align-items: center; }
+.llm-generate { flex: none; }
+.llm-generate:disabled { opacity: 0.5; cursor: default; }
+.llm-help::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--panel);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.llm-help.busy::after { opacity: 0.6; pointer-events: auto; cursor: progress; }
+.llm-status { position: relative; z-index: 1; }  /* the time counts above the fade */
+.help-title { margin: 10px 0 2px; font-size: 13px; font-weight: 700; color: var(--fg); }
 .help-body { padding: 2px 12px 10px; max-height: 60vh; overflow-y: auto; font-size: 13px; line-height: 1.55; color: var(--fg); }
 .help-body h4 { margin: 12px 0 4px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .help-body p { margin: 0 0 8px; }

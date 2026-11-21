@@ -15,3 +15,6 @@ sample_corpus/
 
 # the optional Rust extension: build output
 native/target/
+
+# the DeepSeek key for LLM help
+.deepseek_api_key

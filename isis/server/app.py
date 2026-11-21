@@ -29,6 +29,7 @@ from ..engine.related import PRESETS as RELATED_PRESETS
 from ..engine.related import RelatedConfig, TaskPrefs
 from ..engine.search import PRESETS as SEARCH_PRESETS
 from ..engine.search import QueryError, SearchConfig, correct_query, pattern_time_limit
+from .llm import QuerySynth, Refused, load_key
 from .public import PATTERN_SECONDS, PublicGuard, Workspaces
 from .tasks import Conflict, TaskError, TaskStore
 
@@ -150,6 +151,12 @@ class SteerRequest(BaseModel):
     text: str  # clauses as in a search query: x prefer, +x require, -x never show
 
 
+class QueryRequest(BaseModel):
+    target: Literal["search", "related"]  # the box the query is for
+    request: str  # what the person wants, in English
+    current: str = ""  # what the box holds now
+
+
 class SettingsRequest(BaseModel):
     steer: str = ""
     ignored: list[str] = []  # terms
@@ -167,7 +174,8 @@ class FeedbackRequest(BaseModel):
 
 
 def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: bool = True, watch: bool = True,
-               allowed_hosts: list[str] | None = None, build_native: bool = False) -> FastAPI:
+               allowed_hosts: list[str] | None = None, build_native: bool = False,
+               llm: QuerySynth | None = None) -> FastAPI:
     """`allowed_hosts`: the Host headers the API answers (None: any). A page on another site can
     point its own domain at 127.0.0.1 (DNS rebinding); checking the Host header stops it from
     reading the corpus or overwriting tasks through the browser.
@@ -292,6 +300,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                 for e in engine.embedders
             ],
             "page_version": page_version.current(),
+            "llm": bool(llm and llm.available),  # LLM help for writing queries
         }
 
     @app.get("/api/files")
@@ -463,6 +472,18 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                 prefs.record(body.lane, added=True)
         return prefs.summary()
 
+    @app.post("/api/llm/query")
+    def synthesize(body: QueryRequest):
+        """A query for the search box or the word rules, written by an LLM from what the person
+        wants in English (see llm.py)."""
+        try:
+            if llm is None:
+                raise Refused(503, "LLM help is off on this server: it has no DeepSeek key")
+            return llm.synthesize(body.target, body.request, body.current)
+        except Refused as e:
+            headers = {"Retry-After": str(max(1, round(e.retry_after)))} if e.retry_after else None
+            raise HTTPException(e.status, str(e), headers=headers) from None
+
     app.mount("/", PageFiles(version=page_version, directory=WEB, html=True), name="web")
     return app
 
@@ -473,7 +494,8 @@ def app_from_env() -> FastAPI:
     separated by "|", the manifest empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
     this machine only), ISIS_PUBLIC ("1": serve the public, see public.py), ISIS_BASE_PATH (with
     ISIS_PUBLIC: where the site lives on its domain, such as /isis) and ISIS_BUILD_NATIVE ("1": build
-    the Rust extension when it is missing or outdated, see native.start_build) and ISIS_URL (when
+    the Rust extension when it is missing or outdated, see native.start_build), ISIS_LLM_KEY_FILE
+    (the file with the DeepSeek key for LLM help, see llm.load_key) and ISIS_URL (when
     set, the address to show at the bottom of the terminal, see terminal.py)."""
     from ..engine.semantic import Embedder
 
@@ -491,4 +513,6 @@ def app_from_env() -> FastAPI:
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]
     store = (Workspaces(tasks_dir, base_path=os.environ.get("ISIS_BASE_PATH", ""))
              if os.environ.get("ISIS_PUBLIC") == "1" else TaskStore(tasks_dir))
-    return create_app(engine, store, allowed_hosts=hosts, build_native=os.environ.get("ISIS_BUILD_NATIVE") == "1")
+    key = load_key(os.environ.get("ISIS_LLM_KEY_FILE") or None)
+    return create_app(engine, store, allowed_hosts=hosts, build_native=os.environ.get("ISIS_BUILD_NATIVE") == "1",
+                      llm=QuerySynth(key) if key else None)
