@@ -70,9 +70,9 @@ def test_the_answer_is_a_json_object():
 
 def test_the_model_gets_the_page_guide():
     text = guide("search")
-    assert text.startswith("# How to search") and "## The basics" in text and "`whale*`" in text
+    assert text.startswith("## The basics") and "`whale*`" in text
     assert "Type your query specifications" not in text  # the guide only, not the box above it
-    assert guide("related").startswith("# How Related and word rules work")
+    assert guide("related").startswith("## What Related does")
     assert '{"query": "' in instructions("related") and guide("related") in instructions("related")
 
 

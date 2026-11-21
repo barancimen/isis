@@ -1949,18 +1949,10 @@ function bindSearchHistory() {
 
 // ---------- LLM help for query synthesis ----------
 
-// The menu under the search box and the one under the word rules hold the guide to their syntax.
-// When the server has a DeepSeek key, they also hold a box to describe a query in English, and are
-// named for it.
+// A menu under the search box and one under the word rules, above their guides, where a query can
+// be described in English. They show only when the server has a DeepSeek key.
 function showLlmHelp(available) {
-  for (const box of document.querySelectorAll(".llm-help")) {
-    box.hidden = !available;
-    const menu = box.closest("details");
-    const title = menu.querySelector(".tune-title");
-    title.dataset.guideTitle ??= title.textContent;
-    title.textContent = available ? title.dataset.llmTitle : title.dataset.guideTitle;
-    menu.querySelector(".help-title").hidden = !available;
-  }
+  for (const menu of document.querySelectorAll("details.llm")) menu.hidden = !available;
 }
 
 function bindLlmHelp() {
@@ -3298,6 +3290,7 @@ function bind() {
   for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-tune`), `tune-${kind}`);
   rememberOpen($("#related-feedback"), "feedback");
   for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-help`), `help-${kind}`);
+  for (const kind of ["search", "related"]) rememberOpen($(`#${kind}-llm`), `llm-${kind}`);
   bindResizers();
   $("#new-task").addEventListener("click", () => newTask().catch(fail));
   bindTaskTabs();

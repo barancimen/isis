@@ -440,7 +440,7 @@ button.tree-fold:hover { color: var(--fg); }
 .tune-reset:disabled { opacity: 0.5; cursor: default; }
 .tune[open] > summary { border-bottom: 1px solid var(--border); }
 .tune-count { color: var(--accent); }
-.llm-help { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 9px 12px 15px;  /* 15px above the box, with the title's 6px */ border-bottom: 1px solid var(--border); }
+.llm-help { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; }  /* the same space under the title's line as under Generate */
 .llm-help textarea {
   font: inherit;
   color: inherit;
@@ -467,7 +467,6 @@ button.tree-fold:hover { color: var(--fg); }
 }
 .llm-help.busy::after { opacity: 0.6; pointer-events: auto; cursor: progress; }
 .llm-status { position: relative; z-index: 1; }  /* the time counts above the fade */
-.help-title { margin: 10px 0 2px; font-size: 13px; font-weight: 700; color: var(--fg); }
 .help-body { padding: 2px 12px 10px; max-height: 60vh; overflow-y: auto; font-size: 13px; line-height: 1.55; color: var(--fg); }
 .help-body h4 { margin: 12px 0 4px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .help-body p { margin: 0 0 8px; }

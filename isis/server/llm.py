@@ -173,7 +173,8 @@ INTRO = {
 
 def instructions(target: str) -> str:
     examples = "\n".join(f'Request: {request}\nAnswer: {json.dumps({"query": query})}' for request, query in EXAMPLES[target])
-    return f"{INTRO[target]}\n\n{RULES}\n\nExamples:\n{examples}\n\nThe guide:\n\n{guide(target)}"
+    title = "How to search" if target == "search" else "How Related and word rules work"
+    return f"{INTRO[target]}\n\n{RULES}\n\nExamples:\n{examples}\n\nThe guide:\n\n# {title}\n\n{guide(target)}"
 
 
 def asking(target: str, request: str, current: str) -> str:
