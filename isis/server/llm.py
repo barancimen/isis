@@ -40,7 +40,7 @@ MAX_REQUEST = 600  # characters of English
 MAX_QUERY = 300  # characters of the query written
 CALL_SECONDS = 40  # one call to DeepSeek
 TOTAL_SECONDS = 80  # all the attempts of one request, well inside what a proxy waits
-MAX_TOKENS = 4000  # the model reasons before it answers, and that counts too
+MAX_TOKENS = 1500  # the model reasons before it answers, and that counts too (about 200 tokens in all, as seen)
 GUIDES = {"search": "search-guide", "related": "related-guide"}  # the guide of each box, by its id in index.html
 
 
@@ -69,12 +69,15 @@ def load_key(path: str | os.PathLike | None = None) -> str | None:
     the isis folder. None if there is none, and then LLM help is off."""
     if key := os.environ.get(KEY_ENV, "").strip():
         return key
+    file = Path(path or KEY_FILE)
     try:
-        return Path(path or KEY_FILE).read_text(encoding="utf-8").strip() or None
-    except OSError:
+        return file.read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
         if path:
-            log.warning("cannot read the DeepSeek key file %s: LLM help is off", path)
-        return None
+            log.warning("there is no DeepSeek key file %s: LLM help is off", path)
+    except OSError as e:  # such as a key the server's user may not read
+        log.warning("cannot read the DeepSeek key file %s (%s): LLM help is off", file, e.strerror or e)
+    return None
 
 
 # ---- what the model is told ----
@@ -334,13 +337,14 @@ class QuerySynth:
     def _attempts(self, target: str, request: str, current: str) -> dict:
         messages = [{"role": "system", "content": instructions(target)},
                     {"role": "user", "content": asking(target, request, current)}]
-        started, problem = time.monotonic(), ""
+        started, problem, made = time.monotonic(), "", 0
         for attempt in range(1, MAX_ATTEMPTS + 1):
             left = TOTAL_SECONDS - (time.monotonic() - started)
             if left < 5:
                 break
             if wait := self.budget.take():
                 raise Refused(429, "LLM help has been used as much as it may be for now. Try again later", wait)
+            made = attempt
             try:
                 answer = self.complete(messages, min(CALL_SECONDS, left))
             except Upstream as e:
@@ -356,4 +360,5 @@ class QuerySynth:
                 messages += [{"role": "assistant", "content": answer or "(no answer)"},
                              {"role": "user", "content": f"That can't be used: {e}. Reply again with only "
                                                          '{"query": "..."}, following the rules and the guide.'}]
-        raise Refused(502, f"LLM help failed after {attempt} attempts. The last problem: {problem or 'it took too long'}")
+        raise Refused(502, f"LLM help failed after {made} {'attempt' if made == 1 else 'attempts'}. "
+                           f"The last problem: {problem or 'it took too long'}")

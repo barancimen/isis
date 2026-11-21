@@ -2001,11 +2001,11 @@ async function generateQuery(box) {
   try {
     const answer = await api("POST", "api/llm/query", { target, request, current: field.value });
     const took = stop();
+    if (state.task !== task) { // each task has its own search and word rules: this was for another
+      status.textContent = "";
+      return;
+    }
     if (target === "related") {
-      if (state.task !== task) { // the rules were for another task
-        status.textContent = "";
-        return;
-      }
       field.value = answer.query;
       await saveSteer({ preventDefault() {} });
     } else {
