@@ -8,7 +8,8 @@ import json
 import logging
 import os
 import re
-import tempfile
+import secrets
+import stat
 import threading
 import time
 from contextlib import contextmanager, suppress
@@ -17,7 +18,13 @@ from pathlib import Path
 from ..engine.related import TaskPrefs
 
 log = logging.getLogger(__name__)
-ILLEGAL = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]')
+# Not in a task's name: what a path or a link reads as something else, control characters, and
+# half of a surrogate pair, which JSON can hold ("\ud800") but a file name can't.
+ILLEGAL = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f\ud800-\udfff]')
+MAX_NAME = 120  # characters
+# A file name holds 255 bytes, and a task's name is also in the names of its preferences, of its
+# copies in .trash (with a date) and of the temporary file of each save.
+MAX_NAME_BYTES = 200
 MAX_DISMISSED = 500
 
 
@@ -40,16 +47,23 @@ def _mtime(path: Path) -> str:
 
 
 def _replace(path: Path, text: str) -> None:
-    """Write `text` to `path` atomically: a temporary file of its own, flushed, then renamed."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    """Write `text` to `path` atomically: a temporary file of its own, flushed, then renamed. The
+    file keeps the permissions it had, and a new one gets those of any new file. Half of a surrogate
+    pair, which can't be written as UTF-8, is saved as a question mark."""
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+        except FileNotFoundError:  # a new file
+            pass
         os.replace(tmp, path)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
 
 
@@ -71,10 +85,11 @@ class TaskStore:
 
     @staticmethod
     def clean(name: str) -> str:
-        name = ILLEGAL.sub("-", name).strip().lstrip(".").strip()
+        name = ILLEGAL.sub("-", name).strip().lstrip(".").strip()[:MAX_NAME]
+        name = name.encode("utf-8")[:MAX_NAME_BYTES].decode("utf-8", "ignore").strip()  # whole characters only
         if not name:
             raise TaskError("a task needs a name")
-        return name[:120]
+        return name
 
     def _path(self, name: str) -> Path:
         return self.folder / f"{self.clean(name)}.md"

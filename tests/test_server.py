@@ -389,3 +389,59 @@ def test_related_does_not_depend_on_the_task_name(client):
         client.post("/api/tasks", json={"name": name})
         answers.append(client.post(f"/api/tasks/{name}/related", json={"text": text}).json()["lanes"])
     assert answers[0] == answers[1] == client.post("/api/related", json={"text": text}).json()["lanes"]
+
+
+
+def send(client, method: str, url: str, body: dict):
+    """A request whose JSON keeps "\\ud800" as an escape: half of a surrogate pair, which JSON can
+    hold and a browser can send, but which the test client can't encode itself."""
+    return client.request(method, url, content=json.dumps(body), headers={"Content-Type": "application/json"})
+
+
+@pytest.mark.parametrize("name", ["a" * 119 + " b", "漢" * 100, "é" * 120, "half \ud83d a pair"])
+def test_any_name_makes_a_task_that_can_be_saved_and_deleted(client, corpus, name):
+    made = send(client, "POST", "/api/tasks", {"name": name})
+    assert made.status_code == 200
+    stored = made.json()["name"]
+    assert stored == stored.strip() and len(stored) <= 120
+    assert len(stored.encode()) <= 200  # room for .trash's date and a save's temporary file
+    assert [t["name"] for t in client.get("/api/tasks").json()] == [stored]  # listed under the name it answers to
+    assert client.put(f"/api/tasks/{stored}", json={"content": "text"}).status_code == 200
+    assert client.put(f"/api/tasks/{stored}/steer", json={"text": "+whale"}).json()["steer"] == "+whale"
+    assert client.delete(f"/api/tasks/{stored}/prefs").status_code == 200  # the longest name a task's files get
+    assert client.delete(f"/api/tasks/{stored}").status_code == 200
+    assert not list((corpus / "_tasks").glob("*.md"))
+
+
+def test_half_a_surrogate_pair_is_replaced_not_stored(client, corpus):
+    """It can't be written as UTF-8, or sent back in an answer: saved in a task's preferences, it
+    failed every later request for them."""
+    client.post("/api/tasks", json={"name": "t"})
+    assert send(client, "PUT", "/api/tasks/t", {"content": "x\ud800y"}).status_code == 200
+    assert client.get("/api/tasks/t").json()["content"] == "x\ufffdy"
+    assert send(client, "PUT", "/api/tasks/t/steer", {"text": "whale\udc00"}).json()["steer"] == "whale\ufffd"
+    assert send(client, "POST", "/api/tasks/t/terms", {"term": "squid\ud800", "action": "ignore"}).status_code == 200
+    dismissal = {"action": "dismiss", "lane": "core", "path": "whales\udfff.md", "text": "Ambergris \ud83d"}
+    assert send(client, "POST", "/api/tasks/t/feedback", dismissal).status_code == 200
+    assert client.get("/api/tasks/t/prefs").status_code == 200
+    related = send(client, "POST", "/api/tasks/t/related", {"text": "The sperm \udfff whale.", "params": {"x\ud800": 1}})
+    assert related.status_code == 200 and related.json()["prefs"]["steer"] == "whale\ufffd"
+    assert send(client, "POST", "/api/related", {"text": "The sperm whale.", "steer": "+whale\ud800"}).status_code == 200
+
+
+def test_a_save_keeps_the_files_permissions(client, corpus):
+    client.post("/api/tasks", json={"name": "t"})
+    path = corpus / "_tasks" / "t.md"
+    made = path.stat().st_mode
+    client.put("/api/tasks/t", json={"content": "text"})
+    assert path.stat().st_mode == made  # it became private to the server's user on its first save
+    path.chmod(0o640)
+    client.put("/api/tasks/t", json={"content": "more"})
+    assert path.stat().st_mode & 0o777 == 0o640 and path.read_text() == "more"
+    assert not [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+@pytest.mark.parametrize("limit, found", [(0, 1), (-3, 1), (2, 2), (1000, None)])
+def test_search_gives_at_least_one_result_and_at_most_200(client, limit, found):
+    hits = client.get("/api/search", params={"q": "whale ship the", "limit": limit}).json()["hits"]
+    assert len(hits) == found if found else 1 <= len(hits) <= 200

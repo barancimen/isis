@@ -19,7 +19,7 @@ import pydantic_core
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..engine import native
@@ -114,24 +114,49 @@ def as_json(data) -> Response:
     return Response(pydantic_core.to_json(data, inf_nan_mode="null", fallback=_plain_scalar), media_type="application/json")
 
 
-class NewTask(BaseModel):
+def whole(value):
+    """`value` with any half of a surrogate pair in its strings replaced by U+FFFD. JSON may hold
+    one ("\\ud800"), and it can neither be saved as UTF-8 nor sent back in an answer."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+        return value
+    if isinstance(value, dict):
+        return {whole(k): whole(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [whole(v) for v in value]
+    return value
+
+
+class Body(BaseModel):
+    """What a request sends as JSON."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _whole_strings(cls, data):
+        return whole(data)
+
+
+class NewTask(Body):
     name: str
 
 
-class SaveTask(BaseModel):
+class SaveTask(Body):
     content: str
     base_mtime: str | None = None
 
 
-class RenameTask(BaseModel):
+class RenameTask(Body):
     new_name: str
 
 
-class MoveTask(BaseModel):
+class MoveTask(Body):
     before: str | None = None  # the task to go in front of; None for the end of the list
 
 
-class RelatedRequest(BaseModel):
+class RelatedRequest(Body):
     text: str
     params: dict = {}  # overrides of RelatedConfig, as named in /api/params
     skip_folders: list[str] = []  # corpus folders to leave out, as named in /api/status
@@ -142,28 +167,28 @@ class StatelessRelatedRequest(RelatedRequest):
     steer: str = ""  # word rules, as on the steer line of a task: x prefer, +x require, -x never show
 
 
-class TermRequest(BaseModel):
+class TermRequest(Body):
     term: str  # boost and exclude: the word as shown on its chip; unboost, ignore, unignore: its term
     action: Literal["boost", "unboost", "ignore", "unignore", "exclude"]
 
 
-class SteerRequest(BaseModel):
+class SteerRequest(Body):
     text: str  # clauses as in a search query: x prefer, +x require, -x never show
 
 
-class QueryRequest(BaseModel):
+class QueryRequest(Body):
     target: Literal["search", "related"]  # the box the query is for
     request: str  # what the person wants, in English
     current: str = ""  # what the box holds now
 
 
-class SettingsRequest(BaseModel):
+class SettingsRequest(Body):
     steer: str = ""
     ignored: list[str] = []  # terms
     excluded_docs: list[str] = []
 
 
-class FeedbackRequest(BaseModel):
+class FeedbackRequest(Body):
     action: Literal["add", "dismiss", "avoid", "restore", "like", "unlike", "exclude_doc", "include_doc"]
     lane: str = ""  # where the passage was shown; restoring finds it from the dismissal
     path: str = ""
@@ -339,7 +364,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         try:
             corrected = None if as_typed else correct_query(engine.snapshot, q)
             with time_limit():
-                hits = engine.search(corrected or q, limit=min(limit, 200), mode=mode, config=configure(SearchConfig, overrides),
+                hits = engine.search(corrected or q, limit=max(1, min(limit, 200)), mode=mode, config=configure(SearchConfig, overrides),
                                      skip_folders=[str(f) for f in skip_folders],
                                      skip_files=[str(f) for f in hidden_files], model=model or None)
         except QueryError as e:
