@@ -178,7 +178,7 @@ isis/server/   app.py       FastAPI app and file watcher; llm.py: LLM help for q
 isis/cli.py    `isis index` / `isis serve`; client.py: `isis search` / `isis related`, which ask a running server
 native/        isis_native, the optional Rust extension (pyo3, built by maturin): highlights and phrase counts
 web/           index.html, app.js, style.css, insert.js, reflow.js, filetree.js, history.js; vendor/codemirror.js (bundled, see build-codemirror.sh)
-scripts/       fetch_sample_corpus.py, browser_check.py
+scripts/       fetch_sample_corpus.py, browser_check.py, browser_regressions.py
 ```
 
 ## Development
@@ -187,6 +187,7 @@ scripts/       fetch_sample_corpus.py, browser_check.py
 .venv/bin/pytest                         # engine, related pipeline, server API
 node --test web/*.test.mjs              # insertion, reflow and search history logic of the page
 python scripts/browser_check.py http://127.0.0.1:8765 sample_corpus   # end to end, needs playwright
+python scripts/browser_regressions.py http://127.0.0.1:8765 sample_corpus TASKS   # mistakes the page once made; TASKS is the server's empty --tasks folder
 sh web/vendor/build-codemirror.sh        # rebuild the CodeMirror bundle (needs Node)
 .venv/bin/pip install ./native           # rebuild the Rust extension after changing native/src/lib.rs
 ```
