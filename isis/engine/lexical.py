@@ -171,6 +171,7 @@ class FolderBM25:
     def __init__(self, parts: list[tuple[int, FolderPart]], n_docs: int, n_terms: int, k1: float, b: float):
         self.parts, self.n_docs, self.n_terms, self.k1, self.b = parts, n_docs, n_terms, k1, b
         self._doc_freq: np.ndarray | None = None
+        self._idf: np.ndarray | None = None
 
     @property
     def doc_freq(self) -> np.ndarray:
@@ -187,14 +188,20 @@ class FolderBM25:
 
     @property
     def idf(self) -> np.ndarray:
-        df = self.doc_freq
-        return np.log1p((self.n_docs - df + 0.5) / (df + 0.5)).astype(np.float32)
+        """How rare each term is in the corpus. Worked out once: it is read for every word of a
+        query or a task, and it covers the whole vocabulary."""
+        if self._idf is None:
+            df = self.doc_freq
+            self._idf = np.log1p((self.n_docs - df + 0.5) / (df + 0.5)).astype(np.float32)
+        return self._idf
 
     def with_params(self, k1: float, b: float) -> FolderBM25:
         if (k1, b) == (self.k1, self.b):
             return self
-        return FolderBM25([(offset, part.with_params(k1, b)) for offset, part in self.parts], self.n_docs, self.n_terms,
-                          k1, b)
+        other = FolderBM25([(offset, part.with_params(k1, b)) for offset, part in self.parts], self.n_docs, self.n_terms,
+                           k1, b)
+        other._doc_freq, other._idf = self.doc_freq, self.idf  # the counts are the same, whatever the weights
+        return other
 
     def scores(self, term_ids, weights) -> np.ndarray:
         """Each passage's BM25 score in its own folder, for a query given as term ids with weights."""

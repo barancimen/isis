@@ -686,3 +686,64 @@ def test_the_list_of_files_has_its_own_time_of_change(tmp_path):
     (corpus / "c.md").write_text("A new file.\n")
     e.refresh()
     assert listed < e.status.files_updated <= e.status.updated
+
+
+def test_a_folder_inside_another_is_indexed_once_whatever_is_scanned(tmp_path):
+    """After a change in one of two folders given, only that one is scanned: the files of one
+    inside the other then showed up a second time, under the other's name."""
+    outer = write_corpus(tmp_path / "notes", {"top.md": "Whale at the top.\n", "projects/p.md": "Whale in a project.\n"})
+    for folders, expected in (([outer / "projects", outer], ["notes/top.md", "projects/p.md"]),
+                              ([outer, outer / "projects"], ["notes/projects/p.md", "notes/top.md"])):
+        e = Engine(folders, index_dir=tmp_path / f"index-{expected[0][:5]}")
+        e.refresh()
+        assert sorted(e.snapshot.file_rows) == expected
+        for only in ({"notes"}, {"projects"}):
+            e.refresh(only=only)
+            assert sorted(e.snapshot.file_rows) == expected
+
+
+def test_an_archive_inside_a_folder_of_notes_keeps_its_sources(tmp_path):
+    notes = write_corpus(tmp_path / "docs", {"note.md": "A note about whales.\n"})
+    md = notes / "osiris" / "data" / "md"
+    write_corpus(md, {"ab/abc.md": "---\nsource: hackernews\nurl: https://news.ycombinator.com/item?id=1\n---\n\nA comment about whales.\n"})
+    e = Engine([notes, md], index_dir=tmp_path / "index", osiris={md: None})  # the notes are named first
+    e.refresh()
+    assert sorted(e.snapshot.file_rows) == ["docs/note.md", "md/ab/abc.md"]
+    assert [s["id"] for s in e.sources()] == ["md/hackernews"]
+
+
+def test_a_file_that_cannot_be_read_is_not_new_at_every_refresh(tmp_path, monkeypatch):
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "Whale and ship.\n", "b.md": "Heron and stoat.\n"})
+    e = Engine(corpus, index_dir=tmp_path / "index")
+    real = Engine._read
+    monkeypatch.setattr(Engine, "_read", lambda self, path, stat: (_ for _ in ()).throw(PermissionError(13, "Permission denied")) if path == "b.md" else real(self, path, stat))
+    assert e.refresh()["changed"] == 2
+    before = e.snapshot
+    stats = e.refresh()
+    assert stats["changed"] == stats["new"] == 0 and e.snapshot is before  # it was "new" each time, and the index was saved again
+    monkeypatch.setattr(Engine, "_read", real)
+    (corpus / "b.md").chmod(0o600)  # a change of permissions is tried again
+    assert e.refresh()["changed"] == 1 and "b.md" in e.snapshot.file_rows
+
+
+def test_the_first_folders_tasks_are_never_indexed(tmp_path):
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "Whale and ship.\n", "_tasks/old.md": "A private note about whales.\n"})
+    for tasks in (corpus / "_tasks", tmp_path / "elsewhere"):  # with the tasks elsewhere, as public mode needs, it was
+        e = Engine(corpus, index_dir=tmp_path / f"index-{tasks.name}", exclude=corpus_exclude([corpus], tasks))
+        e.refresh()
+        assert sorted(e.snapshot.file_rows) == ["a.md"]
+
+
+def test_copies_left_by_a_save_that_was_killed_are_removed(tmp_path):
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "Whale and ship.\n"})
+    index = tmp_path / "index"
+    Engine(corpus, embedder=HashEmbedder(), index_dir=index).refresh()
+    dead = 2 ** 22 + 12345  # no process has this number
+    (index / f"cache.{dead}-1.tmp").mkdir()
+    (index / f"cache.{dead}-1.tmp" / "texts.bin").write_bytes(b"x" * 100)
+    (index / "models" / f"model.{dead}-1.tmp.npy").write_bytes(b"x")
+    mine = index / f"cache.{os.getpid()}-1.tmp"  # a save that is running
+    mine.mkdir()
+    again = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
+    left = sorted(p.name for p in [*index.glob("*.tmp"), *index.glob("models/*.tmp.*")])
+    assert left == [mine.name] and again.refresh()["changed"] == 0

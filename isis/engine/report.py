@@ -6,7 +6,10 @@ import textwrap
 
 
 def _excerpt(text: str, width: int) -> str:
-    return textwrap.shorten(" ".join(text.split()), width, placeholder=" …")
+    text = " ".join(text.split())
+    short = textwrap.shorten(text, width, placeholder=" …")
+    # A first word longer than the width (text without spaces, a long URL) leaves only the "…".
+    return short if short.strip(" …") or not text else f"{text[:width - 1]}…"
 
 
 def show_hits(hits, width: int = 110) -> None:

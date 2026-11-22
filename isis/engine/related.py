@@ -52,6 +52,9 @@ from .text import tokenize, tokenize_with_surface
 
 MAX_EXCERPT_MATCHES = 2_000  # paragraphs whose excerpt check is remembered
 MAX_THEME_SCORES = 48  # themes whose scores are remembered: two arrays of the corpus's size each
+MAX_FEEDBACK = 1_000_000  # adds or removals counted for a group: more than any hand makes, and still a number the draw can use
+MAX_CLUSTERED = 1000  # paragraphs that are clustered into themes by comparing every pair of them
+POOL_PER_FILE = 3  # a file's passages among those a group is filled from, for each place the file may take
 THEME_BATCH = 32  # paragraphs scored at a time, which bounds the memory a large theme needs
 
 LANES = ("core", "hidden", "bridges", "gaps")
@@ -74,6 +77,8 @@ FILTER = Group(
     "Which passages can appear",
     "A passage appears only if it passes this filter. " + "The meaning score shows how close a passage is to your task in meaning. A typical passage in your documents scores 0. A score of 3 is far above typical.",
 )
+SHOWN_ABOVE = "The passages for this group are already shown in the groups above."
+
 LANES_GROUP = Group(
     "Result groups",
     "Results are sorted into four groups, each related to your task in a different way. "
@@ -298,6 +303,7 @@ def _remembered_passages(v) -> list[dict]:
     """Saved passages that have their text, with a path and line numbers of the right type."""
     return [
         {**d, "path": d.get("path") if isinstance(d.get("path"), str) else "",
+         "lane": d.get("lane") if isinstance(d.get("lane"), str) else "",
          "start_line": d.get("start_line") if _is_int(d.get("start_line")) else None,
          "end_line": d.get("end_line") if _is_int(d.get("end_line")) else None}
         for d in (v if isinstance(v, list) else [])
@@ -334,7 +340,7 @@ class TaskPrefs:
             liked=_remembered_passages(data.get("liked")),
             excluded_docs=_strings(data.get("excluded_docs")),
             feedback={
-                lane: [max(0, v[0]), max(0, v[1])]  # the lane draw refuses negative counts
+                lane: [min(max(0, v[0]), MAX_FEEDBACK), min(max(0, v[1]), MAX_FEEDBACK)]  # the lane draw refuses negative counts
                 for lane, v in (data.get("feedback") if isinstance(data.get("feedback"), dict) else {}).items()
                 if isinstance(v, list) and len(v) == 2 and all(map(_is_int, v))
             },
@@ -526,7 +532,7 @@ class RelatedResult:
 
 def task_units(text: str) -> list[Unit]:
     return [
-        Unit(p.heading, p.start_line, p.end_line, p.text)
+        Unit(p.section, p.start_line, p.end_line, p.text)
         for p in chunk_markdown("<task>", text, target_words=0, max_words=MAX_WORDS, overlap_words=0)
     ]
 
@@ -644,9 +650,21 @@ def assign_themes(units: list[Unit], unit_vecs: np.ndarray | None, config: Relat
 def _clusters(vecs: np.ndarray, distance: float) -> np.ndarray:
     """Cluster ids for the paragraphs. A long task about one subject would otherwise split into
     a theme per paragraph. Small themes are kept: on long tasks, merging single paragraphs into
-    bigger themes cost relevance in the bridges and gaps lanes."""
+    bigger themes cost relevance in the bridges and gaps lanes. Every pair of paragraphs is
+    compared, which for thousands of them would take gigabytes: beyond MAX_CLUSTERED, that many
+    spread evenly through the task are clustered, and each of the others joins the cluster it is
+    closest to."""
     from scipy.cluster.hierarchy import fcluster, linkage
     from scipy.spatial.distance import pdist
+
+    if len(vecs) > MAX_CLUSTERED:
+        some = np.linspace(0, len(vecs) - 1, MAX_CLUSTERED).astype(np.int64)
+        of_some = _clusters(vecs[some], distance)
+        ids = np.unique(of_some)
+        centres = np.stack([_normalized(vecs[some][of_some == c].sum(0)) for c in ids])
+        clusters = ids[np.argmax(vecs @ centres.T, axis=1)]
+        clusters[some] = of_some
+        return clusters
 
     with np.errstate(invalid="ignore", divide="ignore"):
         distances = pdist(vecs, "cosine")
@@ -716,8 +734,19 @@ def semantic_signals(snapshot: Snapshot, embedder, units: list[Unit], unit_vecs:
         _, z_doc = zscores(snapshot, document[None, :], scope)
         out = SemanticSignals(z_doc[:, 0], z_doc[:, 0])  # the closest paragraph is worked out for the passages shown
     else:
-        _, z = zscores(snapshot, unit_vecs, scope)
-        out = SemanticSignals(z.max(1), (z * weights).max(1), best_unit=(z * weights).argmax(1))
+        # A batch of paragraphs at a time: all of them against every passage at once is a table
+        # of gigabytes for a long task. The first paragraph to reach a passage's best score keeps it.
+        strongest = weighted = np.full(len(snapshot), -np.inf, np.float32)
+        best_unit = np.zeros(len(snapshot), np.int64)
+        for start in range(0, len(unit_vecs), THEME_BATCH):
+            _, z = zscores(snapshot, unit_vecs[start:start + THEME_BATCH], scope)
+            strongest = np.maximum(strongest, z.max(1))
+            with np.errstate(invalid="ignore"):  # a paragraph of weight 0 against a passage with no vector
+                by_weight = z * weights[start:start + THEME_BATCH]
+                best, better = by_weight.max(1), by_weight.max(1) > weighted
+            best_unit = np.where(better, by_weight.argmax(1) + start, best_unit)
+            weighted = np.where(better, best, weighted)
+        out = SemanticSignals(strongest, weighted, best_unit=best_unit)
         if liked:  # each liked passage is one more paragraph to match
             _, z_like = zscores(snapshot, like_vecs, scope)
             out.strongest = np.maximum(out.strongest, z_like.max(1))
@@ -756,7 +785,11 @@ def zscores(snapshot: Snapshot, vecs: np.ndarray, scope: np.ndarray | None = Non
     cos = scoped_product(snapshot.vectors, vecs.T, has if scope is None else scope & has)  # only rows that have vectors
     typical = cos[rows] if scope is None else snapshot.typical_vectors() @ vecs.T
     median = np.median(typical, axis=0)
-    spread = 1.4826 * np.median(np.abs(typical - median), axis=0) + 1e-6
+    away = np.abs(typical - median)
+    spread = 1.4826 * np.median(away, axis=0)
+    # With over half of the passages the same text (a footer, a template), that middle distance is
+    # 0, and any other passage would score in the hundreds of thousands: go by the mean distance.
+    spread = np.where(spread < 1e-4, 1.2533 * away.mean(axis=0), spread) + 1e-6
     z = (cos - median) / spread
     z[~has] = -np.inf
     cos[~has] = -np.inf
@@ -987,7 +1020,18 @@ def mmr_select(
     lam * relevance - (1 - lam) * (similarity to anything already chosen or collected). Passages
     marked "more like this" (`wanted`) don't count as chosen: similar ones are what was asked for."""
     per_file = Counter() if per_file is None else per_file
-    pool = [r for r in sorted(scores, key=lambda r: -scores[r]) if r not in taken][: config.mmr_pool]
+    # The best mmr_pool passages. A file can take max_per_file places, so only its best few go
+    # in: one long document with a hundred good passages would otherwise be the whole pool, and
+    # the group would end with max_per_file results.
+    document_of, pool, in_pool = snapshot.document_of_rows(), [], Counter()
+    for r in sorted(scores, key=lambda r: -scores[r]):
+        document = int(document_of[r])
+        if r in taken or in_pool[document] >= POOL_PER_FILE * config.max_per_file:
+            continue
+        in_pool[document] += 1
+        pool.append(r)
+        if len(pool) == config.mmr_pool:
+            break
     if not pool:
         return []
     best = max(max(scores[r] for r in pool), 1e-9)
@@ -1100,6 +1144,18 @@ def related(
         steer = steering(prefs.clauses())
     except QueryError:  # saved lines are checked when saved; an old one may not be
         steer = Steering()
+    # What the word rules and the hidden documents rule out goes before anything is ranked too, as
+    # in Search: it takes no place among the top keyword matches or the candidates, which with
+    # site:github.com would otherwise all be other sites' passages, and none be left.
+    hidden_documents = [span for path in prefs.excluded_docs if (span := snapshot.file_rows.get(path)) is not None]
+    if steer.filters or hidden_documents:
+        within = np.arange(n) if rows is None else rows
+        allowed = np.zeros(n, bool)
+        allowed[within] = steer.filters.allowed(snapshot, within) if steer.filters else True
+        for start, end in hidden_documents:
+            allowed[start:end] = False
+        signals.only_in(allowed)
+        keep = allowed
     chips = task_terms(snapshot, units, prefs, config, steer, heading_texts(task_text))
     query = [(snapshot.term_id(c.term), c.weight) for c in chips if not c.ignored]
     bm25 = snapshot.bm25_for(config.bm25_k1, config.bm25_b)
@@ -1143,7 +1199,7 @@ def related(
         if not lines:
             return None
         matches_task_line = None
-        if semantic:  # the closest paragraph, for display
+        if semantic and snapshot.has_vector[row]:  # the closest paragraph, for display
             best = signals.best_unit[row] if signals.best_unit is not None else np.argmax(snapshot.vectors[row] @ unit_vecs.T)
             matches_task_line = units[int(best)].start_line
         ident = passage_id({"path": p.path, "text": p.text}) if liked_ids else None
@@ -1160,10 +1216,16 @@ def related(
         return make_hit(snapshot, row, scored.scores[lane][row], terms, lines, context_lines, why, steer.highlight)
 
     lanes = []
+    shown = {row for rows in picked.values() for row, _ in rows}
     for lane in LANES:
         items = [h for row, value in picked.get(lane, []) if (h := hit(lane, row, value)) is not None]
-        note = scored.notes.get(lane, "" if items or lane in picked else EMPTY_NOTE[lane])
-        lanes.append(Lane(lane, *LANE_INFO[lane], items, note))
+        if items:
+            note = ""
+        elif lane not in picked:
+            note = EMPTY_NOTE[lane]
+        else:  # it had passages, and the groups before it took them all
+            note = SHOWN_ABOVE if all(row in shown for row in scored.scores[lane]) else ""
+        lanes.append(Lane(lane, *LANE_INFO[lane], items, scored.notes.get(lane, note)))
     lap("snippets")
 
     return RelatedResult(

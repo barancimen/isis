@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -103,8 +104,9 @@ def cmd_serve(args) -> None:
         check_public(args)
         os.environ["ISIS_PUBLIC"] = "1"
         os.environ["ISIS_BASE_PATH"] = args.base_path
-    os.environ["ISIS_CORPUS"] = os.pathsep.join(map(str, folders_of(args.corpus, args.osiris)))
-    os.environ["ISIS_OSIRIS"] = os.pathsep.join(f"{md}|{manifest or ''}" for md, manifest in archives_of(args.osiris).items())
+    # As JSON: a folder's name may hold the ":" or "|" that would otherwise separate them.
+    os.environ["ISIS_CORPUS"] = json.dumps(list(map(str, folders_of(args.corpus, args.osiris))))
+    os.environ["ISIS_OSIRIS"] = json.dumps({str(md): str(manifest or "") for md, manifest in archives_of(args.osiris).items()})
     if args.tasks:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
     os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args))

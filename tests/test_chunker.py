@@ -121,3 +121,45 @@ def test_document_title(text, title):
 ])
 def test_document_site(text, site):
     assert document_site(split_lines(text)) == site
+
+
+def test_a_heading_line_is_read_in_one_pass():
+    """Anyone may send a task to Related, and its lines go through these patterns: a line made to
+    be slow (spaces before more text) once took over a minute, with everything else waiting."""
+    import time
+
+    from isis.engine.chunker import heading_text
+
+    started = time.perf_counter()
+    assert heading_text("# a" + " " * 200_000 + "b").startswith("a ")
+    assert document_title(split_lines("---\ntitle:" + " " * 200_000 + "x" + " " * 200_000 + "y\n---\ntext")).startswith("x ")
+    assert time.perf_counter() - started < 1
+    assert [heading_text(line) for line in ("# Title", "## Title ##", "# C#", "#  ##", "#hashtag", "####### seven")] == \
+        ["Title", "Title", "C#", "", None, None]
+    assert heading_text("# Results\x00 2019") == "Results 2019"  # a NUL would split the list of headings in the index cache
+
+
+def test_code_fences_open_and_close_as_markdown_has_them():
+    inline = "# Notes\n\n```pip install isis``` installs it.\n\n## Usage\n\nRun the server first.\n"
+    assert [(p.heading, p.text) for p in chunk_markdown("a.md", inline, 0)] == \
+        [("Notes", "```pip install isis``` installs it."), ("Usage", "Run the server first.")]
+    assert document_title(split_lines("````\n```\n# inside\n```\n````\n# After\ntext\n")) == "After"  # a longer fence holds a shorter one
+    assert document_title(split_lines("~~~\ncode\n```\n# inside\n~~~\n# After\ntext\n")) == "After"
+    assert heading_texts("```\n# not one\n```\n# One\n") == ["One"]
+
+
+def test_every_heading_of_a_document_is_with_one_of_its_passages():
+    md = "# Moby Dick\n\n## Chapter 1\n\nCall me Ishmael.\n\nSome years ago.\n\n## Chapter 2\n\nMore text.\n\n## Notes\n\n### Sources\n"
+    passages = chunk_markdown("a.md", md, 0)
+    assert [(p.heading, p.section, p.text) for p in passages] == [
+        ("Moby Dick\nChapter 1", "Chapter 1", "Call me Ishmael."),
+        ("Moby Dick\nChapter 1", "Chapter 1", "Some years ago."),
+        ("Notes\nSources\nChapter 2", "Chapter 2", "More text."),  # those after the last text go with it
+    ]
+    assert chunk_markdown("a.md", "# Only a heading\n") == []
+
+
+def test_a_folded_title_and_a_byte_order_mark():
+    assert document_title(split_lines("---\ntitle: >\n  A long title\n  that continues\nurl: https://example.org/x\n---\nText\n")) == "A long title that continues"
+    assert document_title(split_lines("---\ntitle: |-\n  One line\n---\nText\n")) == "One line"
+    assert document_site(split_lines("---\ntitle: >\n  A long title\nurl: https://example.org/x\n---\nText\n")) == "example.org"

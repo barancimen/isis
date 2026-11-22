@@ -445,3 +445,50 @@ def test_a_save_keeps_the_files_permissions(client, corpus):
 def test_search_gives_at_least_one_result_and_at_most_200(client, limit, found):
     hits = client.get("/api/search", params={"q": "whale ship the", "limit": limit}).json()["hits"]
     assert len(hits) == found if found else 1 <= len(hits) <= 200
+
+
+def test_feedback_names_a_real_group(client):
+    client.post("/api/tasks", json={"name": "t"})
+    passage = {"path": "whales.md", "text": "Ambergris is found in whales."}
+    for lane in ("", "best", "Core"):
+        answer = client.post("/api/tasks/t/feedback", json={"action": "dismiss", "lane": lane, **passage})
+        assert answer.status_code == 400 and "core, hidden, bridges, gaps" in answer.json()["detail"]
+    assert client.get("/api/tasks/t/prefs").json()["feedback"] == {}  # nothing was counted under a made-up name
+    assert client.post("/api/tasks/t/feedback", json={"action": "dismiss", "lane": "gaps", **passage}).json()["feedback"] == {"gaps": [0, 1]}
+    settings = client.put("/api/tasks/t/settings", json={"steer": "", "ignored": ["sea", "", "  ", "sea"]}).json()
+    assert settings["ignored"] == ["sea"]
+
+
+def test_a_task_does_not_inherit_preferences_left_under_its_name(client, corpus):
+    """A task's file deleted or renamed outside the app leaves its preferences behind."""
+    client.post("/api/tasks", json={"name": "Whales"})
+    client.put("/api/tasks/Whales/steer", json={"text": "-ship"})
+    (corpus / "_tasks" / "Whales.md").unlink()
+    client.post("/api/tasks", json={"name": "Whales"})
+    assert client.get("/api/tasks/Whales/prefs").json()["steer"] == ""
+    client.put("/api/tasks/Whales/steer", json={"text": "-squid"})
+    (corpus / "_tasks" / "Whales.md").unlink()
+    client.post("/api/tasks", json={"name": "Birds"})
+    client.put("/api/tasks/Birds/steer", json={"text": "+finch"})
+    client.post("/api/tasks", json={"name": "Plain"})
+    assert client.post("/api/tasks/Plain/rename", json={"new_name": "Whales"}).status_code == 200
+    assert client.get("/api/tasks/Whales/prefs").json()["steer"] == ""  # not the -squid left there
+    assert client.post("/api/tasks/Birds/rename", json={"new_name": "Finches"}).status_code == 200
+    assert client.get("/api/tasks/Finches/prefs").json()["steer"] == "+finch"  # its own go with it
+    assert len(list((corpus / "_tasks" / ".trash").glob("Whales.*.old.json"))) == 2  # kept, like anything deleted
+
+
+def test_preferences_edited_by_hand_cannot_fail_later(client, corpus):
+    client.post("/api/tasks", json={"name": "t"})
+    meta = corpus / "_tasks" / ".meta"
+    meta.mkdir(exist_ok=True)
+    (meta / "t.json").write_text(json.dumps({
+        "dismissed": [{"path": "a.md", "text": "some text here", "lane": ["core"]}],
+        "liked": [{"path": "a.md", "text": "liked text", "lane": {"x": 1}}],
+        "feedback": {"core": [10 ** 400, 0]},
+    }))
+    prefs = client.get("/api/tasks/t/prefs").json()
+    assert prefs["dismissed"][0]["lane"] == "" and prefs["feedback"]["core"][0] == 1_000_000
+    assert client.post("/api/tasks/t/related", json={"text": "The sperm whale dives for squid."}).status_code == 200
+    assert client.post("/api/tasks/t/feedback", json={"action": "restore", "id": prefs["dismissed"][0]["id"]}).status_code == 200
+    assert client.post("/api/tasks/t/feedback", json={"action": "unlike", "id": prefs["liked"][0]["id"]}).status_code == 200

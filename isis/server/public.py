@@ -60,6 +60,10 @@ class Limits:
     request_bytes: int = 1024 * 1024  # a saved task
     small_request_bytes: int = 16 * 1024  # anything else that is stored, such as a dismissed passage
     related_bytes: int = 128 * 1024  # the text of a task to refresh Related for: it may all be embedded
+    # Its paragraphs: each is looked up among the passages and scored on its own, so thousands of
+    # one-word paragraphs cost far more than their size says. A task of that many kilobytes of
+    # prose has a few hundred.
+    related_paragraphs: int = 2000
     query_bytes: int = 8 * 1024  # a URL's query string, which holds a search
     # What one address may do: (burst, requests per second after the burst).
     rates: dict = field(default_factory=lambda: {

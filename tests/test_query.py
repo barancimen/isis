@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pytest
 
 from conftest import legacy_cache, paths, write_corpus
@@ -451,3 +452,137 @@ def test_related_word_rules_take_wildcards(umbrella_engine):
     plain = {h.path for lane in umbrella_engine.related(task).lanes for h in lane.items}
     steered = {h.path for lane in umbrella_engine.related(task, prefs=TaskPrefs(steer="-umbrel*")).lanes for h in lane.items}
     assert {"rain.md", "shade.md"} <= plain and not steered & {"rain.md", "shade.md"}
+
+
+def test_doc_rules_see_a_heading_that_has_no_text_of_its_own(tmp_path):
+    corpus = write_corpus(tmp_path / "corpus", {
+        "moby.md": "# Moby Dick\n\n## Chapter 1\n\nCall me Ishmael. Some years ago I went to sea.\n",
+        "finches.md": "# Finches\n\nIshmael never saw the finches.\n",
+    })
+    engine = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    engine.refresh()
+    assert paths(engine.search("ishmael doc:moby")) == ["moby.md"]
+    assert paths(engine.search('ishmael doc:"moby dick"')) == ["moby.md"]
+    assert paths(engine.search("ishmael doc:/^Chapter/")) == ["moby.md"]  # each heading is a line of its own
+    assert paths(engine.search("ishmael -doc:moby")) == ["finches.md"]
+    assert engine.search("ishmael")[0].heading in ("Chapter 1", "Finches")  # shown under its own heading
+
+
+def test_a_file_that_starts_with_a_byte_order_mark(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "bom.md").write_bytes("﻿---\ntitle: From Notepad\nurl: https://example.org/a\n---\n\n# Head\n\nThe whale sings.\n".encode())
+    engine = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    engine.refresh()
+    (hit,) = engine.search("whale site:example.org")
+    assert (hit.title, hit.heading, hit.start_line) == ("From Notepad", "Head", 7)
+    assert engine.search("notepad") == []  # the front matter isn't text
+    assert engine.read_lines("bom.md")[0] == "---"
+
+
+def test_a_word_with_punctuation_in_it_is_matched_as_written(tmp_path):
+    """-e-mail left out every passage with "mail": one term is all that is left of e-mail once the
+    single letter is dropped."""
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": (
+        "# Mail\n\nPlease send me an e-mail about version v2.0 soon.\n\nThe mail order arrived by post, with v2.1 inside.\n\n"
+        "Her well-being matters to us all.\n\nThe well is deep and old.\n")})
+    engine = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
+    engine.refresh()
+    texts = lambda q: sorted(h.text[:12] for h in engine.search(q))
+    assert texts("mail -e-mail") == ["The mail ord"]
+    assert texts("+e-mail") == ["Please send "]
+    assert texts("well -well-being") == ["The well is "]
+    assert texts("mail -v2.0") == ["The mail ord"] and texts("+v2.1") == ["The mail ord"]
+    assert texts("+mail,") == texts("+Mail") == ["Please send ", "The mail ord"]  # still the one word
+    steer = steering(split_query("-e-mail +don't -the doc:C++ +whale"))
+    assert steer.filters.required_terms == {"whale"} and not steer.filters.excluded_terms
+    assert [p.pattern for p in steer.filters.excluded] == [r"(?<!\w)e\-mail(?!\w)", r"(?<!\w)the(?!\w)"]
+
+
+def test_a_phrase_or_regex_is_marked_where_it_matched_in_the_passage(tmp_path):
+    corpus = write_corpus(tmp_path / "corpus", {"c.md": "The red\ndoor is open. A red door stays shut.\n\nwhale one\nwhale two is not whale three\n"})
+    engine = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
+    engine.refresh()
+    (hit,) = engine.search('"red door"')
+    assert hit.marks == [(0, 4, 7), (1, 0, 4), (1, 16, 24)] and hit.match == (0, 4, 3)  # over the line break too
+    (hit,) = engine.search("/^whale/")
+    assert hit.marks == [(3, 0, 5)]  # the start of the passage, not of each of its lines
+    (hit,) = engine.search("/three$/ two")
+    assert hit.marks == [(4, 6, 9), (4, 23, 28)]
+
+
+def test_what_is_still_being_typed_is_not_searched_or_corrected(engine):
+    assert [(c.kind, c.value) for c in split_query("whale /sp\\")] == [("word", "whale"), ("partial", "/sp\\")]
+    assert correct_query(engine.snapshot, "site: whale") is None  # "site:" isn't a misspelt word
+    assert correct_query(engine.snapshot, "site:exam whale") is None
+
+
+@pytest.mark.parametrize("pattern", ["(?a)(?u)x", "x{2,1}", "(?P<n>a)(?P<n>b)"])
+def test_patterns_python_refuses_are_reported(pattern):
+    with pytest.raises(QueryError, match="invalid pattern"):
+        steering(split_query(f"/{pattern}/"))
+
+
+def test_capitals_that_are_syntax_do_not_make_a_pattern_case_sensitive():
+    from isis.engine.search import compile_pattern
+
+    ignores_case = lambda pattern: bool(compile_pattern(pattern).flags & 2)
+    assert all(map(ignores_case, [r"(?P<year>\d+) whale", r"caf\xE9", r"\N{LATIN SMALL LETTER A}b", r"\Bwhale\W", "whale"]))
+    assert not any(map(ignores_case, ["Whale", r"(?P<year>\d+) Whale", r"[A-Z]\w+"]))
+
+
+def test_under_a_time_limit(engine, monkeypatch):
+    from isis.engine import index, search
+
+    with search.pattern_time_limit(3.0):
+        assert paths(engine.search('"white whale" /sq.id/ wha* -the')) # phrases, expressions, wildcards and words as written all work
+        with pytest.raises(QueryError, match="too many phrases"):
+            engine.search(" ".join(f'-"a{n}"' for n in range(21)))
+        with pytest.raises(QueryError, match="too many phrases"):
+            engine.search(" ".join(f"-a-{n}" for n in range(21)))  # words matched as written are looked for the same way
+        with pytest.raises(QueryError, match="too many parts"):
+            engine.search(" ".join(f"word{n}" for n in range(101)))
+        for pattern, refused in ((r"x_\{i\}", False), (r"[{s}]", False), (r"whale{e<=1}", True)):
+            if refused:
+                with pytest.raises(QueryError, match="fuzzy"):
+                    engine.search(f"/{pattern}/")
+            else:
+                engine.search(f"/{pattern}/")  # braces that are text
+    assert engine.search(" ".join(f'-"a{n}"' for n in range(21)) + " whale")  # no limit without one
+    with search.pattern_time_limit(0.0):  # no time at all: a phrase and a word as written stop like an expression
+        for query, shown in (('"sperm whale"', '"sperm whale"'), ("+well-known", "well-known"), ("wha*", "wha\\*"), ("/sq.id/", "/sq.id/")):
+            with pytest.raises(QueryError, match=f"took too long at {shown}"):
+                engine.search(query)
+
+    # A scan that runs out of time keeps the passages it has looked through.
+    monkeypatch.setattr(index, "PATTERN_BATCH", 1)
+    snapshot = engine.snapshot
+
+    class Slow:
+        pattern, flags, calls = "whale-slow", 0, 0
+
+        def finditer(self, text):
+            return iter(())
+
+        def check(self):
+            Slow.calls += 1
+            if Slow.calls == 3:
+                raise QueryError("out of time")
+
+    with pytest.raises(QueryError):
+        snapshot.pattern_counts(Slow())
+    _, done = snapshot._pattern_counts[("whale-slow", 0)]
+    assert done.sum() == 2 and len(done) > 2
+    snapshot.pattern_counts(Slow())
+    assert done.all() and Slow.calls == 3 + len(done) - 2  # only the rest was looked through
+
+
+def test_results_with_the_same_score_come_in_the_same_order_however_many_are_asked_for():
+    from isis.engine.search import best_first, top_rows
+
+    scores = np.array([0.0, 2.0, 1.0, 2.0, 1.0, 3.0, 1.0, 0.0, 1.0], np.float32)
+    whole = top_rows(scores, len(scores), positive=True).tolist()
+    assert whole == [5, 1, 3, 2, 4, 6, 8]
+    assert all(top_rows(scores, k, positive=True).tolist() == whole[:k] for k in range(len(scores) + 1))
+    assert [row for row, _ in best_first(scores, 2)] == whole
+    assert list(best_first(np.zeros(4, np.float32), 2)) == []

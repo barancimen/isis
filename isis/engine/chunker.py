@@ -7,17 +7,20 @@ import bisect
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import accumulate
 from urllib.parse import urlsplit
 
-HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
-FENCE = re.compile(r"^\s*(```|~~~)")
+# These patterns read text that anyone may send (a task, in Related), so none of them may take
+# more than a pass over the line: no optional spaces on both sides of a lazy group.
+HEADING = re.compile(r"^#{1,6}[ \t]+(\S.*)?$")  # heading_text() takes the closing #s off
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 HAS_WORD = re.compile(r"[^\W_]")
 YAML_LINE = re.compile(r"^(\s|#|-\s|[\w.-]+(?: [\w.-]+){0,3}:(\s|$))")  # a key, a list item, a comment, or indented
-FRONT_MATTER_TITLE = re.compile(r"^title:\s*(.*?)\s*$", re.IGNORECASE)
-FRONT_MATTER_URL = re.compile(r"^url:\s*(.*?)\s*$", re.IGNORECASE)
-FRONT_MATTER_SOURCE = re.compile(r"^source:\s*(.*?)\s*$", re.IGNORECASE)
+FRONT_MATTER_TITLE = re.compile(r"^title:(.*)$", re.IGNORECASE)
+FRONT_MATTER_URL = re.compile(r"^url:(.*)$", re.IGNORECASE)
+FRONT_MATTER_SOURCE = re.compile(r"^source:(.*)$", re.IGNORECASE)
+BLOCK_SCALAR = re.compile(r"^[>|][+-]?$")  # YAML for "the value is the indented lines below"
 TITLE_SEARCH_LINES = 200  # a top-level heading further down is a part of the document, not its title
 MAX_FRONT_MATTER = 200  # lines, as in the page (reflow.js)
 
@@ -30,15 +33,50 @@ OVERLAP_WORDS = 20  # each piece of a cut run starts with about this many words 
 @dataclass(frozen=True)
 class Passage:
     path: str
+    # The heading the passage is under. Above it, one to a line, come the headings before it that
+    # have no text of their own ("Moby Dick\nChapter 1"), so that every heading of a document is
+    # with one of its passages: doc: rules look at them.
     heading: str
     start_line: int  # 0-based, inclusive
     end_line: int  # 0-based, inclusive
     text: str
 
     @property
+    def section(self) -> str:
+        """The heading to show for the passage: the one it is under."""
+        return self.heading.rpartition("\n")[2]
+
+    @property
     def embed_text(self) -> str:
         """What the embedding model sees: the passage's text alone, without its heading."""
         return self.text
+
+
+def heading_text(line: str) -> str | None:
+    """The text of a heading line (`## Title`, or `## Title ##`), or None for any other line."""
+    m = HEADING.match(line)
+    if not m:
+        return None
+    text = (m.group(1) or "").rstrip().replace("\x00", "")
+    bare = text.rstrip("#")
+    if bare != text and (not bare or bare[-1] in " \t"):  # closing #s come after a space: "C#" keeps its own
+        text = bare.rstrip()
+    return text
+
+
+def fence_after(line: str, fence: tuple[str, int] | None) -> tuple[str, int] | None:
+    """The code fence that is open after this line, as its character and length, given the one
+    open before it (None: none). A fence opens with three or more backticks or tildes, with no
+    backtick after the backticks, so a line that starts with inline code doesn't open one. It
+    closes with at least as many of the same character and nothing after them, so a longer fence
+    can hold a shorter one."""
+    m = FENCE.match(line)
+    if not m:
+        return fence
+    marks, rest = m.groups()
+    if fence is None:
+        return None if marks[0] == "`" and "`" in rest else (marks[0], len(marks))
+    return None if marks[0] == fence[0] and len(marks) >= fence[1] and not rest.strip() else fence
 
 
 def split_lines(content: str) -> list[str]:
@@ -63,10 +101,17 @@ def _body_start(lines: list[str]) -> int:
 def _front_matter_value(lines: list[str], key: re.Pattern) -> str:
     """The first value of a key in the frontmatter, as text. Empty if there is none."""
     body = _body_start(lines)
-    for line in lines[1:body - 1] if body > 1 else []:
+    for n, line in enumerate(lines[1:body - 1] if body > 1 else [], 1):
         if m := key.match(line):
             value = m.group(1).strip()
-            if len(value) >= 2 and value[0] == '"' == value[-1]:
+            if BLOCK_SCALAR.match(value):  # `title: >` with the title on the indented lines that follow
+                below = []
+                for more in lines[n + 1:body - 1]:
+                    if more.strip() and not more[0].isspace():
+                        break
+                    below.append(more.strip())
+                value = " ".join(filter(None, below))
+            elif len(value) >= 2 and value[0] == '"' == value[-1]:
                 try:
                     value = json.loads(value)  # a double-quoted YAML string, with its escapes
                 except ValueError:
@@ -74,7 +119,7 @@ def _front_matter_value(lines: list[str], key: re.Pattern) -> str:
             elif len(value) >= 2 and value[0] == "'" == value[-1]:
                 value = value[1:-1].replace("''", "'")
             if value:
-                return str(value)
+                return str(value).replace("\x00", "")
     return ""
 
 
@@ -104,52 +149,61 @@ def document_title(lines: list[str]) -> str:
     if title := _front_matter_value(lines, FRONT_MATTER_TITLE):
         return title
     body = _body_start(lines)
-    in_fence = False
+    fence = None
     for line in lines[body:body + TITLE_SEARCH_LINES]:
-        if FENCE.match(line):
-            in_fence = not in_fence
-        elif not in_fence and line.startswith("# ") and (m := HEADING.match(line)):
-            return m.group(1)
+        if (now := fence_after(line, fence)) != fence:
+            fence = now
+        elif fence is None and line.startswith("# ") and (text := heading_text(line)) is not None:
+            return text
     return ""
 
 
 def heading_texts(content: str) -> list[str]:
     """The text of every heading line, in order, with or without anything under it."""
     lines = split_lines(content)
-    found, in_fence = [], False
+    found, fence = [], None
     for line in lines[_body_start(lines):]:
-        if FENCE.match(line):
-            in_fence = not in_fence
-        elif not in_fence and (m := HEADING.match(line)):
-            found.append(m.group(1))
+        if (now := fence_after(line, fence)) != fence:
+            fence = now
+        elif fence is None and (text := heading_text(line)) is not None:
+            found.append(text)
     return found
 
 
-def _blocks(lines: list[str]):
+def _blocks(lines: list[str], left_over: list[str] | None = None):
     """Yield (section, heading, start, end) for each run of non-blank lines.
 
     Headings and blank lines end a run, except inside code fences. YAML frontmatter is skipped.
-    `section` counts headings, so two sections with the same title stay apart.
+    `section` counts headings, so two sections with the same title stay apart. A heading with no
+    text of its own, such as a title followed straight away by a section's heading, travels with
+    the text that follows it, on the lines above that text's own heading (see Passage.heading).
+    Those after the last text are added to `left_over`.
     """
     start = _body_start(lines)
-    section, heading, run, in_fence = 0, "", None, False
+    section, heading, run, fence = 0, "", None, None
+    above: list[str] = []  # the headings since the last text that have none of their own
+    bare = False  # the heading has had no text yet
+    full = lambda: "\n".join(h for h in (*above, heading) if h)
     for n in range(start, len(lines)):
         line = lines[n]
-        if FENCE.match(line):
-            in_fence = not in_fence
-        elif not in_fence:
-            m = HEADING.match(line)
-            if m or not line.strip():
+        if (now := fence_after(line, fence)) != fence:
+            fence = now
+        elif fence is None:
+            text = heading_text(line)
+            if text is not None or not line.strip():
                 if run is not None:
-                    yield section, heading, run, n - 1
+                    yield section, full(), run, n - 1
                     run = None
-                if m:
-                    section, heading = section + 1, m.group(1)
+                if text is not None:
+                    above = [*above, heading] if bare else []
+                    section, heading, bare = section + 1, text, True
                 continue
         if run is None:
-            run = n
+            run, bare = n, False
     if run is not None:
-        yield section, heading, run, len(lines) - 1
+        yield section, full(), run, len(lines) - 1
+    elif bare and left_over is not None:
+        left_over.extend(h for h in (*above, heading) if h)
 
 
 def _absorb_short(groups: list[list], min_words: int) -> None:
@@ -240,7 +294,8 @@ def chunk_markdown(
     words = [len(line.split()) for line in lines]
 
     groups: list[list] = []  # [section, heading, start, end, words]
-    for section, heading, start, end in _blocks(lines):
+    left_over: list[str] = []  # headings after the last text
+    for section, heading, start, end in _blocks(lines, left_over):
         if not any(HAS_WORD.search(line) for line in lines[start : end + 1]):
             continue  # rules, table borders and the like
         size = sum(words[start : end + 1])
@@ -258,4 +313,7 @@ def chunk_markdown(
             text = "\n".join(lines[s : e + 1])
             if HAS_WORD.search(text):
                 passages.append(Passage(path, heading, s, e, text))
+    if left_over and passages:  # they belong to the document, so its last passage carries them
+        last = passages[-1]
+        passages[-1] = replace(last, heading="\n".join([*left_over, *filter(None, [last.heading])]))
     return passages

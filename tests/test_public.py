@@ -121,7 +121,7 @@ def test_security_headers_are_on_every_answer(make_client):
 def test_a_stored_passage_cannot_overshoot_the_space(make_client):
     client = make_client(Limits(rates=ROOMY, max_workspace_bytes=20_000))
     client.post("/api/tasks", json={"name": "t"}).raise_for_status()
-    passage = {"action": "dismiss", "lane": "best", "path": "whales.md"}
+    passage = {"action": "dismiss", "lane": "core", "path": "whales.md"}
     assert client.post("/api/tasks/t/feedback", json={**passage, "text": "x" * 15_000}).status_code == 200
     assert client.post("/api/tasks/t/feedback", json={**passage, "text": "y" * 15_000}).status_code == 413
     (folder,) = client.workspaces.folder.iterdir()
@@ -131,7 +131,7 @@ def test_a_stored_passage_cannot_overshoot_the_space(make_client):
 def test_only_a_saved_task_may_be_a_large_request(make_client):
     client = make_client(Limits(rates=ROOMY, small_request_bytes=500))
     client.post("/api/tasks", json={"name": "t"}).raise_for_status()
-    large = {"action": "dismiss", "lane": "best", "path": "whales.md", "text": "x" * 600}
+    large = {"action": "dismiss", "lane": "core", "path": "whales.md", "text": "x" * 600}
     assert client.post("/api/tasks/t/feedback", json=large).status_code == 413
     assert client.put("/api/tasks/t/steer", json={"text": "x" * 600}).status_code == 413
     assert client.put("/api/tasks/t/settings", json={"steer": "x" * 600}).status_code == 413
@@ -142,7 +142,7 @@ def test_only_a_saved_task_may_be_a_large_request(make_client):
 def test_likes_are_capped(make_client):
     client = make_client(Limits(rates=ROOMY, max_liked=2))
     client.post("/api/tasks", json={"name": "t"}).raise_for_status()
-    codes = [client.post("/api/tasks/t/feedback", json={"action": "like", "lane": "best", "path": "whales.md", "text": f"passage {i}"}).status_code
+    codes = [client.post("/api/tasks/t/feedback", json={"action": "like", "lane": "core", "path": "whales.md", "text": f"passage {i}"}).status_code
              for i in range(3)]
     assert codes == [200, 200, 403]
 
@@ -219,6 +219,15 @@ def test_a_long_related_request_costs_more(make_client):
     assert client.post("/api/tasks/t/related", json={"text": "w " * 3000}).status_code == 200  # costs 6 of 10
     assert client.post("/api/tasks/t/related", json={"text": "w " * 3000}).status_code == 429
     assert client.post("/api/tasks/t/related", json={"text": "w"}).status_code == 200  # a short one still fits
+
+
+def test_a_task_of_too_many_paragraphs_is_refused(make_client):
+    client = make_client(Limits(rates=ROOMY, related_paragraphs=50))
+    client.post("/api/tasks", json={"name": "t"}).raise_for_status()
+    assert client.post("/api/tasks/t/related", json={"text": "The whale dives.\n\n" * 40}).status_code == 200
+    refused = client.post("/api/tasks/t/related", json={"text": "ab\n \n" * 60})
+    assert refused.status_code == 413 and "too many paragraphs" in refused.json()["detail"]
+    assert client.post("/api/related", json={"text": "ab\n\n" * 60}).status_code == 413
 
 
 def test_request_sizes(make_client):

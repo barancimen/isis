@@ -72,10 +72,10 @@ def specs(cls) -> list[dict]:
 def _coerce(value, default, meta):
     kind = _kind(default, meta)
     if kind == "choice":
-        return value if value in meta["choices"] else None
+        return value if isinstance(value, str) and value in meta["choices"] else None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # OverflowError: a whole number too large to be a float
         return None
     if math.isnan(number):
         return None

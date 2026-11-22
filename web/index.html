@@ -65,7 +65,7 @@
             <li>Very common words such as "the" and "of" are ignored. So are single letters.</li>
             <li>A last word that isn't in your documents, such as one you're still typing, matches the longer words that start with it.</li>
             <li>A word that no passage contains is replaced with the closest word in your documents. The line above the results says so and has a link to search exactly what you typed.</li>
-            <li>Your words also find close misspellings in your documents, which rank below the right spelling.</li>
+            <li>Your words also find close misspellings in your documents, which rank below the right spelling. A word one or two letters away counts as a misspelling when it is far rarer than yours, so a rare plural can turn up this way.</li>
           </ul>
           <h4>Meaning</h4>
           <p>With <em>Meaning</em> on, Search also finds passages that are close to your words in meaning, even if they use different words. Each result then shows its rank by keywords and its rank by meaning. The order of results combines the two. Passages without meaning data are ranked by keywords alone. Turn <em>Meaning</em> off to match your words only. The menu in the status bar picks the meaning model.</p>
@@ -81,7 +81,7 @@
             <li><code>\b</code> marks the edge of a word and <code>\w</code> matches one letter, digit or underscore. So <code>/\bhostage\w*/</code> finds the words that start with "hostage".</li>
             <li>Spaces are allowed inside, as in <code>/red door/</code>. Write a slash inside it as <code>\/</code>.</li>
             <li>The closing slash must be followed by a space or the end of the query. Until you type it, the expression is ignored.</li>
-            <li>On the public site an expression that runs too long stops with an error.</li>
+            <li>On the public site a search that runs too long stops with an error. Searching again goes on from where it stopped. A query there can have up to 20 phrases, wildcards and expressions.</li>
           </ul>
           <p>A phrase, wildcard or regular expression counts like one more word in the ranking. Each match adds to the score. On its own it lists only the passages that match. The first search with one checks every passage, which can take a few seconds in a large collection. After that its matches are remembered.</p>
           <h4>Capital letters</h4>
@@ -96,6 +96,7 @@
           <h4>Keeping and removing</h4>
           <ul>
             <li><code>+word</code> keeps only the passages that contain the word and <code>-word</code> removes them. Both work with phrases, wildcards and regular expressions, as in <code>-"red door"</code> or <code>+/\d{4}/</code>. Words after <code>+</code> and <code>-</code> match exactly, without misspellings.</li>
+            <li>After <code>+</code>, <code>-</code> or <code>doc:</code> a word is matched as it is written. So <code>-e-mail</code> removes "e-mail" and leaves "mail", and <code>-the</code> removes every passage that has "the" in it.</li>
             <li><code>site:github.com</code> keeps only documents whose <code>url:</code> line at the top is on that website or one of its subdomains. Several of them mean any of those sites. <code>-site:github.com</code> removes the site.</li>
             <li><code>doc:word</code> keeps the passages of documents that contain the word in any passage or heading. <code>-doc:word</code> removes every passage of those documents. It takes phrases, wildcards and regular expressions too, so <code>homes -doc:house -doc:/decor\w*/</code> finds homes only in documents that never mention a house or decoration. <code>doc:word</code> means the same as <code>+doc:word</code>.</li>
           </ul>
@@ -104,8 +105,9 @@
           <ul>
             <li>The block between <code>---</code> lines at the top of a document isn't searched.</li>
             <li>A phrase split between two passages can be missed, although the overlap between passages catches most of them.</li>
+            <li>A paragraph written as one very long line is one passage, however long it is.</li>
             <li>Search shows the best 50 passages.</li>
-            <li>Click a result to open it in the reader with the passage highlighted. Click its title to open the document at the top. Its <em>+</em> button adds the passage to your task.</li>
+            <li>Click a result to open it in the reader with the passage highlighted. Click its title to open the document at the top. Its <em>+ Add</em> button adds the passage to your task.</li>
             <li>The ⋯ menu on a result hides that passage or its whole document from this task's searches. They're listed under <em>Hidden in Search</em>.</li>
             <li>The folder boxes leave folders or sources out of Search and Related alike.</li>
             <li><em>Adjustments</em> has sliders for the ranking. A preset saves the sliders, the folders, the hidden documents, the <em>Meaning</em> button and the search box under a name.</li>
@@ -176,8 +178,8 @@
             <h4>Teaching Related</h4>
             <ul>
               <li><em>More like this</em> in a suggestion's ⋯ menu pulls the suggestions toward that passage. <em>Less like this</em> hides it along with the passages close to it in meaning.</li>
-              <li>The same menu can hide one passage or every passage from its document for this task. Hiding teaches Related which groups you find useful.</li>
-              <li><em>Your changes</em> lists everything Related remembers about this task, each with a way to undo it.</li>
+              <li>The same menu can hide one passage or every passage from its document for this task. Hiding a passage teaches Related which groups you find useful.</li>
+              <li><em>Your changes</em> lists everything Related remembers about this task, each with a way to undo it. The counts of what you added and removed in each group are the exception: only <em>Remove all changes</em> clears them.</li>
               <li><em>Adjustments</em> has sliders for every threshold. A preset saves the sliders, the folders, the word rules, the keywords not in use and the hidden documents.</li>
               <li>The folder boxes are shared with Search.</li>
             </ul>

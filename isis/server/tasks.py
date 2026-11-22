@@ -150,6 +150,7 @@ class TaskStore:
                 raise TaskError(f"a task named {path.stem!r} already exists", 409)
             names = self._names()
             path.write_text("", encoding="utf-8")
+            self._drop_stale_prefs(path.stem)
             self._save_order([*names, path.stem])
             return self.read(path.stem)
 
@@ -186,6 +187,8 @@ class TaskStore:
             names = self._names()
             path.rename(target)
             self._save_order([target.stem if n == path.stem else n for n in names])
+            if target != path:
+                self._drop_stale_prefs(target.stem)
             meta = self._meta_path(path.stem)
             if meta.exists():
                 meta.rename(self._meta_path(target.stem))
@@ -210,6 +213,15 @@ class TaskStore:
             if meta.exists():
                 self._to_trash(meta, f"{path.stem}.{stamp}.json")
             self._save_order(self._names())
+
+    def _drop_stale_prefs(self, stem: str) -> None:
+        """A task that has just taken this name starts without preferences. A file of them can be
+        left under the name when its task's file was deleted or renamed outside the app, and the
+        new task would otherwise get its word rules and hidden passages."""
+        meta = self._meta_path(stem)
+        with suppress(OSError):
+            if meta.exists():
+                self._to_trash(meta, f"{stem}.{_stamp()}.old.json")
 
     def _to_trash(self, path: Path, name: str) -> Path:
         self.trash.mkdir(exist_ok=True)

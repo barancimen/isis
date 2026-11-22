@@ -465,3 +465,101 @@ def test_word_rules_match_passages_without_their_headings_and_documents_with_the
     assert found("+/^Whales/") == []  # only the heading starts with it
     assert found("doc:/^Whales/") == ["whales.md"]
     assert found("-doc:/^Whales/") == ["finches.md", "ships/pequod.md"]
+
+
+def topic_engine(tmp_path, files: dict[str, str], **options) -> Engine:
+    engine = Engine(write_corpus(tmp_path / "corpus", files), embedder=HashEmbedder(dim=64), index_dir=tmp_path / "index",
+                    target_words=0, **options)
+    engine.refresh()
+    return engine
+
+
+def test_word_rules_and_hidden_documents_take_no_places_in_the_rankings(tmp_path):
+    """Eighty strong matches from other sites once held every top keyword rank, so with
+    site:github.com nothing was left, though ten passages there matched."""
+    rng = random.Random(3)
+    sea = "whale harpoon ocean ship sail captain wave deck anchor mast".split()
+    other = "granite fossil stratum erosion volcano basalt sediment quartz lava cliff finch beak island seed".split()
+    files = {f"a-{f:02}.md": f"---\nurl: https://example.org/a{f}\n---\n# A {f}\n\nwhale harpoon ship captain sail {' '.join(rng.sample(sea, 4))} a{f}.\n"
+             for f in range(80)}
+    files |= {f"g-{f:02}.md": f"---\nurl: https://github.com/x/g{f}\n---\n# G {f}\n\nwhale harpoon ship captain {' '.join(rng.sample(other, 5))} g{f}.\n"
+              for f in range(10)}
+    files |= {f"rock-{f:03}.md": f"# Rock {f}\n\n{' '.join(rng.sample(other, 8))} filler{f}.\n" for f in range(100)}
+    engine = Engine(write_corpus(tmp_path / "corpus", files), index_dir=tmp_path / "index", target_words=0)  # keywords only
+    engine.refresh()
+    task = "Notes on the whale, the harpoon, the ship, its captain and the sail.\n"
+    shown = lambda prefs: sorted({h.path[0] for lane in engine.related(task, prefs=prefs).lanes for h in lane.items})
+    assert shown(TaskPrefs()) == ["a"]
+    assert shown(TaskPrefs(steer="site:github.com")) == ["g"]
+    assert shown(TaskPrefs(steer="-site:example.org")) == ["g"]
+    assert shown(TaskPrefs(steer="doc:g3")) == ["g"]
+    assert shown(TaskPrefs(steer="-harpoon")) == []
+    assert shown(TaskPrefs(excluded_docs=[f"a-{f:02}.md" for f in range(80)])) == ["g"]
+
+
+def test_one_long_document_does_not_empty_a_group(tmp_path):
+    rng = random.Random(3)
+    sea = "whale harpoon ocean ship sail captain wave deck anchor mast".split()
+    other = "granite fossil stratum erosion volcano basalt sediment quartz lava cliff finch beak island seed".split()
+    files = {"book.md": "# Book\n\n" + "\n\n".join(f"whale harpoon ship captain sail {' '.join(rng.sample(sea, 3))} note{i}." for i in range(150)) + "\n"}
+    files |= {f"note-{f:02}.md": f"# Note {f}\n\nwhale harpoon ship {' '.join(rng.sample(other, 4))} extra{f}.\n" for f in range(30)}
+    files |= {f"rock-{f:03}.md": f"# Rock {f}\n\n{' '.join(rng.sample(other, 8))} filler{f}.\n" for f in range(100)}
+    engine = topic_engine(tmp_path, files)
+    result = engine.related("Notes on the whale, the harpoon, the ship, its captain and the sail.\n",
+                            config=RelatedConfig(z_strong=1.0, z_weak=-1.0, lexical_top=300))
+    core = result.lanes[0].items
+    assert sum(h.path == "book.md" for h in core) == 2
+    assert any(h.path.startswith("note-") for h in core)  # the book's passages alone were the pool, and these never got in
+
+
+def test_a_task_of_thousands_of_paragraphs_stays_in_bounds(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "MAX_CLUSTERED", 40)
+    rng = np.random.default_rng(0)
+    vecs = rng.standard_normal((300, 16)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    clusters = R._clusters(vecs, 0.15)
+    assert len(clusters) == 300 and len(set(clusters)) <= 2 * math.ceil(math.sqrt(40))
+    some = np.linspace(0, 299, 40).astype(int)
+    assert list(clusters[some]) == list(R._clusters(vecs[some], 0.15))  # the ones that were compared keep their clusters
+
+    engine = topic_engine(tmp_path, {f"d{f}.md": f"# D {f}\n\nThe whale and the ship number {f}.\n\nA finch on island {f}.\n" for f in range(20)})
+    task = "\n\n".join(f"The whale number {i} and the ship." if i % 2 else f"A finch number {i} on the island." for i in range(90))
+    config = RelatedConfig(query="paragraphs", z_strong=0.5, z_weak=-1.0)
+    monkeypatch.setattr(R, "THEME_BATCH", 1000)
+    whole = engine.related(task, config=config)
+    monkeypatch.setattr(R, "THEME_BATCH", 7)  # the paragraphs a batch at a time give the same answer
+    engine.snapshot.theme_scores.clear()
+    batched = engine.related(task, config=config)
+    assert [[(h.path, h.start_line, h.why["matches_task_line"]) for h in lane.items] for lane in batched.lanes] == \
+        [[(h.path, h.start_line, h.why["matches_task_line"]) for h in lane.items] for lane in whole.lanes]
+    assert any(lane.items for lane in whole.lanes)
+
+
+def test_mostly_identical_passages_do_not_send_meaning_scores_through_the_roof(tmp_path):
+    files = {f"d{i}.md": "# D\n\nSubscribe to the newsletter for more stories.\n" for i in range(8)}
+    files |= {"w.md": "# W\n\nThe whale and the harpoon on the ship.\n", "x.md": "# X\n\nA finch with a beak on the island.\n",
+              "y.md": "# Y\n\nGranite and basalt in the cliff.\n"}
+    engine = topic_engine(tmp_path, files)
+    result = engine.related("Notes about the whale and its harpoon.\n\nAlso the captain of the ship and the sail.\n",
+                            config=RelatedConfig(query="paragraphs", z_strong=0.0, z_weak=-1.0))
+    scores = [h.why["semantic_z"] for lane in result.lanes for h in lane.items if h.why["semantic_z"] is not None]
+    assert scores and max(scores) < 100  # they were in the hundreds of thousands
+
+
+def test_a_passage_without_meaning_data_names_no_closest_paragraph(tmp_path):
+    a = write_corpus(tmp_path / "notes", {"sea.md": "# Sea\n\nThe whale and the harpoon and the ship.\n"})
+    b = write_corpus(tmp_path / "big", {"sea2.md": "# Sea\n\nA whale, a harpoon and a ship again.\n", ".no-embed": ""})
+    engine = Engine([a, b], embedder=HashEmbedder(dim=64), index_dir=tmp_path / "index", target_words=0)
+    engine.refresh()
+    result = engine.related("Rocks first.\n\nThe whale, the harpoon and the ship.\n", config=RelatedConfig(z_strong=0.0, z_weak=-1.0))
+    lines = {h.path: h.why["matches_task_line"] for lane in result.lanes for h in lane.items}
+    assert lines["big/sea2.md"] is None and lines["notes/sea.md"] == 2
+
+
+def test_settings_of_the_wrong_kind_are_ignored_not_fatal():
+    from isis.engine.params import configure
+
+    for overrides in ({"candidates": 10**400}, {"query": ["document"]}, {"query": {"a": 1}}, {"mmr_lambda.core": 10**400},
+                      {"total_slots": float("inf")}, {"total_slots": "nan"}, {"z_strong": None}):
+        config = configure(RelatedConfig, overrides)
+        assert config.query == "document" and 4 <= config.total_slots <= 80

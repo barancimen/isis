@@ -2,7 +2,18 @@
 // flowing paragraphs: a line break inside a paragraph is displayed as a space, the way markdown
 // renders it. The text itself is unchanged. Markdown structure keeps its line breaks.
 
-const FENCE = /^\s*(```|~~~)/;
+const FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
+
+// The code fence open after this line (its character and length, or null), given the one open
+// before it, as chunker.py's fence_after has it: a line that starts with inline code opens none,
+// and a fence closes with at least as many of its own character and nothing after them.
+export function fenceAfter(line, fence) {
+  const m = FENCE.exec(line);
+  if (!m) return fence;
+  const [, marks, rest] = m;
+  if (!fence) return marks[0] === "`" && rest.includes("`") ? null : { mark: marks[0], length: marks.length };
+  return marks[0] === fence.mark && marks.length >= fence.length && !rest.trim() ? null : fence;
+}
 const STARTS_BLOCK = /^(#{1,6}(\s|$)|[-*+•◦▪‣]\s|\d+[.)]\s|>|\||<|(?:[-*_]\s*){3,}$|=+\s*$)/; // heading, list item, quote, table, HTML, rule, underline
 const ENDS_LINE = /^(#{1,6}(\s|$)|\||(?:[-*_]\s*){3,}$|=+\s*$)|( {2}|\\)$/; // heading, table row, rule, underline, hard break
 
@@ -37,10 +48,11 @@ export function envelopeAt(lines, i) {
 // which lines belong to a list, where an indent is only the level of the item.
 export function linesNotProse(lines, inList = new Set()) {
   const found = [];
-  let fence = false;
+  let fence = null;
   lines.forEach((line, i) => {
-    const isFence = FENCE.test(line);
-    if (isFence) fence = !fence;
+    const now = fenceAfter(line, fence);
+    const isFence = now !== fence;
+    fence = now;
     if (isFence || fence || /^(#{1,6}(\s|$)|\|)/.test(line) || (/^( {4}|\t)/.test(line) && !inList.has(i))) found.push(i);
   });
   return found;
@@ -49,9 +61,9 @@ export function linesNotProse(lines, inList = new Set()) {
 export function structure(lines) {
   const envelopes = [];
   const rules = [];
-  let fence = false;
+  let fence = null;
   for (let i = 0; i < lines.length; i++) {
-    if (FENCE.test(lines[i])) fence = !fence;
+    fence = fenceAfter(lines[i], fence);
     if (fence) continue;
     const envelope = envelopeAt(lines, i);
     if (envelope) {
@@ -82,11 +94,12 @@ export function listStructure(lines) {
   const edges = new Set(structure(lines).envelopes.flatMap(({ open, close }) => [open, close]));
   let stack = [];
   let list = -1;
-  let fence = false;
+  let fence = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (FENCE.test(line)) {
-      fence = !fence;
+    const now = fenceAfter(line, fence);
+    if (now !== fence) {
+      fence = now;
       stack = [];
       continue;
     }
@@ -163,17 +176,18 @@ export function softBreaks(lines) {
   for (const { open, close, meta } of structure(lines).envelopes) {
     if (meta) for (let i = open; i <= close; i++) keep.add(i);
   }
-  let fence = false;
+  let fence = null;
   for (let i = 0; i < lines.length - 1; i++) {
     const line = lines[i];
-    if (FENCE.test(line)) {
-      fence = !fence;
+    const now = fenceAfter(line, fence);
+    if (now !== fence) {
+      fence = now;
       continue;
     }
     if (keep.has(i)) continue;
     const next = lines[i + 1];
     if (fence || !line.trim() || !next.trim() || ENDS_LINE.test(line)) continue;
-    if ((/^\s/.test(next) && !carriesOn.has(i + 1)) || STARTS_BLOCK.test(next) || FENCE.test(next)) continue; // indented: verse, code
+    if ((/^\s/.test(next) && !carriesOn.has(i + 1)) || STARTS_BLOCK.test(next) || fenceAfter(next, null)) continue; // indented: verse, code
     out.push(i);
   }
   return out;

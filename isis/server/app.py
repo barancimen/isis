@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 import zlib
@@ -26,7 +27,7 @@ from ..engine import native
 from ..engine.index import MARKDOWN, NO_EMBED, Engine, configure_logging, corpus_exclude
 from ..engine.params import configure, specs
 from ..engine.related import PRESETS as RELATED_PRESETS
-from ..engine.related import RelatedConfig, TaskPrefs
+from ..engine.related import LANES, RelatedConfig, TaskPrefs
 from ..engine.search import PRESETS as SEARCH_PRESETS
 from ..engine.search import QueryError, SearchConfig, correct_query, pattern_time_limit
 from .llm import QuerySynth, Refused, load_key
@@ -45,6 +46,7 @@ PAGE_VERSION_SLOT = '<meta name="page-version" content="">'
 # and for `isis related`, so the same text and settings give the same results in the page and on
 # the command line. Feedback still moves it, as the draw adds the number of feedback events.
 RELATED_SEED = 0
+PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
 
 
 class PageVersion:
@@ -337,7 +339,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         if public and path not in engine.snapshot.file_rows:
             raise HTTPException(404, f"there is no file named {path}")  # only what search can show
         try:
-            content = engine.resolve(path).read_text(encoding="utf-8", errors="replace")
+            content = engine.resolve(path).read_text(encoding="utf-8-sig", errors="replace")  # as the index reads it
         except ValueError as e:
             raise HTTPException(400, str(e))
         except OSError:
@@ -403,6 +405,9 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         return {"ok": True}
 
     def run_related(body: RelatedRequest, prefs: TaskPrefs) -> dict:
+        if public and len(PARAGRAPH_BREAK.findall(body.text)) >= tasks.limits.related_paragraphs:
+            raise HTTPException(413, "this task has too many paragraphs for Related here "
+                                     f"(the limit is {tasks.limits.related_paragraphs:,})")
         try:
             with time_limit():
                 result = engine.related(
@@ -460,7 +465,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
         try:
             with time_limit(), tasks.edit_prefs(name) as prefs:
                 prefs.set_steer(body.steer)
-                prefs.ignored = list(dict.fromkeys(body.ignored))
+                prefs.ignored = [term for term in dict.fromkeys(body.ignored) if term.strip()]
                 prefs.excluded_docs = list(dict.fromkeys(body.excluded_docs))
         except QueryError as e:
             raise HTTPException(400, str(e))
@@ -475,8 +480,8 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 
     @app.post("/api/tasks/{name}/feedback")
     def feedback(name: str, body: FeedbackRequest):
-        if body.action not in ("restore", "unlike", "exclude_doc", "include_doc") and not body.lane:
-            raise HTTPException(400, "feedback needs the lane the passage was shown in")
+        if body.action not in ("restore", "unlike", "exclude_doc", "include_doc") and body.lane not in LANES:
+            raise HTTPException(400, f"feedback needs the group the passage was shown in: {', '.join(LANES)}")
         with tasks.edit_prefs(name) as prefs:
             if body.action == "exclude_doc":
                 prefs.exclude_doc(body.path)
@@ -514,9 +519,10 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
 
 
 def app_from_env() -> FastAPI:
-    """The app `isis serve` runs, configured through ISIS_CORPUS (folders separated like PATH),
-    ISIS_OSIRIS (those of the folders that are osiris archives, each as folder and manifest
-    separated by "|", the manifest empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
+    """The app `isis serve` runs, configured through ISIS_CORPUS (the folders, as a JSON list, or
+    separated like PATH), ISIS_OSIRIS (those of the folders that are osiris archives, as a JSON
+    object of folder to manifest, or each as folder and manifest separated by "|"; the manifest
+    is empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
     this machine only), ISIS_PUBLIC ("1": serve the public, see public.py), ISIS_BASE_PATH (with
     ISIS_PUBLIC: where the site lives on its domain, such as /isis) and ISIS_BUILD_NATIVE ("1": build
     the Rust extension when it is missing or outdated, see native.start_build), ISIS_LLM_KEY_FILE
@@ -529,10 +535,13 @@ def app_from_env() -> FastAPI:
         from .terminal import start
 
         start(url)
-    folders = [Path(d) for d in os.environ["ISIS_CORPUS"].split(os.pathsep)]
+    corpus = os.environ["ISIS_CORPUS"]
+    folders = [Path(d) for d in (json.loads(corpus) if corpus.startswith("[") else corpus.split(os.pathsep))]
     tasks_dir = Path(os.environ.get("ISIS_TASKS") or folders[0] / "_tasks")
     models = [m for m in os.environ.get("ISIS_MODELS", "").split(",") if m]
-    osiris = dict(entry.partition("|")[::2] for entry in os.environ.get("ISIS_OSIRIS", "").split(os.pathsep) if entry)
+    archives = os.environ.get("ISIS_OSIRIS", "")
+    osiris = json.loads(archives) if archives.startswith("{") else dict(
+        entry.partition("|")[::2] for entry in archives.split(os.pathsep) if entry)
     engine = Engine(folders, embedder=[Embedder(m) for m in models], exclude=corpus_exclude(folders, tasks_dir),
                     osiris={folder: manifest or None for folder, manifest in osiris.items()})
     hosts = [h for h in os.environ.get("ISIS_HOSTS", ",".join(LOOPBACK)).split(",") if h]

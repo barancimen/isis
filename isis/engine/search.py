@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from itertools import accumulate, chain
 from typing import Any
 
 import numpy as np
@@ -39,8 +40,9 @@ from .text import term_spans, tokenize, tokenize_with_surface
 # One clause: an optional operator, an optional doc: (the whole document must contain it, or must
 # not), then a "phrase" (its closing quote may still be missing), a /regex/ that ends at a space or
 # the end, a /regex still being typed, or a plain word.
-TOKEN = re.compile(r"""([-+]?)((?i:doc:))?(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*)$|(\S+))""")
+TOKEN = re.compile(r"""([-+]?)((?i:doc:))?(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*\\?)$|(\S+))""")
 DOC = "doc:"
+EDGES = re.compile(r"^[\W_]+|[\W_]+$")  # punctuation around a word, such as the comma after it
 WILDCARD = "*"  # in a word or phrase: any letters or digits, or none
 PREFER, REQUIRE, NEVER = "", "+", "-"
 SITE = re.compile(r"site:(.*)", re.IGNORECASE)
@@ -158,8 +160,15 @@ class QueryError(ValueError):
 # /(x{65535}){65535}/ would use all the memory before any matching starts.
 MAX_PATTERN_LENGTH = 300
 MAX_PATTERN_REPEATS = 2000
+# Each phrase, wildcard, expression and word matched as written is looked for in every passage, so
+# under a time limit a query may have this many of them, and this many clauses in all.
+MAX_TIMED_PATTERNS = 20
+MAX_TIMED_CLAUSES = 100
 COUNTED_REPEAT = re.compile(r"\{(\d*)(?:,(\d*))?\}")
 FUZZY = re.compile(r"\{[^{}]*\b\d*[deis](?:<=?\d+|\b)[^{}]*\}")  # `regex` reads /a{e<=1}/ as fuzzy; `re` as plain text
+NOT_SYNTAX = re.compile(r"\\.|\[(?:\\.|[^\]\\])*\]")  # an escaped character or a character class: braces in them are text
+# Capital letters that are syntax and say nothing about case: \N{NAME}, \xE9, a group's (?P<Name>.
+CASELESS_SYNTAX = re.compile(r"\\N\{[^}]*\}|\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\U[0-9A-Fa-f]{8}|\\.|\(\?P[<=][^>)]*[>)]|\(\?P")
 _pattern_deadline: ContextVar[float | None] = ContextVar("isis_pattern_deadline", default=None)
 
 
@@ -174,11 +183,19 @@ def pattern_time_limit(seconds: float):
         _pattern_deadline.reset(token)
 
 
+def out_of_time(shown: str) -> QueryError:
+    """What a search says when its time is up. The passages looked through so far are remembered
+    (Snapshot.pattern_counts), so the same search goes further the next time."""
+    return QueryError(f"this search took too long at {shown}. Search again to go on from where it stopped, or make it simpler")
+
+
 @dataclass(frozen=True)
 class TimedPattern:
-    """A compiled `regex` pattern with the parts of re.Pattern that searching uses."""
+    """A compiled `regex` pattern with the parts of re.Pattern that searching uses. `shown` is
+    what the person typed for it, which for a wildcard isn't an expression at all."""
 
     compiled: Any
+    shown: str = ""
 
     @property
     def pattern(self) -> str:
@@ -196,15 +213,46 @@ class TimedPattern:
             # concurrent: other requests keep running while this one matches.
             yield from self.compiled.finditer(text, timeout=left, concurrent=True)
         except TimeoutError:
-            raise QueryError(f"this pattern took too long /{self.pattern}/") from None
+            raise out_of_time(self.shown or f"/{self.pattern}/") from None
+
+    def check(self) -> None:
+        if time.monotonic() >= (_pattern_deadline.get() or 0):
+            raise out_of_time(self.shown or f"/{self.pattern}/")
 
 
-def timed_pattern(pattern: str, flags: int) -> TimedPattern:
+@dataclass(frozen=True)
+class TimedLiteral:
+    """A phrase or a word matched as written, under the time limit: a plain `re` pattern, which
+    is quick in any one passage, checked against the clock before each."""
+
+    compiled: re.Pattern
+    shown: str = ""
+
+    @property
+    def pattern(self) -> str:
+        return self.compiled.pattern
+
+    @property
+    def flags(self) -> int:
+        return self.compiled.flags
+
+    def finditer(self, text: str) -> Iterator:
+        self.check()
+        return self.compiled.finditer(text)
+
+    def check(self) -> None:
+        if time.monotonic() >= (_pattern_deadline.get() or 0):
+            raise out_of_time(self.shown or self.pattern)
+
+
+def literal(compiled: re.Pattern, shown: str) -> re.Pattern | TimedLiteral:
+    return compiled if _pattern_deadline.get() is None else TimedLiteral(compiled, shown)
+
+
+def timed_pattern(pattern: str, flags: int, shown: str = "") -> TimedPattern:
     import regex
 
-    if len(pattern) > MAX_PATTERN_LENGTH:
-        raise QueryError(f"this pattern is too long (the limit is {MAX_PATTERN_LENGTH} characters)")
-    if FUZZY.search(pattern):
+    if FUZZY.search(NOT_SYNTAX.sub("", pattern)):
         raise QueryError(f"invalid pattern /{pattern}/ because fuzzy matching isn't available")
     repeats = 1
     for low, high in COUNTED_REPEAT.findall(pattern):
@@ -212,28 +260,32 @@ def timed_pattern(pattern: str, flags: int) -> TimedPattern:
     if repeats > MAX_PATTERN_REPEATS:
         raise QueryError(f"this pattern has too many counted repeats (the limit is {MAX_PATTERN_REPEATS})")
     try:
-        return TimedPattern(regex.compile(pattern, regex.IGNORECASE if flags & re.IGNORECASE else 0))
+        return TimedPattern(regex.compile(pattern, regex.IGNORECASE if flags & re.IGNORECASE else 0), shown)
     except regex.error as e:
         raise QueryError(f"invalid pattern /{pattern}/ ({e})") from None
 
 
-def compile_pattern(pattern: str) -> re.Pattern | TimedPattern:
-    """A user's regex. Smart case: case-insensitive unless it contains a capital letter."""
-    smart = 0 if any(c.isupper() for c in re.sub(r"\\.", "", pattern)) else re.IGNORECASE
+def compile_pattern(pattern: str, shown: str = "") -> re.Pattern | TimedPattern:
+    """A user's regex. Smart case: case-insensitive unless it contains a capital letter. `shown`:
+    what the person typed, when that isn't the expression itself."""
+    timed = _pattern_deadline.get() is not None
+    if timed and len(pattern) > MAX_PATTERN_LENGTH:  # before it is compiled, which a long one makes slow
+        raise QueryError(f"this pattern is too long (the limit is {MAX_PATTERN_LENGTH} characters)")
+    smart = 0 if any(c.isupper() for c in CASELESS_SYNTAX.sub("", pattern)) else re.IGNORECASE
     try:
         compiled = re.compile(pattern, smart)  # also when timed: the same syntax is valid everywhere
-    except (re.error, OverflowError, RecursionError) as e:
+    except (re.error, OverflowError, RecursionError, ValueError) as e:  # ValueError: flags that exclude each other
         raise QueryError(f"invalid pattern /{pattern}/ ({e})") from None
-    return compiled if _pattern_deadline.get() is None else timed_pattern(pattern, smart)
+    return timed_pattern(pattern, smart, shown) if timed else compiled
 
 
-def phrase_pattern(phrase: str) -> re.Pattern | TimedPattern:
+def phrase_pattern(phrase: str) -> re.Pattern | TimedPattern | TimedLiteral:
     words = phrase.split()
     if any(WILDCARD in w for w in words):  # "red umbre*la"
-        return compile_pattern("(?i)" + r"\s+".join(map(_wildcard_regex, words)))
+        return compile_pattern("(?i)" + r"\s+".join(map(_wildcard_regex, words)), f'"{phrase}"')
     pattern = re.compile(r"\s+".join(map(re.escape, words)), re.IGNORECASE)
     native.remember_phrase(pattern, words)  # the Rust extension, if built, counts it in every passage
-    return pattern
+    return literal(pattern, f'"{phrase}"')
 
 
 def _wildcard_regex(word: str) -> str:
@@ -243,7 +295,7 @@ def _wildcard_regex(word: str) -> str:
 
 def wildcard_pattern(word: str) -> re.Pattern | TimedPattern:
     """A word with wildcards (hostage*, *mbrella, umbre*la): whole words that fit it, in any case."""
-    return compile_pattern(rf"(?i)(?<!\w){_wildcard_regex(word)}(?!\w)")
+    return compile_pattern(rf"(?i)(?<!\w){_wildcard_regex(word)}(?!\w)", word)
 
 
 @dataclass(frozen=True)
@@ -260,17 +312,24 @@ class Clause:
     def terms(self) -> list[str]:
         return tokenize(self.value) if self.kind == "word" else []
 
+    def term(self) -> str | None:
+        """The one search term this word is as written, or None: a stopword has none, a compound
+        such as well-known has two, and e-mail or v2.0 is more than the one term left of it
+        (mail, v2), so each of those is matched as written instead."""
+        own = self.terms()
+        return own[0] if len(own) == 1 and own[0] == EDGES.sub("", self.value.lower()) else None
+
     def pattern(self) -> re.Pattern | None:
-        """The clause as text to match: a phrase, a regex, or a word that is not one search term
-        (a stopword, or a hyphenated compound), matched as written."""
+        """The clause as text to match: a phrase, a regex, or a word that is not one search term,
+        matched as written."""
         if self.kind == "regex":
             return compile_pattern(self.value)
         if self.kind == "phrase":
             return phrase_pattern(self.value) if self.value.split() else None
         if self.kind == "wildcard":
             return wildcard_pattern(self.value)
-        if self.kind == "word" and len(self.terms()) != 1:
-            return re.compile(rf"(?<!\w){re.escape(self.value)}(?!\w)", re.IGNORECASE)
+        if self.kind == "word" and self.term() is None:
+            return literal(re.compile(rf"(?<!\w){re.escape(self.value)}(?!\w)", re.IGNORECASE), self.value)
         return None
 
 
@@ -422,25 +481,31 @@ class Steering:
 def steering(clauses: list[Clause]) -> Steering:
     """Compile clauses (raises QueryError for an invalid regex)."""
     out, text = Steering(), []
+    if _pattern_deadline.get() is not None:
+        if len(clauses) > MAX_TIMED_CLAUSES:
+            raise QueryError(f"this query has too many parts (the limit is {MAX_TIMED_CLAUSES})")
+        looked_for = sum(1 for c in clauses if c.kind in ("phrase", "regex", "wildcard")
+                         or (c.kind == "word" and c.term() is None and (c.doc or c.op != PREFER)))
+        if looked_for > MAX_TIMED_PATTERNS:
+            raise QueryError("this query has too many phrases, wildcards, expressions and words that are matched as written "
+                             f"(the limit is {MAX_TIMED_PATTERNS})")
     for c in clauses:
         if c.kind == "partial":
             continue
         if c.doc:  # doc:x and +doc:x both require it, -doc:x excludes it; neither ranks
-            own = c.terms()
             f = out.filters
             terms, patterns = (f.doc_excluded_terms, f.doc_excluded) if c.op == NEVER else (f.doc_required_terms, f.doc_required)
-            if c.kind == "word" and len(own) == 1:
-                terms.add(own[0])
+            if (term := c.term()) is not None:
+                terms.add(term)
             elif (p := c.pattern()) is not None:
                 patterns.append(p)
             continue
         if c.kind == "site":
             (out.filters.excluded_sites if c.op == NEVER else out.filters.sites).add(web_host(c.value))
             continue
-        own = c.terms()
         if c.op == NEVER:
-            if c.kind == "word" and len(own) == 1:
-                out.filters.excluded_terms.add(own[0])
+            if (term := c.term()) is not None:
+                out.filters.excluded_terms.add(term)
             elif (p := c.pattern()) is not None:
                 out.filters.excluded.append(p)
             continue
@@ -450,8 +515,8 @@ def steering(clauses: list[Clause]) -> Steering:
                 out.surfaces.setdefault(term, surface)
             text.append(c.value)
             if c.op == REQUIRE:
-                if len(own) == 1:
-                    out.filters.required_terms.add(own[0])
+                if (term := c.term()) is not None:
+                    out.filters.required_terms.add(term)
                 elif (p := c.pattern()) is not None:
                     out.filters.required.append(p)
             continue
@@ -574,7 +639,7 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
     parts, at = [], 0
     for m in TOKEN.finditer(query):
         written = m.group(6)
-        plain = written and m.group(1) == PREFER and not m.group(2) and WILDCARD not in written
+        plain = written and m.group(1) == PREFER and not m.group(2) and WILDCARD not in written and not SITE.match(written)
         pairs = tokenize_with_surface(written) if plain else []
         if len(pairs) != 1 or snapshot.term_id(pairs[0][0]) is not None:
             continue
@@ -627,11 +692,26 @@ def similarities(vectors: np.ndarray, query: np.ndarray, scope: np.ndarray | Non
 
 
 def top_rows(scores: np.ndarray, k: int, positive: bool = False) -> np.ndarray:
-    """Row indices of the k highest scores, best first."""
+    """Row indices of the k highest scores, best first, and among equal scores the earlier row
+    first: the same rows in the same order as the start of a longer list."""
     rows = np.flatnonzero(scores > 0) if positive else np.flatnonzero(np.isfinite(scores))
+    if k <= 0:
+        return rows[:0]
     if len(rows) > k:
-        rows = rows[np.argpartition(-scores[rows], k)[:k]]
-    return rows[np.argsort(-scores[rows], kind="stable")]
+        lowest = np.partition(scores[rows], len(rows) - k)[len(rows) - k]  # the k-th highest score
+        rows = rows[scores[rows] >= lowest]  # with every row that ties with it, still in row order
+    return rows[np.argsort(-scores[rows], kind="stable")][:k]
+
+
+def best_first(scores: np.ndarray, first: int) -> Iterator[tuple[int, float]]:
+    """(row, score) of every positive score, best first, sorted a batch at a time: a search shows
+    a few dozen passages, and a common word is in hundreds of thousands."""
+    total, given, k = int(np.count_nonzero(scores > 0)), 0, max(first, 1)
+    while given < total:
+        rows = top_rows(scores, k, positive=True)
+        for row in rows[given:].tolist():
+            yield row, float(scores[row])
+        given, k = len(rows), k * 8
 
 
 def remembering_lines(read_lines: Callable[[str], list[str]]) -> Callable[[str], list[str] | None]:
@@ -716,21 +796,22 @@ def search(
                 "embedded": bool(snapshot.has_vector[row]),
             }
     else:
-        rows = top_rows(lexical, len(lexical), positive=True)
-        ranked = [(int(r), float(lexical[r])) for r in rows]
+        ranked = best_first(lexical, max(4 * limit, 200))
 
         def why(row: int) -> dict:
             return {"bm25": float(lexical[row])}
 
     # Passages that match every + clause but none of the others. A site or doc: clause only narrows
     # what other clauses find, and on its own lists what the site has, or the documents that match.
+    # They follow the ranked ones, and are only listed as far as the results go.
+    seen: set[int] = set()
     if q.filters.requires or ((q.filters.sites or q.filters.doc_requires) and not q.term_ids and not q.patterns and not q.unknown):
-        seen = {r for r, _ in ranked}
-        ranked += [(int(r), 0.0) for r in np.flatnonzero(allowed) if r not in seen]
+        ranked = chain(ranked, ((row, 0.0) for row in np.flatnonzero(allowed).tolist() if row not in seen))
 
     lines_of = remembering_lines(read_lines)
     hits = []
     for row, score in ranked:
+        seen.add(row)
         lines = lines_of(snapshot.passages[row].path)
         if lines:
             hits.append(make_hit(snapshot, row, score, q.terms, lines, context_lines, why(row), q.highlight))
@@ -739,11 +820,32 @@ def search(
     return hits
 
 
-def _spans(text: str, terms: set[str], patterns: list[re.Pattern], words: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
-    """The ranges of `text` to highlight. `words`: its term_spans, when they are known already."""
-    spans = term_spans(text, terms) if words is None else words
+def _pattern_spans(lines: list[str], patterns: list[re.Pattern]) -> dict[int, list[tuple[int, int]]]:
+    """Where the phrases and regexes match in these lines, by line. They are matched in the lines
+    as one text, as when the passage was found: a phrase can run over a line break, and ^ and $
+    are the passage's start and end. A match over a break is marked on each of its lines."""
+    found: dict[int, list[tuple[int, int]]] = {}
+    if not patterns:
+        return found
+    text = "\n".join(lines)
+    starts = list(accumulate((len(line) + 1 for line in lines), initial=0))
     for p in patterns:
-        spans += [m.span() for m in p.finditer(text) if m.end() > m.start()]
+        for m in p.finditer(text):
+            start, end = m.span()
+            n = bisect.bisect_right(starts, start) - 1
+            while start < end and n < len(lines):
+                stop = min(end, starts[n] + len(lines[n]))
+                if stop > start:
+                    found.setdefault(n, []).append((start - starts[n], stop - starts[n]))
+                n += 1
+                start = starts[n]
+    return found
+
+
+def _spans(text: str, terms: set[str], more: list[tuple[int, int]] = (), words: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
+    """The ranges of `text` to highlight: its words that are among `terms`, and `more`. `words`:
+    its term_spans, when they are known already."""
+    spans = [*(term_spans(text, terms) if words is None else words), *more]
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):  # a word can match a term and a phrase: one mark
         if merged and start <= merged[-1][1]:
@@ -769,13 +871,14 @@ def make_hit(
 
     found: dict[int, list[tuple[int, int]]] = {}
     words = native.line_spans(lines[start:end + 1], terms)  # the passage's lines in one call, with the Rust extension
+    matched = _pattern_spans(lines[start:end + 1], patterns)
 
     def spans_on(n: int) -> list[tuple[int, int]]:
-        """The highlights of a line, worked out once: the first match, the snippet and the marks
-        each ask for them."""
+        """The highlights of a line of the passage, worked out once: the first match, the snippet
+        and the marks each ask for them."""
         if n not in found:
-            known = words[n - start] if words is not None and start <= n <= end else None
-            found[n] = _spans(lines[n], terms, patterns, known)
+            known = words[n - start] if words is not None else None
+            found[n] = _spans(lines[n], terms, matched.get(n - start, ()), known)
         return found[n]
 
     def first_match_on(n: int) -> tuple[int, int, int] | None:
@@ -792,4 +895,4 @@ def make_hit(
     focus = match[0] if match else start
     marks = [(n, s, e) for n in range(start, end + 1) for s, e in spans_on(n)]
 
-    return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why, marks, title=document_title(lines))
+    return Hit(p.path, p.section, p.start_line, p.end_line, score, focus, match, p.text, snippet, why, marks, title=document_title(lines))

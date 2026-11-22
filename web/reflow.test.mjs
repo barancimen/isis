@@ -141,6 +141,16 @@ test("a checkbox is part of its item's marker", () => {
   assert.equal(enterInList(["- [x]"], 0, 5), null);
 });
 
+test("a line that starts with inline code opens no fence, and a longer fence holds a shorter one", () => {
+  const inline = ["```pip install isis``` installs it and", "goes on here.", "", "next", "paragraph"];
+  assert.deepEqual(softBreaks(inline), [0, 3]);
+  assert.deepEqual(linesNotProse(inline), []);
+  const nested = ["````", "```", "code", "```", "still code", "````", "prose", "again"];
+  assert.deepEqual(linesNotProse(nested), [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(softBreaks(nested), [6]);
+  assert.deepEqual(linesNotProse(["~~~", "```", "code", "~~~", "prose"]), [0, 1, 2, 3]);
+});
+
 test("code, headings and table rows are not prose", () => {
   const lines = ["# Title", "Some text", "```", "code", "```", "    indented", "| a | b |", "- item", "    more of the item", "End"];
   assert.deepEqual(linesNotProse(lines, new Set([7, 8])), [0, 2, 3, 4, 5, 6]);

@@ -51,13 +51,14 @@ INDEX_VERSION = 3  # the passages' text in a file of its own, read when needed
 LEGACY_INDEX_VERSION = 2  # everything in index.json: still read, and saved the new way
 UNKNOWN = "\x01"  # a site or source not known yet, in the lists a cache keeps
 FRONT_MATTER_CHARS = 65536  # enough to hold the frontmatter of any file
-CHUNKER_VERSION = 3  # raise it when files split differently: they are read again, and keep their embeddings
+CHUNKER_VERSION = 4  # raise it when files split differently: they are read again, and keep their embeddings
 TERMS_VERSION = 3  # raise it when text becomes terms differently: cached passages are split into terms again
 # (1: Snowball stems; 2: lowercase words; 3: the text without its heading)
 MARKDOWN = (".md", ".markdown")
 NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
 EMBED_GROUP = 256  # passages per embedding call while indexing
 PUBLISH_EVERY = 20.0  # seconds between snapshot updates while a large corpus is being embedded
+PATTERN_BATCH = 2048  # passages a phrase or regex is looked for in before they are marked as done
 SAVE_EVERY = 120.0  # seconds between cache writes during a long embedding run
 OSIRIS_BUSY = ".osiris-busy"  # in an osiris archive's data folder: locked while osiris writes to it
 ARCHIVE_EVERY = 300.0  # seconds between looks at an archive osiris is writing to
@@ -73,9 +74,29 @@ def configure_logging() -> None:
 
 
 def corpus_exclude(folders: list[Path], tasks_dir: Path) -> tuple[Path, ...]:
-    """Task folders stay out of the index: the one in use, and the default place in each other
-    corpus folder (which holds its tasks when it is served on its own)."""
-    return (tasks_dir, *(Path(d) / "_tasks" for d in folders[1:]))
+    """Task folders stay out of the index: the one in use, and the default place in each corpus
+    folder, which holds its tasks when it is served on its own or without --tasks. The first
+    folder's too: served to the public with its tasks elsewhere, what was written there before
+    would otherwise be open to all."""
+    return tuple(dict.fromkeys([Path(tasks_dir), *(Path(d) / "_tasks" for d in folders)]))
+
+
+LEFT_OVER = re.compile(r"\.(\d+)-\d+\.tmp")  # in the name of a save's temporary copy: its process and thread
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # it is there, and someone else's
+        return True
+    return True
+
+
+def _as_found(st) -> tuple:
+    """What tells a file from itself changed: also its permissions, which change no other time."""
+    return st.st_mtime_ns, st.st_size, getattr(st, "st_ctime_ns", 0)
 
 
 def _count(n: int, noun: str) -> str:
@@ -112,8 +133,9 @@ def _model_id(embedder) -> str:
 
 
 def _join(strings) -> np.ndarray:
-    """Strings as one array of UTF-8 bytes, for a cache: they can't contain NUL."""
-    return np.frombuffer("\0".join(strings).encode("utf-8", "surrogatepass"), np.uint8)
+    """Strings as one array of UTF-8 bytes, for a cache, with NUL between them. One inside a
+    string would make two of it, and the cache unreadable: it is left out."""
+    return np.frombuffer("\0".join(s.replace("\0", "") for s in strings).encode("utf-8", "surrogatepass"), np.uint8)
 
 
 def _split(joined: np.ndarray, n: int) -> list[str]:
@@ -276,6 +298,7 @@ class Snapshot:
     _source_rows: dict = field(default_factory=dict, repr=False)
     _document_rows: dict = field(default_factory=dict, repr=False)
     _headings: dict = field(default_factory=dict, repr=False)
+    _site_rows: dict = field(default_factory=dict, repr=False)
     _heading_matches: dict = field(default_factory=dict, repr=False)
     near_words: dict = field(default_factory=dict, repr=False)  # for search.near_words
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
@@ -308,26 +331,34 @@ class Snapshot:
         counts, done = self.cached(self._pattern_counts, (pattern.pattern, pattern.flags), 32,
                                    lambda: (np.zeros(n, np.float32), np.zeros(n, bool)))
         todo = np.flatnonzero(~done) if rows is None else rows[~done[rows]]
-        if len(todo):
-            passages = self.passages  # a pattern that runs out of time raises before anything is marked done
+        passages = self.passages
+        check = getattr(pattern, "check", None)  # under a time limit: raises when the time is up
+        # A batch at a time, each marked done as it ends: a scan that runs out of time keeps what
+        # it has looked through, and the same search goes on from there the next time.
+        for begin in range(0, len(todo), PATTERN_BATCH):
+            batch = todo[begin:begin + PATTERN_BATCH]
+            if check is not None:
+                check()
 
             def texts():
                 if isinstance(passages, PassageRows):
-                    return passages.texts(todo)
-                return (passages[i].text for i in todo.tolist())
+                    return passages.texts(batch)
+                return (passages[i].text for i in batch.tolist())
 
             found = native.phrase_counts(pattern, texts())  # a phrase, with the Rust extension
             if found is None:
                 found = np.fromiter((sum(1 for m in pattern.finditer(text) if m.end() > m.start()) for text in texts()),
-                                    np.float32, len(todo))
-            counts[todo] = found
-            done[todo] = True
+                                    np.float32, len(batch))
+            counts[batch] = found
+            done[batch] = True
         return counts
 
     def cached(self, cache: dict, key, size: int, make: Callable):
-        """cache[key], made on first use; the oldest entries go when there are `size`."""
+        """cache[key], made on first use; the entries used longest ago go when there are `size`."""
         with self._cache_lock:
             value = cache.get(key)
+            if value is not None:
+                cache[key] = cache.pop(key)  # used just now: the last to go
         if value is None:
             value = make()  # outside the lock: a slow regex scan doesn't hold up other requests
             with self._cache_lock:
@@ -432,7 +463,9 @@ class Snapshot:
                                   lambda: (np.zeros(n, bool), np.zeros(n, bool)))
         todo = ids[~done[ids]]
         if len(todo):
-            found[todo] = [any(m.end() > m.start() for m in pattern.finditer(headings[i])) for i in todo.tolist()]
+            # One heading to a line (see Passage.heading): a pattern is matched in each, as ^ and $ expect.
+            found[todo] = [any(m.end() > m.start() for line in headings[i].split("\n") for m in pattern.finditer(line))
+                           for i in todo.tolist()]
             done[todo] = True
         return found
 
@@ -449,13 +482,24 @@ class Snapshot:
         return ok
 
     def at_sites(self, sites) -> np.ndarray:
-        """Which passages are in documents from these hosts, or from their subdomains."""
-        ok = np.zeros(len(self.passages), bool)
-        for path, host in self.file_sites.items():
-            if any(host == site or host.endswith(f".{site}") for site in sites):
-                start, end = self.file_rows[path]
-                ok[start:end] = True
-        return ok
+        """Which passages are in documents from these hosts, or from their subdomains. The answer
+        is kept and shared: a search asks again at every key press, so don't change it."""
+
+        def hosts() -> dict[str, list[tuple[int, int]]]:  # each host's documents, as runs of rows
+            found: dict[str, list[tuple[int, int]]] = {}
+            for path, host in self.file_sites.items():
+                found.setdefault(host, []).append(self.file_rows[path])
+            return found
+
+        def rows() -> np.ndarray:
+            ok = np.zeros(len(self.passages), bool)
+            for host, spans in self.cached(self._site_rows, "", 17, hosts).items():
+                if any(host == site or host.endswith(f".{site}") for site in sites):
+                    for start, end in spans:
+                        ok[start:end] = True
+            return ok
+
+        return self.cached(self._site_rows, tuple(sorted(sites)), 17, rows)
 
     def term_id(self, term: str) -> int | None:
         i = self.vocab.get(term)
@@ -503,6 +547,8 @@ class Engine:
         self.chunking = (target_words, max_words)
         self.vocab = Vocabulary()
         self.words = Words()
+        self._unreadable: dict[str, tuple] = {}  # files that couldn't be read, as they were then
+        self._unwritten: set[str] = set()  # folders whose last save left something out
         self._unsaved: set[str] = set()  # folders whose cache is out of date: files or vectors changed, or loaded the old way
         self.files: dict[str, FileRecord] = {}
         self.status = IndexStatus()
@@ -570,7 +616,12 @@ class Engine:
         return self.roots[head] / rest if head in self.roots and rest else None
 
     def read_lines(self, path: str) -> list[str]:
-        return split_lines(self.resolve(path).read_text(encoding="utf-8", errors="replace"))
+        return split_lines(self.resolve(path).read_text(encoding="utf-8-sig", errors="replace"))
+
+    def _overlapping(self) -> bool:
+        """Whether one of the folders given lies inside another."""
+        real = [root.resolve() for root in self.roots.values()]
+        return any(a != b and a in b.parents for a in real for b in real)
 
     def _say_once(self, level: int, message: str) -> None:
         if message not in self._said:
@@ -650,8 +701,13 @@ class Engine:
                         found[lead + name] = st
                         files.add((st.st_dev, st.st_ino))
 
-        for prefix, root in self.roots.items():
+        # Of two folders given, one inside the other, the one scanned first has the files. That is
+        # the one named first, except that an osiris archive goes before the plain folders: inside
+        # a folder of notes that is given too, it keeps its own name and its sources.
+        for prefix, root in sorted(self.roots.items(), key=lambda named: named[0] not in self.osiris):
             if prefix in skip:
+                with suppress(OSError):
+                    first_visit(root)  # not looked at this time, and not walked as a part of another folder either
                 continue
             try:
                 if first_visit(root):
@@ -710,8 +766,10 @@ class Engine:
         with f:
             try:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
+            except BlockingIOError:
                 return True
+            except OSError:  # a file system without such locks (NFS refuses one on a file opened to read): never busy
+                return False
             fcntl.flock(f, fcntl.LOCK_UN)
             return False
 
@@ -753,7 +811,7 @@ class Engine:
         return not any(not d or path.startswith(f"{d}/") for d in self.no_embed)
 
     def _read(self, path: str, stat: os.stat_result) -> FileRecord:
-        text = self._located(path).read_text(encoding="utf-8", errors="replace")
+        text = self._located(path).read_text(encoding="utf-8-sig", errors="replace")
         passages = chunk_markdown(path, text, *self.chunking)
         head = split_lines(text)[:MAX_FRONT_MATTER]
         return FileRecord(stat.st_mtime_ns, stat.st_size, passages, *self._terms_of(passages), site=document_site(head),
@@ -772,7 +830,7 @@ class Engine:
         """The site and source of a file in a cache from before they were kept, without reading
         all of it."""
         try:
-            with self._located(path).open(encoding="utf-8", errors="replace") as f:
+            with self._located(path).open(encoding="utf-8-sig", errors="replace") as f:
                 head = split_lines(f.read(FRONT_MATTER_CHARS))[:MAX_FRONT_MATTER]
         except (OSError, AttributeError):  # gone, or its folder is away: known next time
             return None, None
@@ -828,6 +886,8 @@ class Engine:
         if first:
             log.info("scanning %s", ", ".join(map(str, self.roots.values())))
         held = self._held_back() if not first else set()
+        if only is not None and self._overlapping():
+            only = None  # which of two folders has a file is settled by scanning both
         skip = held | (set() if first or only is None else set(self.roots) - only)  # not looked at this time
         found = self._scan(skip=skip)
         relabeled = any([manifest.refresh() for prefix, manifest in self.osiris.items() if prefix not in skip])
@@ -835,7 +895,8 @@ class Engine:
         changed = [
             p
             for p, st in found.items()
-            if (r := self.files.get(p)) is None or (r.mtime_ns, r.size) != (st.st_mtime_ns, st.st_size)
+            if ((r := self.files.get(p)) is None or (r.mtime_ns, r.size) != (st.st_mtime_ns, st.st_size))
+            and self._unreadable.get(p) != _as_found(st)  # it couldn't be read, and is as it was then
         ]
         new = [p for p in changed if p not in self.files]
         modified = [p for p in changed if p in self.files]
@@ -863,7 +924,9 @@ class Engine:
             except OSError as e:  # deleted or unreadable since the scan
                 log.warning("skipping %s: %s", path, e)
                 self.files.pop(path, None)
+                self._unreadable[path] = _as_found(found[path])  # tried again once the file or its permissions change
                 continue
+            self._unreadable.pop(path, None)
             old = self.files.get(path)
             if old is not None:  # an edit changes a few passages: the others keep their vectors, for every model
                 reuse = {name: dict(zip((p.embed_text for p in old.passages), vectors)) for name, vectors in old.vectors.items()}
@@ -946,10 +1009,13 @@ class Engine:
                 self.status.embedded += len(texts)
                 group.clear()
 
+            waiting = 0  # texts to embed in the group
             for record in pending:
                 group.append(record)
-                if sum(len(todo[id(r)]) for r in group) < EMBED_GROUP:
+                waiting += len(todo[id(record)])
+                if waiting < EMBED_GROUP:
                     continue
+                waiting = 0
                 flush()
                 if on_progress:
                     on_progress(self.status)
@@ -964,8 +1030,11 @@ class Engine:
                     self._publish()
                     last_publish = now
                 if now - last_save > SAVE_EVERY:
-                    self._save()
-                    last_save = now
+                    try:
+                        self._save()
+                    except OSError as e:  # a full disk, say: what is embedded stays in memory, and the next save may work
+                        log.warning("could not save the index cache (%s): trying again in a while", e.strerror or e)
+                    last_save = time.monotonic()  # from its end: a cache that is slow to write isn't written without a pause
             if group:
                 flush()
         return self.status.to_embed, sum(len(pending) for _, pending, _, _ in work)
@@ -1145,8 +1214,10 @@ class Engine:
             self._vectors_path(prefix, name, ".npz").unlink(missing_ok=True)
         except OSError as e:
             log.warning("could not save the embeddings of %s: %s", name, e)
+            self._unwritten.add(prefix)  # still to be saved, when it can be
         finally:  # a full disk must not also keep a copy
             tmp.unlink(missing_ok=True)
+            tmp_json.unlink(missing_ok=True)
             tmp_json.unlink(missing_ok=True)
 
     def _read_vectors(self, prefix: str, embedder) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1217,8 +1288,10 @@ class Engine:
         self._remapped = False
         for prefix in self.roots:
             if prefix in self._unsaved and not self.archive_busy(prefix):
+                self._unwritten.discard(prefix)
                 self._save_folder(prefix)
-                self._unsaved.discard(prefix)
+                if prefix not in self._unwritten:  # all of it was written
+                    self._unsaved.discard(prefix)
         if self._remapped:  # a snapshot whose folder BM25 reads the saved postings, so the copy is let go
             self._publish()
 
@@ -1354,7 +1427,23 @@ class Engine:
 
     def _load(self) -> None:
         for prefix in self.roots:
+            self._clear_leftovers(prefix)
             self._load_folder(prefix)
+
+    def _clear_leftovers(self, prefix: str) -> None:
+        """Removes the temporary copies of a save whose process was killed before it ended. Each
+        can be as large as the cache itself, and nothing else ever looks at them. A copy another
+        process is writing now, such as `isis index` beside a server, is left alone."""
+        if os.name != "posix":  # asking whether a process is alive would end it elsewhere
+            return
+        folder = self._cache_dir(prefix)
+        for path in [*folder.glob("*.tmp"), *folder.glob("models/*.tmp.*")]:
+            made_by = LEFT_OVER.search(path.name)
+            if not made_by or _alive(int(made_by.group(1))):
+                continue
+            with suppress(OSError):  # a cache this user may not change
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
+                log.info("removed %s, left by a save that was cut short", path.name)
 
     def _load_folder(self, prefix: str) -> None:
         folder = self._cache_dir(prefix)
