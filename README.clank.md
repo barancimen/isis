@@ -191,10 +191,10 @@ sh web/vendor/build-codemirror.sh        # rebuild the CodeMirror bundle (needs 
 ```
 
 Limitations:
-- Tokenising drops English stopwords and never stems. An index cache from when words were stemmed is split into words again from its cached passages on the first start (no files read, no embeddings redone).
+- Tokenising drops English stopwords and never stems. An index cache whose words were taken from its passages another way (stemmed, or with their headings) is split into words again from its cached passages on the first start (no files read, no embeddings redone).
 - Outside public mode, the app assumes one user at a time.
 - The Rust extension knows a newer Unicode than Python 3.10 does (13.0), so a letter added since then can be highlighted, or matched in a phrase whatever its case, only with the extension. Everything else is held to the same answers by `tests/test_native.py`.
-- A passage is searched as its text alone. Its heading counts only in `doc:` rules, which look at whole documents, headings included. This holds for words, phrases and regexes, in ranking and in `+` and `-` rules, in Search and in Related's word rules. An index cache from when headings counted is split into words again on the first start, like a stemmed one.
+- A passage is searched as its text alone. Its heading counts only in `doc:` rules, which look at whole documents, headings included. This holds for words, phrases and regexes, in ranking and in `+` and `-` rules, in Search and in Related's word rules.
 - Passages follow the paragraphs. Short paragraphs under one heading are merged up to about 100 words, and a paragraph still under 30 words joins the next one under its heading, or else the one before. A paragraph over 180 words is cut into nearly equal pieces, each starting with about 20 words from the end of the one before. Task documents are split into single paragraphs, without overlap.
 - Passages are whole lines, so a very long single-line paragraph becomes one passage. Its embedding averages several windows.
 - The index cache (`<corpus>/.isis/index.json`, the `.npy` arrays and `texts.bin` in `cache.<token>/`, and `models/*.npz`) is plain data, so a corpus that comes with someone else's cache can't run code.

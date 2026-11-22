@@ -1494,7 +1494,7 @@ class Engine:
         """New BM25 rows for a cache whose terms were made differently (stems, before), from the
         passages it holds: the files aren't read again and keep their embeddings."""
         n = sum(len(r.passages) for r in files.values())
-        log.info("splitting %s into words again, as search no longer uses word stems (only this once)", _count(n, "passage"))
+        log.info("splitting %s into words again, as words are taken from them differently now (only this once)", _count(n, "passage"))
         for record in files.values():
             record.indptr, record.term_ids, record.counts = self._terms_of(record.passages)
         self._unsaved.update(map(self._prefix, files))
