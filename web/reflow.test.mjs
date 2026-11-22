@@ -122,6 +122,25 @@ test("numbers below a new item move up, at that level only", () => {
   assert.equal(enterInList(["1) a", "2) b"], 1, 4).prefix, "3) ");
 });
 
+test("numbers move up in the same list only", () => {
+  const moved = (lines, n) => enterInList(lines, n, lines[n].length).renumber.map((r) => [r.line, r.text]);
+  assert.deepEqual(moved(["1. one", "2. two", "", "A paragraph.", "", "1. another list", "2. its second"], 0), [[1, "3."]]);
+  assert.deepEqual(moved(["1. First point", "2. Second point", "", "The company began in", "1987. It grew quickly."], 0), [[1, "3."]]);
+  assert.deepEqual(moved(["1. a", "2. b", "", "## Next", "", "1. c", "2. d"], 0), [[1, "3."]]);
+  assert.deepEqual(moved(["1. a", "", "2. b", "", "3. c"], 0), [[2, "3."], [4, "4."]]); // blank lines don't end a list
+  assert.deepEqual(moved(["1. a", "```", "1. code", "```", "1. after"], 0), []);
+  assert.deepEqual(listStructure(["- a", "", "text", "", "- b", "  - c", "- d"]).items.map((item) => item.list), [0, 1, 1, 1]);
+});
+
+test("a checkbox is part of its item's marker", () => {
+  assert.equal(enterInList(["- [ ] task"], 0, 2), null); // before the box
+  assert.equal(enterInList(["- [ ] task"], 0, 4), null); // inside it
+  assert.equal(enterInList(["- [ ] task"], 0, 6).prefix, "- [ ] ");
+  assert.equal(enterInList(["- [ ] task"], 0, 10).prefix, "- [ ] ");
+  assert.equal(enterInList(["- [ ] "], 0, 6), null); // an empty item ends the list
+  assert.equal(enterInList(["- [x]"], 0, 5), null);
+});
+
 test("code, headings and table rows are not prose", () => {
   const lines = ["# Title", "Some text", "```", "code", "```", "    indented", "| a | b |", "- item", "    more of the item", "End"];
   assert.deepEqual(linesNotProse(lines, new Set([7, 8])), [0, 2, 3, 4, 5, 6]);

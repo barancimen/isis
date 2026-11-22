@@ -90,20 +90,35 @@ async function api(method, url, body, { duringRename = false, ...options } = {})
     const prefix = `api/tasks/${enc(from)}`;
     if (url === prefix || url.startsWith(`${prefix}/`)) url = `api/tasks/${enc(to)}${url.slice(prefix.length)}`;
   }
-  const res = await fetch(url, {
-    method,
-    headers: body === undefined ? {} : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...options,
+    });
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw cause;
+    throw new Error("The server can't be reached. Check that it's running and try again", { cause }); // not the browser's "Failed to fetch"
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const error = new Error(data.detail || res.statusText);
+    const status = [res.status, res.statusText].filter(Boolean).join(" "); // over HTTP/2 the status has no text
+    const error = new Error(errorText(data.detail) || `The server answered with an error (${status})`);
     error.status = res.status;
     error.data = data;
     throw error;
   }
   return data;
+}
+
+// What the server says went wrong: a sentence, or the list FastAPI makes of what a request got wrong.
+// Empty when it says nothing, as a proxy's error page does, and over HTTP/2 the status has no text.
+function errorText(detail) {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return "";
+  return detail.map((d) => (typeof d?.msg === "string" ? d.msg : "")).filter(Boolean).join(". ");
 }
 
 const store = {
@@ -700,6 +715,7 @@ const state = {
   readerPath: null,
   readerSeq: 0, // the latest document asked for: a slower answer for an earlier one is dropped
   fileToReveal: false, // Files can't scroll while hidden, so this waits until it shows
+  taskTurn: 0, // counts the switches between tasks: one that waited for a task's text gives way to a later one
   pendingView: null, // the task view on its way to the screen
   viewTurn: 0,
   readerScroll: store.json("reader-scroll", {}), // document path -> where its reader view was left
@@ -773,27 +789,33 @@ function startRename(name) {
   if (!button) return;
   const input = h("input", { class: "rename", value: name, spellcheck: "false", "aria-label": `New name for ${name}` });
   let done = false;
-  const finish = async (rename) => {
+  // `toTab`: the focus goes back to the tab, as after Enter or Escape. After a click elsewhere it
+  // stays where the click put it: back on the tab, the next Backspace would ask to delete the task.
+  const finish = async (rename, toTab) => {
     if (done) return;
     done = true;
     const newName = input.value.trim();
     input.replaceWith(button);
+    if (toTab) focusTab(name);
     let focus = name;
     if (rename && newName && newName !== name) {
+      const from = document.activeElement;
       try {
         focus = await renameTask(name, newName);
       } catch (e) {
         fail(e);
       }
+      if (toTab && document.activeElement !== from && document.activeElement !== document.body) return; // the focus moved on meanwhile
     }
-    focusTab(focus);
+    if (toTab) focusTab(focus);
   };
   input.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === "Enter") finish(true);
-    else if (e.key === "Escape") finish(false);
+    if (e.isComposing) return; // Enter that picks a word while typing Chinese or Japanese
+    if (e.key === "Enter") finish(true, true);
+    else if (e.key === "Escape") finish(false, true);
   });
-  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("blur", () => finish(true, false));
   button.replaceWith(input);
   input.focus();
   input.select();
@@ -807,16 +829,21 @@ async function moveTask(name, before) {
   const at = rest.findIndex((t) => t.name === before);
   rest.splice(at < 0 ? rest.length : at, 0, moving);
   if (rest.every((t, i) => t === state.tasks[i])) return;
+  const turn = ++moveTurn;
   state.tasks = rest; // at once, so the tab doesn't jump back while the server answers
   renderTaskTabs();
   try {
-    state.tasks = await api("POST", `api/tasks/${enc(name)}/move`, { before });
+    const tasks = await api("POST", `api/tasks/${enc(name)}/move`, { before });
+    if (turn !== moveTurn) return; // a later move is on its way: its answer has both
+    state.tasks = tasks;
     renderTaskTabs();
   } catch (e) {
     await loadTasks().catch(() => {});
     throw e;
   }
 }
+
+let moveTurn = 0;
 
 function onTabKey(e) {
   const li = e.target.closest(".task-tab");
@@ -834,7 +861,9 @@ function onTabKey(e) {
     e.preventDefault();
     const before = e.key === "ArrowUp" ? names[at - 1] : names[at + 2] ?? null;
     if (at === 0 && e.key === "ArrowUp") return;
-    moveTask(name, before).then(() => focusTab(name)).catch(fail);
+    const moved = moveTask(name, before);
+    focusTab(name); // the list is drawn again at once, and the next key press must find the tab
+    moved.then(() => document.activeElement === document.body && focusTab(name)).catch(fail);
   } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
     e.preventDefault();
     const next = names[at + (e.key === "ArrowUp" ? -1 : 1)];
@@ -939,23 +968,28 @@ async function loadTasks() {
 // `view`: what to show in the reader and in Search. A first task made while no task is open has
 // none, and takes over what is on show.
 async function switchTask(name, view = loadTaskView(name)) {
+  const turn = ++state.taskTurn; // a click on another task, or back on this one, calls off a switch still waiting
   if (state.task === name) return;
-  const leaving = state.task;
-  if (state.task && state.docs.has(state.task)) {
-    rememberTaskPlace();
-    saveTaskView();
-    state.docs.get(state.task).state = taskView.state;
-    saveTask(state.task).catch(fail); // in the background, so the switch doesn't wait
-  }
   let doc = state.docs.get(name);
   const opening = !doc || doc.preloaded;
   if (!doc) {
     const task = await api("GET", `api/tasks/${enc(name)}`);
-    doc = { state: taskState(task.content), mtime: task.mtime, dirty: false };
+    if (turn !== state.taskTurn) return;
+    doc = state.docs.get(name) ?? { state: taskState(task.content), mtime: task.mtime, dirty: false }; // loaded meanwhile
     state.docs.set(name, doc);
-  } else if (doc.preloaded) {
+  }
+  if (doc.preloaded) {
     delete doc.preloaded;
     recheckTask(name, doc).catch(() => {});
+  }
+  // The task on show is left only now: what was typed or added while the other one loaded is its own.
+  const leaving = state.task;
+  if (leaving && state.docs.has(leaving)) {
+    rememberTaskPlace();
+    saveTaskView();
+    clearAdded();
+    state.docs.get(leaving).state = taskView.state;
+    saveTask(leaving).catch(fail); // in the background, so the switch doesn't wait
   }
   state.task = name;
   store.set("task", name);
@@ -964,8 +998,8 @@ async function switchTask(name, view = loadTaskView(name)) {
   measureWholeDocument(taskView);
   restoreTaskPlace(name, opening);
   $("#task-name").textContent = name;
-  $("#conflict").hidden = true;
-  setSaveState(doc.dirty ? "unsaved" : "saved");
+  showConflict(doc);
+  setSaveState(doc.conflictMtime || doc.dirty ? "unsaved" : "saved");
   renderTaskTabs();
   state.relatedStale = false;
   updateRefreshButton();
@@ -990,8 +1024,9 @@ async function preloadTasks() {
 // A preloaded task is shown as it was loaded, then checked in case it changed since, such as in
 // another browser. If it did and it hasn't been edited here, the newer text replaces it.
 async function recheckTask(name, doc) {
+  const known = doc.mtime;
   const task = await api("GET", `api/tasks/${enc(name)}`);
-  if (state.docs.get(name) !== doc || doc.dirty || doc.saving || task.mtime === doc.mtime) return;
+  if (state.docs.get(name) !== doc || doc.dirty || doc.saving || doc.mtime !== known || task.mtime === doc.mtime) return;
   doc.state = taskState(task.content);
   doc.mtime = task.mtime;
   if (state.task === name) {
@@ -1098,6 +1133,7 @@ function showNoTask() {
   state.relatedStale = false;
   updateRefreshButton();
   $("#task-name").textContent = "No task";
+  showConflict(null);
   setSaveState("none");
   taskView.setState(noTaskState());
   renderTaskTabs();
@@ -1112,7 +1148,9 @@ async function newTask() {
   if (!state.tasks.some((t) => t.name === task.name)) state.tasks.push({ name: task.name, mtime: task.mtime });
   state.docs.set(task.name, { state: taskState(task.content), mtime: task.mtime, dirty: false });
   renderTaskTabs();
-  await switchTask(task.name, { skipped: [...state.skipped] }); // it starts with the open task's folders and sources
+  // It starts with the open task's folders and sources, and an empty reader and search. A first
+  // task has no task to copy from, and takes over what is on show: the document and the search.
+  await switchTask(task.name, state.task ? { skipped: [...state.skipped] } : null);
   saveTaskView();
   return task.name;
 }
@@ -1155,9 +1193,7 @@ async function renameTask(name, newName) {
   try {
     await saveTask(newName, { beforeRename: name });
     const task = await api("POST", `api/tasks/${enc(name)}/rename`, { new_name: newName }, { duringRename: true });
-    final = task.name;
-    const doc = state.docs.get(newName);
-    if (doc) doc.mtime = task.mtime;
+    final = task.name; // the file keeps its time through a rename: a newer one means it changed elsewhere, and the next save asks
     carryTaskState(newName, final);
     return final;
   } catch (error) {
@@ -1174,6 +1210,7 @@ async function deleteTask(name) {
   if (!confirm(`Delete the task “${name}”?`)) return;
   const kept = { doc: state.docs.get(name), place: state.taskPlaces[name], view: store.get(viewKey(name)) };
   const wasActive = state.task === name;
+  if (wasActive && kept.doc) kept.doc.state = taskView.state; // as it is on show, if the server refuses
   state.docs.delete(name);
   delete state.taskPlaces[name];
   store.remove(viewKey(name));
@@ -1211,6 +1248,27 @@ function setSaveState(state) {
 
 const scheduleSave = debounce(() => saveTask(state.task).catch(fail), 800);
 
+// The banner that asks which version to keep shows for the task on show, when its save was refused
+// because its file changed on disk.
+function showConflict(doc) {
+  $("#conflict").hidden = !doc?.conflictMtime;
+}
+
+// A save that failed because the server couldn't be reached, was busy or was restarting is tried
+// again by itself, after these waits (ms) and then at the last of them: the text is still only here.
+const RETRY_SAVE = [3000, 10000, 30000, 60000];
+const worthRetrying = (error) => !error.status || error.status >= 500 || error.status === 429;
+
+function retrySave(doc) {
+  clearTimeout(doc.retry);
+  const wait = RETRY_SAVE[Math.min(doc.failures ?? 0, RETRY_SAVE.length - 1)];
+  doc.failures = (doc.failures ?? 0) + 1;
+  doc.retry = setTimeout(() => {
+    const name = [...state.docs].find(([, d]) => d === doc)?.[0]; // it may have been renamed, or deleted
+    if (name && doc.dirty && !doc.conflictMtime) saveTask(name).catch(() => {}); // the page says "Couldn't save" already
+  }, wait);
+}
+
 // `beforeRename`: the name the task still has on the server, while a rename is on its way there.
 async function saveTask(name, { keepalive = false, beforeRename = null } = {}) {
   const doc = name && state.docs.get(name);
@@ -1230,17 +1288,21 @@ async function saveTask(name, { keepalive = false, beforeRename = null } = {}) {
       const small = new TextEncoder().encode(JSON.stringify(body)).length < 60000;
       const result = await api("PUT", `api/tasks/${enc(beforeRename ?? name)}`, body, { keepalive: keepalive && small, duringRename: Boolean(beforeRename) });
       doc.mtime = result.mtime;
-      if (name === state.task) setSaveState(doc.dirty ? "unsaved" : "saved");
+      doc.failures = 0;
+      clearTimeout(doc.retry);
+      if (state.docs.get(state.task) === doc) setSaveState(doc.dirty ? "unsaved" : "saved");
     } catch (error) {
       doc.dirty = true;
+      const shown = state.docs.get(state.task) === doc; // by the task itself: its name may have changed meanwhile
       if (error.status === 409) {
         doc.conflictMtime = error.data.mtime;
-        if (name === state.task) {
-          $("#conflict").hidden = false;
+        if (shown) {
+          showConflict(doc);
           setSaveState("unsaved");
         }
       } else {
-        if (name === state.task) setSaveState("failed");
+        if (shown) setSaveState("failed");
+        if (worthRetrying(error)) retrySave(doc);
         throw error;
       }
     }
@@ -1259,23 +1321,31 @@ async function saveTask(name, { keepalive = false, beforeRename = null } = {}) {
 async function resolveConflict(keepMine) {
   const name = state.task;
   const doc = state.docs.get(name);
+  if (!doc?.conflictMtime) return;
+  const shown = () => state.docs.get(state.task) === doc; // another task may be on show by the time the server answers
   if (keepMine) {
     doc.mtime = doc.conflictMtime;
     doc.conflictMtime = null;
     doc.dirty = true;
-    await saveTask(name);
+    if (shown()) showConflict(doc);
+    await saveTask(name); // if the file changed once more, the banner is back
   } else {
     const task = await api("GET", `api/tasks/${enc(name)}`);
+    if (![...state.docs.values()].includes(doc)) return; // deleted meanwhile
     doc.state = taskState(task.content);
     doc.mtime = task.mtime;
     doc.dirty = false;
     doc.conflictMtime = null;
-    taskView.setState(doc.state);
-    measureWholeDocument(taskView);
-    setSaveState("saved");
+    if (shown()) {
+      taskView.setState(doc.state);
+      measureWholeDocument(taskView);
+      setSaveState("saved");
+    }
   }
-  $("#conflict").hidden = true;
-  requestRelated();
+  if (shown()) {
+    showConflict(doc);
+    requestRelated();
+  }
 }
 
 // ---------- task editor events ----------
@@ -1294,6 +1364,13 @@ function onTaskUpdate(update) {
 // ---------- adding to the task ----------
 
 let addedTimer;
+
+// Takes the mark off the passage just added. Before the task leaves the screen, or the mark would
+// stay in it until the next passage is added.
+function clearAdded() {
+  clearTimeout(addedTimer);
+  taskView.dispatch({ effects: addedSlot.set.of(Decoration.none) });
+}
 
 async function addToTask(text, origin = null) {
   if (!text.trim()) return;
@@ -1314,7 +1391,7 @@ async function addToTask(text, origin = null) {
     userEvent: "input.paste",
   });
   clearTimeout(addedTimer);
-  addedTimer = setTimeout(() => taskView.dispatch({ effects: addedSlot.set.of(Decoration.none) }), 1600);
+  addedTimer = setTimeout(clearAdded, 1600);
   flash(`Added to “${state.task}”`);
   if (origin?.lane) {
     api("POST", `api/tasks/${enc(state.task)}/feedback`, { action: "add", lane: origin.lane, path: origin.path }).catch(fail);
@@ -3383,7 +3460,12 @@ async function init() {
   const last = resume?.task ?? store.get("task");
   const name = state.tasks.find((t) => t.name === last)?.name ?? state.tasks[0]?.name;
   if (name) {
-    await switchTask(name, resume?.task === name ? { ...loadTaskView(name), ...resume } : undefined);
+    try {
+      await switchTask(name, resume?.task === name ? { ...loadTaskView(name), ...resume } : undefined);
+    } catch (error) { // such as a task file that isn't UTF-8: the rest of the page still starts, and another task can be opened
+      fail(error);
+      showNoTask();
+    }
   } else {
     showNoTask();
     if (resume) await showView(resume);

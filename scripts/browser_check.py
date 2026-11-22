@@ -116,13 +116,13 @@ def main() -> None:
         step(f"search hits open at their match, highlighted from the passage's first to its last word: {location}")
         shot(page, "search.png")
 
-        searches: list[str] = []
-        page.on("request", lambda r: "/api/search" in r.url and searches.append(urllib.parse.unquote(r.url)))
         page.locator("#search-tune > summary").click()
-        set_slider(page, "#search-tune [data-name=keyword_weight] input", 0)
+        # The first result may rank first by meaning before the slider moves, so wait for the search it sends.
+        asks_without_keywords = lambda r: "/api/search" in r.url and '"keyword_weight":0' in urllib.parse.unquote(r.url)
+        with page.expect_response(lambda r: asks_without_keywords(r.request), timeout=15000):
+            set_slider(page, "#search-tune [data-name=keyword_weight] input", 0)
         expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "1")
         expect(page.locator("#search-results .hit").first).to_have_attribute("data-meaning-rank", "1", timeout=15000)
-        assert any('"keyword_weight":0' in u for u in searches), searches
         page.click("#search-tune .tune-reset")
         expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "0")
         step("search parameters: keyword weight 0 ranks by meaning alone; reset restores the defaults")
@@ -156,7 +156,8 @@ def main() -> None:
         page.fill("#search-input", "whale -/Ahab/ -harpoon")
         expect(page.locator("#search-results .hit").first).to_be_visible(timeout=15000)
         lines = page.evaluate(passage_lines)
-        assert lines and not any("Ahab" in l or "harpoon" in l.lower() for l in lines), lines
+        # -harpoon leaves out the word itself: words aren't stemmed, so "harpoons" and "harpooneer" may stay.
+        assert lines and not any("Ahab" in l or re.search(r"\bharpoon\b", l, re.I) for l in lines), lines
         page.fill("#search-input", "")
         expect(page.locator("#search-results .hit")).to_have_count(0)
         page.fill("#search-input", "/white whale/")
@@ -446,7 +447,9 @@ def main() -> None:
             page.evaluate("(p) => window.isis.openFile(p)", sample.name)
             items = page.locator("#reader-editor .cm-li")
             expect(items.first).to_be_visible()
-            pad = lambda text: page.locator("#reader-editor .cm-line", has_text=text).first.evaluate("e => parseFloat(getComputedStyle(e).paddingLeft)")
+            # A list line is moved in by its left border, and its marker hangs in that space.
+            pad = lambda text: page.locator("#reader-editor .cm-line", has_text=text).first.evaluate(
+                "e => parseFloat(getComputedStyle(e).paddingLeft) + parseFloat(getComputedStyle(e).borderLeftWidth)")
             top, sub, subsub = pad("top"), pad("sub"), pad("subsub")
             assert sub - top >= 18 and subsub - sub >= 18, (top, sub, subsub)  # each level clearly further in
             assert page.locator("#reader-editor .cm-li-marker").all_inner_texts() == ["•", "◦", "▪", "•", "1.", "◦"]
@@ -665,6 +668,7 @@ def main() -> None:
         page.locator("#search-hidden .tune-reset").click()
         page.click("#search-tune .tune-reset")
         page.fill("#search-input", "")
+        page.press("#search-input", "Escape")  # the emptied box lists the recent searches, over the menus below it
         page.click("#search-tune > summary")
 
         page.click(".side-tabs button[data-panel=related]")

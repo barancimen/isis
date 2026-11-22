@@ -70,9 +70,10 @@ const indentOf = (line) => {
   return width;
 };
 
-// The lists of a document. `items`: each bullet or number, with its nesting depth (from how far it
-// is indented compared with the items above it, however many spaces that takes) and where its text
-// starts. `continuations`: indented lines that carry on an item, with the depth of that item;
+// The lists of a document. `items`: each bullet or number, with the list it is in (`list` counts
+// them: text after a blank line, a fence or an enveloped block ends one), its nesting depth (from
+// how far it is indented compared with the items above it, however many spaces that takes) and
+// where its text starts. `continuations`: indented lines that carry on an item, with the depth of that item;
 // `joined` means right below it, so it flows on, and not after a blank line. Not code: nothing in a
 // fence, or indented that far without a list above it.
 export function listStructure(lines) {
@@ -80,6 +81,7 @@ export function listStructure(lines) {
   const continuations = [];
   const edges = new Set(structure(lines).envelopes.flatMap(({ open, close }) => [open, close]));
   let stack = [];
+  let list = -1;
   let fence = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -96,10 +98,12 @@ export function listStructure(lines) {
     const indent = indentOf(line);
     const item = RULE.test(line) ? null : ITEM.exec(line);
     if (item && (stack.length || indent < 4)) {
+      if (!stack.length) list += 1;
       while (stack.length && stack[stack.length - 1] > indent) stack.pop();
       if (!stack.length || stack[stack.length - 1] < indent) stack.push(indent);
       items.push({
         line: i,
+        list,
         depth: stack.length - 1,
         ordered: /\d/.test(item[2]),
         marker: item[2],
@@ -119,8 +123,9 @@ export function listStructure(lines) {
 
 // What Enter does on line `n` at character `ch` when that starts a new item: straight on the next
 // line, whether or not the list has blank lines between its items. `prefix` starts the new line;
-// `renumber` lists the numbers below it that move up. Null when Enter should do what it does
-// elsewhere: outside a list, before the item's text, and on an empty item, which ends the list.
+// `renumber` lists the numbers below it in the same list that move up. Null when Enter should do
+// what it does elsewhere: outside a list, before the item's text (a checkbox is part of the
+// marker), and on an empty item, which ends the list.
 export function enterInList(lines, n, ch) {
   const { items, continuations } = listStructure(lines);
   const onItem = items.find((item) => item.line === n);
@@ -128,8 +133,9 @@ export function enterInList(lines, n, ch) {
   const owner = onItem ?? (carriesOn ? items.filter((item) => item.line < n).at(-1) : null);
   if (!owner) return null;
   const text = lines[owner.line];
-  if (onItem && (ch < owner.textFrom || !text.slice(owner.textFrom).trim())) return null;
-  const box = /^\[[ xX]\]\s+/.exec(text.slice(owner.textFrom));
+  const box = /^\[[ xX]\](\s+|$)/.exec(text.slice(owner.textFrom));
+  const textFrom = owner.textFrom + (box ? box[0].length : 0);
+  if (onItem && (ch < textFrom || !text.slice(textFrom).trim())) return null;
   const lead = text.slice(0, owner.markerFrom);
   const gap = text.slice(owner.markerTo, owner.textFrom);
   const renumber = [];
@@ -138,7 +144,7 @@ export function enterInList(lines, n, ch) {
     const number = parseInt(owner.marker, 10);
     marker = `${number + 1}${owner.marker.slice(-1)}`;
     let next = number + 1;
-    for (const item of items.filter((other) => other.line > owner.line)) {
+    for (const item of items.filter((other) => other.line > owner.line && other.list === owner.list)) {
       if (item.depth < owner.depth) break;
       if (item.depth === owner.depth && item.ordered) {
         next += 1;
