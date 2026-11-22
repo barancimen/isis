@@ -259,7 +259,6 @@ body.dragging-task, body.dragging-task * { cursor: grabbing !important; user-sel
 .history-forget:hover { color: var(--fg); background: none; }
 .history-item:hover .history-forget, .history-item[aria-selected="true"] .history-forget { visibility: visible; }
 .folder-picks { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
-.folder-picks .toggle { overflow-wrap: anywhere; white-space: normal; }
 .tree { display: flex; flex-direction: column; padding: 4px 10px 8px; }
 .tree-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 6px; padding: 1px 0; font-size: 13px; color: var(--muted); }
 .tree-row > input { margin: 0; accent-color: var(--accent); cursor: pointer; }
@@ -274,7 +273,6 @@ body.dragging-task, body.dragging-task * { cursor: grabbing !important; user-sel
 button.tree-fold { cursor: pointer; }
 button.tree-fold:hover { color: var(--fg); }
 .source-count { color: var(--faint); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.toggle { display: flex; gap: 4px; align-items: center; color: var(--muted); white-space: nowrap; font-size: 13.5px; }
 .hint, .status-line { color: var(--faint); font-size: 12.5px; }
 .status-line { font-variant-numeric: tabular-nums; }
 .status-line strong { color: var(--fg); }
@@ -418,6 +416,7 @@ button.tree-fold:hover { color: var(--fg); }
   background: color-mix(in srgb, var(--accent) calc(var(--w, 0) * 22%), var(--bg));
 }
 .chip button { border: none; border-radius: 0; padding: 1px 6px; background: none; }
+.chip button:focus-visible { outline-offset: -2px; } /* inside the chip, which cuts off what is outside it */
 .chip > span.chip-label { padding: 1px 2px 1px 7px; }
 .chip .chip-x { color: var(--faint); padding: 1px 5px 1px 2px; }
 .chip.boosted { border-color: var(--accent); }
@@ -480,6 +479,13 @@ button.tree-fold:hover { color: var(--fg); }
 .tune-row:not(.changed) .tune-default { visibility: hidden; }
 .tune-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 34px max-content; align-items: center; gap: 8px; font-size: 13px; }
 .tune-label { white-space: normal; overflow: visible; }
+/* In a narrow panel a slider's name goes on a line of its own, above the slider, where it has room. */
+.tune-body { container-type: inline-size; }
+@container (max-width: 300px) {
+  .tune-row { grid-template-columns: minmax(0, 1fr) 34px max-content; row-gap: 0; }
+  .tune-row .tune-label { grid-column: 1 / -1; }
+  .tune-row select { grid-column: 1 / 3; }
+}
 /* The red fill runs to the middle of the handle, so the handle and the fill read as one shape. */
 .tune-row input[type="range"] {
   --thumb: 12px;
@@ -564,6 +570,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .path { flex: 1; min-width: 0; color: var(--muted); }
 #task-name { color: var(--fg); font-weight: 600; }
 .save-state { color: var(--faint); font-size: 12.5px; }
+.save-state[data-state="failed"] { color: var(--accent); } /* not on disk, and not about to be: not to be missed */
 .add-btn { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .add-btn:hover { background: var(--accent); filter: brightness(1.1); }
 .editor { flex: 1; min-height: 0; }

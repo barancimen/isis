@@ -27,13 +27,13 @@
       <button role="tab" data-panel="search" title="Find passages in your documents.">Search</button>
       <button role="tab" data-panel="related" title="See passages related to your whole task.">Related</button>
     </div>
-    <button id="related-refresh" type="button" disabled title="Get new results. This lights up after you change your task or an adjustment. Until then, results stay put while you read them.">Refresh</button>
+    <button id="related-refresh" type="button" disabled hidden title="Get new results. This lights up after you change your task or an adjustment. Until then, results stay put while you read them.">Refresh</button>
     </div>
-    <section id="panel-files" class="panel" role="tabpanel">
+    <section id="panel-files" class="panel" role="tabpanel" hidden>
       <input id="file-filter" spellcheck="false" type="search" placeholder="Find a file by its name…" aria-label="Find a file by its name">
       <ul id="file-list"></ul>
     </section>
-    <section id="panel-search" class="panel" role="tabpanel">
+    <section id="panel-search" class="panel" role="tabpanel" hidden>
       <div id="search-presets" class="preset-bar"></div>
       <div class="search-row">
         <div class="search-box">
@@ -45,7 +45,7 @@
       <details id="search-llm" class="tune llm" hidden>
         <summary><span class="tune-title">LLM help for query synthesis</span></summary>
         <div class="llm-help" data-target="search">
-          <textarea id="search-llm-text" rows="3" spellcheck="true" placeholder="Type your query specifications in English" aria-label="What you want to find, in English"></textarea>
+          <textarea id="search-llm-text" rows="3" spellcheck="true" maxlength="600" placeholder="Type your query specifications in English" aria-label="What you want to find, in English"></textarea>
           <div class="llm-row">
             <button type="button" class="llm-generate" title="Ask the LLM for a query that does what you described. Its answer replaces what is in the search box. Enter does the same, and Shift+Enter starts a new line.">Generate</button>
             <span class="llm-status status-line" aria-live="polite"></span>
@@ -116,14 +116,14 @@
         </div>
       </details>
       <div id="search-folders" class="folder-picks" hidden></div>
-      <details id="search-tune" class="tune"></details>
+      <details id="search-tune" class="tune" hidden></details>
       <details id="search-hidden" class="tune" hidden></details>
       <div id="search-status" class="status-line"></div>
       <div id="search-results" class="results"></div>
     </section>
-    <section id="panel-related" class="panel" role="tabpanel">
+    <section id="panel-related" class="panel" role="tabpanel" hidden>
       <div id="related-presets" class="preset-bar"></div>
-      <details id="related-tune" class="tune"></details>
+      <details id="related-tune" class="tune" hidden></details>
       <details id="related-feedback" class="tune" hidden></details>
       <div id="related-folders" class="folder-picks" hidden></div>
       <div class="related-bar">
@@ -133,10 +133,11 @@
       <form id="related-steer" class="steer-row" hidden>
         <div class="hint">These keywords come from your task. Click one to boost it or click × to stop using it.</div>
         <input id="steer-input" type="search" spellcheck="false" placeholder='Word rules  word  +word  -word  "two words"  /text/' aria-label="Word rules for the results">
+        <div id="steer-error" class="steer-error" role="alert" hidden></div>
         <details id="related-llm" class="tune llm" hidden>
           <summary><span class="tune-title">LLM help for query synthesis</span></summary>
           <div class="llm-help" data-target="related">
-            <textarea id="related-llm-text" rows="3" spellcheck="true" placeholder="Type your query specifications in English" aria-label="How you want to steer the suggestions, in English"></textarea>
+            <textarea id="related-llm-text" rows="3" spellcheck="true" maxlength="600" placeholder="Type your query specifications in English" aria-label="How you want to steer the suggestions, in English"></textarea>
             <div class="llm-row">
               <button type="button" class="llm-generate" title="Ask the LLM for word rules that do what you described. Its answer replaces the word rules. Enter does the same, and Shift+Enter starts a new line.">Generate</button>
               <span class="llm-status status-line" aria-live="polite"></span>
@@ -185,7 +186,6 @@
             </ul>
           </div>
         </details>
-        <div id="steer-error" class="steer-error" hidden></div>
       </form>
       <div id="related-lanes" class="results"></div>
     </section>

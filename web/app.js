@@ -568,6 +568,7 @@ function findPanel(view, label) {
       }
     },
     onkeydown: (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") {
         e.preventDefault();
         (e.shiftKey ? findPrevious : findNext)(view);
@@ -767,6 +768,7 @@ const state = {
   indexUpdated: null,
   filesUpdated: null, // when the list of files last changed on the server
   pageVersion: null, // of the files this page loaded
+  serverSetup: null, // the folders, models and LLM help the server had when the page started
   paramSpecs: { search: [], related: [] }, // from /api/params
   params: loadParams(), // this browser's overrides: {search: {name: value}, related: {...}}
   meaningWeightBefore: null, // what the Meaning button restores
@@ -823,6 +825,7 @@ function startRename(name) {
       const from = document.activeElement;
       try {
         focus = await renameTask(name, newName);
+        if (focus !== newName) flash(nameChanged(focus));
       } catch (e) {
         fail(e);
       }
@@ -1162,6 +1165,9 @@ function showNoTask() {
   renderRelatedEmpty(NO_TASK_RELATED);
 }
 
+// The server takes out of a name what a file's name can't have, and cuts a very long one.
+const nameChanged = (name) => `Named “${name}”. A name can't have characters such as / : * ? # in it`;
+
 async function newTask() {
   const name = prompt("Name of the new task");
   if (!name || !name.trim()) return null;
@@ -1174,6 +1180,7 @@ async function newTask() {
   // task has no task to copy from, and takes over what is on show: the document and the search.
   await switchTask(task.name, state.task ? { skipped: [...state.skipped] } : null);
   saveTaskView();
+  if (task.name !== name.trim()) flash(nameChanged(task.name));
   return task.name;
 }
 
@@ -1749,6 +1756,7 @@ function renderHit(hit, { lane = null } = {}) {
   const key = passageKey(hit);
   const open = (event) => {
     if (event.target.closest("button, a")) return;
+    if (!getSelection().isCollapsed && event.currentTarget.contains(getSelection().anchorNode)) return; // text was selected, to copy it
     if (!lane) searchSettled();
     state.openedHit = key;
     for (const card of document.querySelectorAll(".hit")) card.classList.toggle("opened", card.dataset.key === key);
@@ -1768,8 +1776,15 @@ function renderHit(hit, { lane = null } = {}) {
     for (const card of document.querySelectorAll(".hit.opened")) card.classList.remove("opened");
     openFile(hit.path, null, { place: 0, showHidden: true }).catch(fail);
   };
+  let added = 0;
+  const add = () => {
+    if (performance.now() - added < 700) return; // the second click of a double click: once is what was meant
+    added = performance.now();
+    if (!lane) searchSettled();
+    addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail);
+  };
   const actions = h("span", { class: "hit-actions" },
-    h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => { if (!lane) searchSettled(); addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail); } }, icon("plus"), "Add"),
+    h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: add }, icon("plus"), "Add"),
     h("button", { class: "hit-menu-btn", title: "More actions", "aria-label": "More actions", "aria-haspopup": "menu", "aria-expanded": "false", onclick: (e) => openHitMenu(e.currentTarget, hit, lane) }, icon("menu")),
   );
   const why = lane ? describeWhy(hit.why) : describeSignals(hit.why);
@@ -2152,7 +2167,8 @@ async function generateQuery(box) {
   } catch (e) {
     stop();
     status.textContent = "";
-    showError(e.message);
+    const wait = e.status === 429 && e.retryAfter ? `. That is in about ${e.retryAfter < 90 ? `${Math.ceil(e.retryAfter)} seconds` : `${Math.ceil(e.retryAfter / 60)} minutes`}` : "";
+    showError(`${e.message}${wait}`);
   } finally {
     box.classList.remove("busy");
     box.removeAttribute("aria-busy");
@@ -2169,6 +2185,7 @@ const NO_TASK_RELATED = "Create a task to see related passages.";
 // number of them become a single refresh of the latest text.
 let relatedRunning = null;
 let relatedAgain = false;
+let relatedLoading = null; // the task whose suggestions are on their way
 let prefsTurn = 0; // counts the changes to what a task remembers: a refresh that one overtook is made again
 
 // What Related shows belongs to one task: its keywords, its word rules and its suggestions all act
@@ -2255,6 +2272,7 @@ async function fetchRelated() {
   }
   const name = state.task;
   const turn = prefsTurn;
+  relatedLoading = name;
   state.relatedStale = false;
   updateRefreshButton();
   $("#related-status").setAttribute("aria-busy", "true");
@@ -2275,6 +2293,7 @@ async function fetchRelated() {
     });
   } finally {
     stop();
+    relatedLoading = null;
   }
   if (name !== state.task) return;
   if (turn !== prefsTurn) { // a keyword, a mark or the word rules changed meanwhile: this answer is from before
@@ -2809,6 +2828,7 @@ function buildTuner(kind) {
     groups.get(spec.group).push(paramRow(kind, spec));
   }
   const rows = [...groups.values()].flat();
+  $(`#${kind}-tune`).hidden = false;
   $(`#${kind}-tune`).replaceChildren(
     sectionHead("Adjustments", "Change how passages are found and ranked.",
       h("button", {
@@ -2849,6 +2869,12 @@ function loadPresets() {
 }
 
 const savePresets = () => store.set("presets", JSON.stringify(state.presets));
+
+// Another tab of this browser may have saved or deleted presets since this one read them: a
+// change here is made to the list as it is now, and the menus follow what the other tabs do.
+function rereadPresets() {
+  state.presets = loadPresets();
+}
 const sortedList = (list) => [...new Set(list ?? [])].sort();
 
 function currentSettings(kind, prefs = state.prefsFor === state.task ? state.prefs : null) {
@@ -2915,12 +2941,14 @@ async function savePreset(kind) {
     alert(`“${name}” is the name of a built-in preset. Choose another name.`);
     return;
   }
-  const presets = state.presets[kind];
-  const existing = presets.find((p) => p.name === name);
-  if (existing && name !== state.activePreset[kind] && !confirm(`Replace the preset “${name}”?`)) return;
+  rereadPresets();
+  if (state.presets[kind].some((p) => p.name === name) && name !== state.activePreset[kind] && !confirm(`Replace the preset “${name}”?`)) return;
   // The task's own settings come from the server: the panel may not have shown them yet.
   const prefs = kind === "related" && state.task ? await api("GET", `api/tasks/${enc(state.task)}/prefs`) : undefined;
   const settings = currentSettings(kind, prefs);
+  rereadPresets(); // once more, after the wait
+  const presets = state.presets[kind];
+  const existing = presets.find((p) => p.name === name);
   if (existing) existing.settings = settings;
   else presets.push({ name, settings });
   presets.sort((a, b) => a.name.localeCompare(b.name));
@@ -2971,6 +2999,7 @@ async function applyPreset(kind, name) {
 
 function deletePreset(kind, name) {
   if (!confirm(`Delete the preset “${name}”? Your current settings stay as they are.`)) return;
+  rereadPresets();
   state.presets[kind] = state.presets[kind].filter((p) => p.name !== name);
   if (state.activePreset[kind] === name) state.activePreset[kind] = null;
   savePresets();
@@ -3026,7 +3055,7 @@ function showPanel(name) {
     state.fileToReveal = false;
     $("#file-list .file.current")?.scrollIntoView({ block: "center" });
   }
-  if (name === "related" && state.task && state.relatedFor !== state.task) refreshRelated().catch(fail);
+  if (name === "related" && state.task && state.relatedFor !== state.task && relatedLoading !== state.task) refreshRelated().catch(fail);
   if (name === "search") {
     if (state.searchPending) searchNow();
     else $("#panel-search").scrollTop = state.searchTop;
@@ -3311,11 +3340,14 @@ async function pollStatus() {
     if (state.indexUpdated !== null && s.updated !== state.indexUpdated) {
       if (filesUpdated !== state.filesUpdated) loadFiles().catch(fail);
       if (state.relatedFor) requestRelated();
+      // Results on show stay as they are, but "No passages found" from before the index was read doesn't.
+      if (state.panel === "search" && $("#search-input").value.trim() && !$("#search-results").children.length && !state.searchRunning) searchNow();
     }
     state.indexUpdated = s.updated;
     state.filesUpdated = filesUpdated;
     if (JSON.stringify(s.sources ?? []) !== JSON.stringify(state.sources)) renderFolderPicks(state.folders, s.sources ?? []);
-    const outdated = String(s.page_version) !== state.pageVersion;
+    // Also after a restart with other folders or models: the page's boxes and menus are from before it.
+    const outdated = String(s.page_version) !== state.pageVersion || (state.serverSetup !== null && serverSetup(s) !== state.serverSetup);
     $("#statusbar").classList.toggle("update-ready", outdated);
     $("#reload-page").hidden = !outdated;
   } catch {
@@ -3514,13 +3546,20 @@ function bind() {
     openFind(pane);
   }, true);
   document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+    if ((mac ? e.metaKey : e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
       e.preventDefault();
       showPanel("search");
       $("#panel-search").scrollTop = 0; // back to the box
     }
   });
   $("#reload-page").addEventListener("click", reloadPage);
+  window.addEventListener("storage", (e) => { // another tab of this browser saved or deleted a preset
+    if (e.key !== "isis.presets") return;
+    rereadPresets();
+    renderPresets("search");
+    renderPresets("related");
+  });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") return;
     saveTaskView();
@@ -3532,10 +3571,30 @@ function bind() {
   });
 }
 
+// What the page can't start without. If the server is busy, asks for a wait or can't be reached,
+// the page says so and asks again, where it used to stay empty until someone reloaded it.
+async function untilAnswered(ask) {
+  for (let wait = 1000; ; wait = Math.min(wait * 2, 15000)) {
+    try {
+      return await ask();
+    } catch (error) {
+      if (error.status && error.status < 500 && error.status !== 429) throw error;
+      console.error(error);
+      $("#index-status").textContent = "Waiting for the server…";
+      await new Promise((resolve) => setTimeout(resolve, error.retryAfter ? error.retryAfter * 1000 : wait));
+    }
+  }
+}
+
+// What a reload would change besides the page's files: the folders, the models and LLM help the
+// server was started with.
+const serverSetup = (s) => JSON.stringify([s.folders ?? [], (s.models ?? []).map((m) => m.id), Boolean(s.llm)]);
+
 async function init() {
   bind();
-  await loadParamSpecs();
-  const status = await api("GET", "api/status");
+  await untilAnswered(loadParamSpecs);
+  const status = await untilAnswered(() => api("GET", "api/status"));
+  state.serverSetup = serverSetup(status);
   // The version these files came with. Asking the server now would make an old page look current.
   state.pageVersion = $('meta[name="page-version"]')?.content || String(status.page_version);
   renderFolderPicks(status.folders, status.sources ?? []);
@@ -3556,7 +3615,7 @@ async function init() {
     $("#file-filter").value = resume.fileFilter ?? "";
   }
   showPanel(resume?.panel || store.get("panel") || "search");
-  await Promise.all([loadTasks(), loadFiles()]);
+  await untilAnswered(() => Promise.all([loadTasks(), loadFiles()]));
   shareOutHiddenDocs();
   shareOutSkipped();
   const last = resume?.task ?? store.get("task");
