@@ -220,7 +220,7 @@ def passage(hit: dict, highlight: tuple[str, str] | None) -> str:
     spans = []
     for line, start, end in hit.get("marks") or []:
         i = line - hit["start_line"]
-        if 0 <= i < len(lines) and 0 <= start < end <= len(lines[i]):  # not a heading above the passage
+        if 0 <= i < len(lines) and 0 <= start < end <= len(lines[i]):  # only what is inside the passage
             spans.append((starts[i] + start, starts[i] + end))
     if highlight:
         for start, end in sorted(spans, reverse=True):
