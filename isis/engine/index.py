@@ -472,6 +472,7 @@ class IndexStatus:
     to_embed: int = 0
     unembedded: int = 0  # passages without embeddings
     updated: float = 0.0  # time.time() when the snapshot last changed
+    files_updated: float = 0.0  # the same, for the list of files: a snapshot with more embeddings has the files it had
 
 
 class Engine:
@@ -977,11 +978,14 @@ class Engine:
     # ---- snapshot ----
 
     def _publish(self) -> None:
+        before = self.snapshot.file_rows.keys() if hasattr(self, "snapshot") else None  # None: the first one
         self.snapshot = self._compile()
         self.status.files = len(self.files)
         self.status.passages = len(self.snapshot)
         self.status.unembedded = len(self.snapshot) - int(self.snapshot.has_vector.sum())
         self.status.updated = time.time()
+        if self.snapshot.file_rows.keys() != before:
+            self.status.files_updated = self.status.updated
 
     def _ordered_paths(self, prefix: str | None = None) -> list[str]:
         """The files in the order of a snapshot's rows, and of a folder's cache: by folder, and the

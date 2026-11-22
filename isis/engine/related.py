@@ -134,13 +134,13 @@ class RelatedConfig:
         "Lower it for faster results but fewer passages found.",
     )
     z_strong: float = tunable(
-        3.25, label="Meaning score alone", group=FILTER, min=0.0, max=5.0, step=0.1,
+        3.25, label="Meaning score alone", group=FILTER, min=0.0, max=5.0, step=0.05,
         help="A passage with this meaning score or higher passes the filter, even if it isn't a top keyword result.\n"
         "Raise it for fewer results that are more clearly related.\n"
         "Lower it for more results, though some are less clearly related.",
     )
     z_weak: float = tunable(
-        1.75, label="Meaning score with keywords", group=FILTER, min=-1.0, max=4.0, step=0.1,
+        1.75, label="Meaning score with keywords", group=FILTER, min=-1.0, max=4.0, step=0.05,
         help="A top keyword result with this meaning score or higher passes the filter. "
         "\"Top keyword ranks\" sets which passages count as top keyword results.\n"
         "Raise it so keyword results must also be closer in meaning, which gives fewer results.\n"
@@ -191,7 +191,7 @@ class RelatedConfig:
         "Lower it to rank them lower. At 0, only their keyword rank counts.",
     )
     hidden_z: float = tunable(
-        2.5, label="Meaning score (*Same meaning, different words*)", group=LANES_GROUP, min=0.0, max=5.0, step=0.1,
+        2.5, label="Meaning score (*Same meaning, different words*)", group=LANES_GROUP, min=0.0, max=5.0, step=0.05,
         help="The meaning score a passage needs to join \"Same meaning, different words\".\n"
         "Raise it for fewer passages that are closer in meaning.\n"
         "Lower it to let more passages in.",

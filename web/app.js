@@ -108,6 +108,7 @@ async function api(method, url, body, { duringRename = false, ...options } = {})
     const error = new Error(errorText(data.detail) || `The server answered with an error (${status})`);
     error.status = res.status;
     error.data = data;
+    error.retryAfter = Number(res.headers.get("Retry-After")) || null; // seconds, when the server names a wait
     throw error;
   }
   return data;
@@ -136,9 +137,26 @@ function flash(message) {
   flashTimer = setTimeout(() => ($("#flash").textContent = ""), 2500);
 }
 
+// A message from the server starts in lower case: on its own it starts like a sentence.
+const sentence = (message) => message.charAt(0).toUpperCase() + message.slice(1);
+
 function fail(error) {
   console.error(error);
-  flash(error.message.charAt(0).toUpperCase() + error.message.slice(1));
+  flash(sentence(error.message));
+}
+
+// The server counts the characters of a line as Python does, one for each code point. JavaScript
+// counts two for those outside the Basic Multilingual Plane, such as emoji, so in a line that has
+// any, a place the server names is further along here.
+const PAIR = /[\uD800-\uDBFF][\uDC00-\uDFFF]/;
+function unitOffset(text, at) {
+  if (at <= 0 || !PAIR.test(text)) return at;
+  let units = 0;
+  for (let points = 0; points < at && units < text.length; points++) {
+    const pair = PAIR.test(text.slice(units, units + 2));
+    units += pair ? 2 : 1;
+  }
+  return units;
 }
 
 // ---------- editors ----------
@@ -714,6 +732,7 @@ const state = {
   folders: [],
   readerPath: null,
   readerSeq: 0, // the latest document asked for: a slower answer for an earlier one is dropped
+  readerAsOf: null, // the index as it was (indexUpdated) when the reader's document was read
   fileToReveal: false, // Files can't scroll while hidden, so this waits until it shows
   taskTurn: 0, // counts the switches between tasks: one that waited for a task's text gives way to a later one
   pendingView: null, // the task view on its way to the screen
@@ -734,6 +753,7 @@ const state = {
   avoidedKeys: new Set(), // "path:line" of the passages marked Less like this
   hiddenPassages: [], // passages left out of the active task's Search: [{path, start_line, end_line, text}]
   searchSeq: 0,
+  searchRetries: 0, // how often in a row a search was tried again after the server asked to wait
   searchAsTyped: null, // the query to search for without correcting its spelling
   searchTop: 0, // where the Search panel is scrolled to, for the active task
   searchPending: false, // the task's search results aren't back yet, and then go to searchTop
@@ -745,6 +765,7 @@ const state = {
   sideScroll: null, // where the Files or Related panel was before a reload, until its content is back
   taskPlaces: {}, // task name -> { top, cursor }
   indexUpdated: null,
+  filesUpdated: null, // when the list of files last changed on the server
   pageVersion: null, // of the files this page loaded
   paramSpecs: { search: [], related: [] }, // from /api/params
   params: loadParams(), // this browser's overrides: {search: {name: value}, related: {...}}
@@ -1001,6 +1022,7 @@ async function switchTask(name, view = loadTaskView(name)) {
   showConflict(doc);
   setSaveState(doc.conflictMtime || doc.dirty ? "unsaved" : "saved");
   renderTaskTabs();
+  if (state.relatedFor !== name) leaveRelated();
   state.relatedStale = false;
   updateRefreshButton();
   if (state.panel === "related") refreshRelated().catch(fail); // what is on show is another task's
@@ -1468,11 +1490,20 @@ function centerWhenTall(passage) {
 
 // `location`: the passage to highlight. It is scrolled to, unless `place` says where the document
 // goes instead: the top of a task's reader as that task left it.
-async function openFile(path, location = null, { place = null } = {}) {
+// `place`: where to scroll to, when not to the passage or to where the document was left.
+// `showHidden`: also clear a Files filter that leaves the document out, as a result does.
+async function openFile(path, location = null, { place = null, showHidden = place === null } = {}) {
   const seq = ++state.readerSeq;
-  if (path !== state.readerPath) {
-    const { content } = await api("GET", `api/file?path=${enc(path)}`);
+  // The document on show is read again once the index has changed since: its lines may have moved,
+  // and a result names its passage by them.
+  const again = path === state.readerPath && state.readerAsOf !== state.indexUpdated;
+  let content = null;
+  if (path !== state.readerPath || again) {
+    ({ content } = await api("GET", `api/file?path=${enc(path)}`));
     if (seq !== state.readerSeq) return;
+    state.readerAsOf = state.indexUpdated;
+  }
+  if (content !== null && (path !== state.readerPath || content !== reader.state.doc.toString())) {
     rememberReaderScroll();
     const finding = Boolean(reader.dom.querySelector(".find-panel"));
     reader.setState(readerState(content));
@@ -1489,7 +1520,7 @@ async function openFile(path, location = null, { place = null } = {}) {
     $("#reader-path").title = path;
     $("#reader-add").hidden = true;
   }
-  revealCurrentFile({ showHidden: place === null });
+  revealCurrentFile({ showHidden });
   state.readerLocation = location;
   const doc = reader.state.doc;
   if (!location) {
@@ -1497,7 +1528,7 @@ async function openFile(path, location = null, { place = null } = {}) {
     return;
   }
   const line = doc.line(Math.min(location.line + 1, doc.lines));
-  const from = line.from + Math.min(location.ch ?? 0, line.length);
+  const from = line.from + Math.min(unitOffset(line.text, location.ch ?? 0), line.length);
   const decos = [];
   let passage = EditorSelection.cursor(from);
   if (location.start !== undefined) {
@@ -1512,8 +1543,8 @@ async function openFile(path, location = null, { place = null } = {}) {
   for (const [n, s, e] of location.marks ?? []) {
     if (n >= doc.lines) continue;
     const l = doc.line(n + 1);
-    const a = l.from + Math.min(s, l.length);
-    const b = l.from + Math.min(e, l.length);
+    const a = l.from + Math.min(unitOffset(l.text, s), l.length);
+    const b = l.from + Math.min(unitOffset(l.text, e), l.length);
     if (b > a) decos.push(Decoration.mark({ class: "cm-hit-match" }).range(a, b));
   }
   if (place === null) centerWhenTall(passage);
@@ -1525,15 +1556,28 @@ async function openFile(path, location = null, { place = null } = {}) {
 
 // ---------- files panel ----------
 
-const MAX_FILES_SHOWN = 2000;
+const MAX_FILES_SHOWN = 2000; // of one folder: the rest are a filter away
 
 const withoutExtension = (name) => name.replace(/\.(md|markdown)$/i, "");
 
+// The paths, their lower-case forms and the whole tree, worked out once for each list of files:
+// opening a folder then costs what it shows, and a filter only looks through the paths.
+let fileIndex = { files: null, paths: [], lower: [], tree: fileTree([]) };
+
+function allFiles() {
+  if (fileIndex.files !== state.files) {
+    const paths = state.files.map((f) => f.path);
+    fileIndex = { files: state.files, paths, lower: paths.map((path) => path.toLowerCase()), tree: fileTree(paths) };
+  }
+  return fileIndex;
+}
+
 function renderFiles() {
   const filter = $("#file-filter").value.trim().toLowerCase();
-  const matches = state.files.map((f) => f.path).filter((path) => !filter || path.toLowerCase().includes(filter));
+  const all = allFiles();
+  const matches = filter ? all.paths.filter((_, i) => all.lower[i].includes(filter)) : all.paths;
   // While filtering, every folder that holds a match is open.
-  const { rows, more } = visibleRows(fileTree(matches), (folder) => Boolean(filter) || state.openFolders.has(folder), MAX_FILES_SHOWN);
+  const { rows } = visibleRows(filter ? fileTree(matches) : all.tree, (folder) => Boolean(filter) || state.openFolders.has(folder), MAX_FILES_SHOWN, state.readerPath);
   const indent = (depth, base) => `padding-left: ${base + depth * 14}px`;
   const list = $("#file-list");
   list.replaceChildren();
@@ -1548,6 +1592,9 @@ function renderFiles() {
           ),
         ),
       );
+    } else if (row.kind === "more") {
+      list.append(h("li", { class: "folder", style: indent(row.depth, 20) },
+        `…and ${row.count.toLocaleString()} more here. ${filter ? "Narrow your filter" : "Use the filter above"} to find them.`));
     } else {
       list.append(
         h("li", { class: `file${row.path === state.readerPath ? " current" : ""}`, "data-path": row.path, title: row.path, style: indent(row.depth, 20), onclick: () => openFile(row.path).catch(fail) },
@@ -1555,7 +1602,6 @@ function renderFiles() {
       );
     }
   }
-  if (more) list.append(h("li", { class: "folder" }, `…and ${more.toLocaleString()} more. Narrow your filter to see them.`));
   if (!matches.length) list.append(h("li", { class: "folder" }, state.files.length ? "No files match." : "No Markdown files found."));
 }
 
@@ -1639,7 +1685,8 @@ function renderSnippet(hit) {
     }
     const span = h("span", { class: line.in_passage ? "line" : "line ctx" });
     let pos = 0;
-    for (const [start, end] of line.marks) {
+    for (const mark of line.marks) {
+      const [start, end] = mark.map((at) => unitOffset(line.text, at));
       if (start > pos) span.append(line.text.slice(pos, start));
       span.append(h("mark", {}, line.text.slice(start, end)));
       pos = end;
@@ -1693,8 +1740,8 @@ function describeHover(why) {
 
 // The document's title and, when it says something more, the heading the passage is under.
 function hitTitle(hit, file) {
-  if (!hit.title) return hit.heading || file;
-  return hit.heading && hit.heading !== hit.title ? `${hit.title} · ${hit.heading}` : hit.title;
+  const title = hit.title || file; // a document with no title of its own goes by its file's name
+  return hit.heading && hit.heading !== title ? `${title} · ${hit.heading}` : title;
 }
 
 function renderHit(hit, { lane = null } = {}) {
@@ -1719,7 +1766,7 @@ function renderHit(hit, { lane = null } = {}) {
     if (!lane) searchSettled();
     state.openedHit = null;
     for (const card of document.querySelectorAll(".hit.opened")) card.classList.remove("opened");
-    openFile(hit.path, null, { place: 0 }).catch(fail);
+    openFile(hit.path, null, { place: 0, showHidden: true }).catch(fail);
   };
   const actions = h("span", { class: "hit-actions" },
     h("button", { class: "add", title: "Add this passage to your task, at your cursor.", onclick: () => { if (!lane) searchSettled(); addToTask(hit.text, lane && { lane, path: hit.path }).catch(fail); } }, icon("plus"), "Add"),
@@ -1862,6 +1909,7 @@ async function searchNow() {
     if (seq !== state.searchSeq) return;
     const hits = result.hits.filter((hit) => !hidden.has(passageKey(hit))).slice(0, SEARCH_LIMIT);
     const n = hits.length;
+    closeHitMenu(); // of a result that is about to go
     $("#search-results").replaceChildren(...hits.map((hit) => renderHit(hit)));
     const took = stop();
     const byMeaning = hits.some((hit) => "meaning_rank" in hit.why);
@@ -1880,17 +1928,32 @@ async function searchNow() {
     state.searchedOk = q;
     keepIfSearched();
     searchArrived();
+    state.searchRetries = 0;
   } catch (error) {
     if (seq !== state.searchSeq) return;
     stop();
     state.searchRunning = null;
-    if (error.status !== 400) fail(error);
-    $("#search-status").textContent = error.status === 400 ? `⚠ ${error.message}` : "";
+    if (error.status !== 400) console.error(error);
+    closeHitMenu();
     $("#search-results").replaceChildren();
     $("#search-results").classList.remove("stale");
+    // Busy, or too many requests: the server says how long to wait. A short wait is waited out here.
+    const wait = [429, 503].includes(error.status) && error.retryAfter && error.retryAfter <= MAX_SEARCH_WAIT ? error.retryAfter : null;
+    if (wait && state.searchRetries < MAX_SEARCH_RETRIES) {
+      state.searchRetries++;
+      const why = error.status === 503 ? "The server is busy" : "Too many requests from this address";
+      $("#search-status").textContent = `⚠ ${why}. Searching again in ${wait} s…`;
+      setTimeout(() => { if (seq === state.searchSeq) searchNow(); }, wait * 1000);
+      return;
+    }
+    state.searchRetries = 0;
+    $("#search-status").textContent = `⚠ ${sentence(error.message)}`;
     searchArrived();
   }
 }
+
+const MAX_SEARCH_WAIT = 10; // seconds
+const MAX_SEARCH_RETRIES = 3;
 
 const runSearch = debounce(searchNow, 200);
 
@@ -1920,9 +1983,14 @@ function searchSettled() {
 
 function keepIfSearched() {
   if (state.searchToKeep === null || state.searchToKeep !== state.searchedOk) return;
+  const picked = state.searchHistory[state.historyAt] ?? null;
   state.searchHistory = remember(state.searchHistory, state.searchToKeep);
   state.searchToKeep = null;
   saveHistory();
+  if (historyOpen()) { // the list is on show: Enter and Delete must act on the search that looks picked
+    state.historyAt = picked === null ? -1 : state.searchHistory.indexOf(picked);
+    renderHistory();
+  }
 }
 
 const historyOpen = () => !$("#search-history").hidden;
@@ -2037,7 +2105,7 @@ function bindLlmHelp() {
     const text = box.querySelector("textarea");
     box.querySelector(".llm-generate").addEventListener("click", () => generateQuery(box).catch(fail));
     text.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+      if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
       e.preventDefault(); // in Related it would also send the word rules
       generateQuery(box).catch(fail);
     });
@@ -2101,6 +2169,22 @@ const NO_TASK_RELATED = "Create a task to see related passages.";
 // number of them become a single refresh of the latest text.
 let relatedRunning = null;
 let relatedAgain = false;
+let prefsTurn = 0; // counts the changes to what a task remembers: a refresh that one overtook is made again
+
+// What Related shows belongs to one task: its keywords, its word rules and its suggestions all act
+// on the task that is open. When another task opens, they go at once, before its own arrive.
+function leaveRelated() {
+  closeHitMenu();
+  renderRelatedEmpty("");
+  $("#steer-error").hidden = true;
+  for (const box of document.querySelectorAll('.llm-help[data-target="related"]')) {
+    box.querySelector(".llm-error").hidden = true;
+    box.querySelector(".llm-status").textContent = "";
+  }
+  state.relatedFor = null;
+  state.prefs = null;
+  state.prefsFor = null;
+}
 
 // The suggestions change only when asked to: something may be read, and is not rewritten under the
 // reader. A change only marks them out of date and arms the Refresh button. They load by themselves
@@ -2142,12 +2226,16 @@ function refreshRelated() {
     try {
       do {
         relatedAgain = false;
-        await fetchRelated();
+        try {
+          await fetchRelated();
+        } catch (error) {
+          if (!relatedAgain) throw error; // otherwise a later request, such as another task's, takes its place
+        }
       } while (relatedAgain);
       restoreSideScroll("related");
     } catch (error) {
       state.relatedStale = true;
-      $("#related-status").textContent = `⚠ ${error.message}`;
+      $("#related-status").textContent = `⚠ ${sentence(error.message)}`;
       throw error;
     } finally {
       $("#related-status").removeAttribute("aria-busy");
@@ -2166,6 +2254,7 @@ async function fetchRelated() {
     return;
   }
   const name = state.task;
+  const turn = prefsTurn;
   state.relatedStale = false;
   updateRefreshButton();
   $("#related-status").setAttribute("aria-busy", "true");
@@ -2188,6 +2277,10 @@ async function fetchRelated() {
     stop();
   }
   if (name !== state.task) return;
+  if (turn !== prefsTurn) { // a keyword, a mark or the word rules changed meanwhile: this answer is from before
+    relatedAgain = true;
+    return;
+  }
 
   state.relatedFor = name;
   state.relatedTerms = result.terms;
@@ -2205,6 +2298,7 @@ async function fetchRelated() {
     ),
   );
   renderChips(state.relatedTerms);
+  closeHitMenu(); // of a suggestion that is about to go
   $("#related-lanes").replaceChildren(...lanes);
   showPrefs(result.prefs);
   const s = result.stats;
@@ -2262,6 +2356,7 @@ async function termAction(chip, term, action) {
 // meanwhile: its panel must not get this task's steer line and feedback. Null in that case.
 async function changePrefs(method, path, body) {
   const name = state.task;
+  prefsTurn++;
   const prefs = await api(method, `api/tasks/${enc(name)}${path}`, body);
   if (name !== state.task) return null;
   showPrefs(prefs);
@@ -2319,9 +2414,22 @@ async function saveSteer(event) {
 
 const passageFields = (hit, lane) => ({ lane, path: hit.path, text: hit.text, start_line: hit.start_line, end_line: hit.end_line });
 
+// Takes elements off the page at once, while `request` runs. If it fails they go back where they were.
+async function removing(elements, request) {
+  const places = elements.filter(Boolean).map((el) => ({ el, parent: el.parentNode, next: el.nextSibling }));
+  for (const { el } of places) el.remove();
+  try {
+    return await request();
+  } catch (error) {
+    for (const { el, parent, next } of places.reverse()) {
+      if (parent?.isConnected) parent.insertBefore(el, next?.parentNode === parent ? next : null);
+    }
+    throw error;
+  }
+}
+
 async function dismiss(hit, lane, element) {
-  element?.remove();
-  await changePrefs("POST", "/feedback", { action: "dismiss", ...passageFields(hit, lane) });
+  await removing([element], () => changePrefs("POST", "/feedback", { action: "dismiss", ...passageFields(hit, lane) }));
 }
 
 // More like this and Less like this show on the card at once, as its colour, and the server
@@ -2477,21 +2585,17 @@ function renderHiddenDocs() {
 }
 
 async function excludeDoc(path) {
-  for (const card of document.querySelectorAll("#related-lanes .hit")) {
-    if (card.dataset.path === path) card.remove();
-  }
-  await changePrefs("POST", "/feedback", { action: "exclude_doc", path });
+  const cards = [...document.querySelectorAll("#related-lanes .hit")].filter((card) => card.dataset.path === path);
+  await removing(cards, () => changePrefs("POST", "/feedback", { action: "exclude_doc", path }));
 }
 
 async function includeDoc(path, element) {
-  element?.remove();
-  await changePrefs("POST", "/feedback", { action: "include_doc", path });
+  await removing([element], () => changePrefs("POST", "/feedback", { action: "include_doc", path }));
 }
 
 // From the drawer: "restore" a dismissed passage, or "unlike" a liked one.
 async function undoFeedback(action, id, element) {
-  element?.remove();
-  await changePrefs("POST", "/feedback", { action, id });
+  await removing([element], () => changePrefs("POST", "/feedback", { action, id }));
 }
 
 // ---------- feedback drawer ----------
@@ -2639,7 +2743,7 @@ function saveParams() {
 function settingChanged(kind) {
   renderPresets(kind);
   if (kind === "search") runSearch();
-  else requestRelated();
+  else if (state.task) requestRelated(); // with no task there is nothing to refresh
 }
 
 function formatValue(spec, value) {
@@ -2699,16 +2803,12 @@ function toggleMeaning() {
 }
 
 function buildTuner(kind) {
-  const rows = [];
-  let group = null;
+  const groups = new Map(); // a group's sliders needn't follow each other in the server's list
   for (const spec of state.paramSpecs[kind]) {
-    if (spec.group !== group) {
-      group = spec.group;
-      rows.push(h("div", { class: "tune-group" }, group));
-      rows.push(h("p", { class: "feedback-note" }, spec.group_help));
-    }
-    rows.push(paramRow(kind, spec));
+    if (!groups.has(spec.group)) groups.set(spec.group, [h("div", { class: "tune-group" }, spec.group), h("p", { class: "feedback-note" }, spec.group_help)]);
+    groups.get(spec.group).push(paramRow(kind, spec));
   }
+  const rows = [...groups.values()].flat();
   $(`#${kind}-tune`).replaceChildren(
     sectionHead("Adjustments", "Change how passages are found and ranked.",
       h("button", {
@@ -2733,7 +2833,7 @@ function updateTuner(kind) {
   el.querySelector(".tune-count").dataset.changed = changed;
   el.querySelector(".tune-reset").disabled = !changed;
   for (const row of el.querySelectorAll(".tune-row")) row.classList.toggle("changed", row.dataset.name in state.params[kind]);
-  if (kind === "search") $("#search-meaning").setAttribute("aria-pressed", String(meaningWeight() > 0));
+  if (kind === "search") $("#search-meaning").setAttribute("aria-pressed", String(!$("#search-meaning").disabled && meaningWeight() > 0));
 }
 
 // ---------- presets ----------
@@ -3156,7 +3256,7 @@ function formatBytes(bytes) {
 
 function statusText(s) {
   if (s.state === "embedding") return `Preparing meaning search. ${s.embedded.toLocaleString()} of ${s.to_embed.toLocaleString()} passages done. You can still use Search.`;
-  if (s.state === "error") return `Can't read your documents. ${s.error}. See the server log. This is tried again when a file changes.`;
+  if (s.state === "error") return `Can't read your documents. ${sentence(s.error || "The index could not be updated").replace(/\.$/, "")}. This is tried again when a file changes.`;
   if (s.state !== "ready") return "Reading your documents…";
   if (s.models?.length) return ""; // the menu shows the model
   return s.model ?? "Keywords only";
@@ -3207,11 +3307,13 @@ async function pollStatus() {
     settled = s.state === "ready" || s.state === "error";
     renderIndexStatus(s);
     $("#statusbar").dataset.state = s.state;
+    const filesUpdated = s.files_updated ?? s.updated; // while passages are embedded the index changes and the files don't
     if (state.indexUpdated !== null && s.updated !== state.indexUpdated) {
-      loadFiles().catch(fail);
+      if (filesUpdated !== state.filesUpdated) loadFiles().catch(fail);
       if (state.relatedFor) requestRelated();
     }
     state.indexUpdated = s.updated;
+    state.filesUpdated = filesUpdated;
     if (JSON.stringify(s.sources ?? []) !== JSON.stringify(state.sources)) renderFolderPicks(state.folders, s.sources ?? []);
     const outdated = String(s.page_version) !== state.pageVersion;
     $("#statusbar").classList.toggle("update-ready", outdated);

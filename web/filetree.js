@@ -21,28 +21,27 @@ export function fileTree(paths) {
   return root;
 }
 
-// The rows to show, folders before files, with at most `limit` files; `more` counts the rest.
-export function visibleRows(tree, isOpen, limit = Infinity) {
+// The rows to show, folders before files, with at most `limit` files of each folder. After them
+// comes a row that counts the rest of that folder ("more"), so one large folder doesn't use up the
+// places of the folders and files below it. The file at `keep`, such as the one that is open, is
+// shown even when it is among the rest.
+export function visibleRows(tree, isOpen, limit = Infinity, keep = null) {
   const rows = [];
-  let shown = 0;
-  let more = 0;
   const visit = (node, depth) => {
     for (const folder of node.folders.values()) {
       const open = isOpen(folder.path);
       rows.push({ kind: "folder", depth, open, name: folder.name, path: folder.path, count: folder.count });
       if (open) visit(folder, depth + 1);
     }
-    for (const file of node.files) {
-      if (shown < limit) {
-        rows.push({ kind: "file", depth, name: file.name, path: file.path });
-        shown++;
-      } else {
-        more++;
-      }
-    }
+    let more = 0;
+    node.files.forEach((file, i) => {
+      if (i < limit || file.path === keep) rows.push({ kind: "file", depth, name: file.name, path: file.path });
+      else more++;
+    });
+    if (more) rows.push({ kind: "more", depth, count: more });
   };
   visit(tree, 0);
-  return { rows, more };
+  return { rows };
 }
 
 // The folders above a file, outermost first.

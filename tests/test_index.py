@@ -670,3 +670,19 @@ def test_a_change_in_one_folder_leaves_the_others_weights_alone(tmp_path):
     e.refresh()
     assert e._parts["b"][1] is kept and e.snapshot.bm25.parts[1][1] is kept  # not weighed again
     assert paths(e.search("storm")) == ["a/one.md"] and paths(e.search("heron")) == ["b/two.md"]
+
+
+def test_the_list_of_files_has_its_own_time_of_change(tmp_path):
+    """A snapshot published with more embeddings, or after an edit, has the same files: the page
+    needn't fetch the list again."""
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "Whale and ship.\n", "b.md": "Heron and stoat.\n"})
+    e = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    e.refresh()
+    listed = e.status.files_updated
+    assert 0 < listed <= e.status.updated  # published again once the passages were embedded: the same files
+    (corpus / "a.md").write_text("Whale, ship and squid.\n")
+    e.refresh()
+    assert e.status.updated > listed and e.status.files_updated == listed
+    (corpus / "c.md").write_text("A new file.\n")
+    e.refresh()
+    assert listed < e.status.files_updated <= e.status.updated

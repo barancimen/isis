@@ -21,10 +21,17 @@ test("every level can be open", () => {
     ["a", "  b", "    c", "      deep.md", "    two.md", "  one.md", "z", "  last.md", "top.md"]);
 });
 
-test("the file limit counts what it leaves out", () => {
-  const view = visibleRows(fileTree(PATHS), () => true, 2);
-  assert.equal(view.rows.filter((r) => r.kind === "file").length, 2);
-  assert.equal(view.more, 3);
+test("each folder shows its first files and counts the rest", () => {
+  const paths = ["big/1.md", "big/2.md", "big/3.md", "big/4.md", "small/a.md", "top.md"];
+  const view = visibleRows(fileTree(paths), () => true, 2);
+  const shown = view.rows.map((r) => (r.kind === "more" ? `${"  ".repeat(r.depth)}+${r.count}` : `${"  ".repeat(r.depth)}${r.name}`));
+  assert.deepEqual(shown, ["big", "  1.md", "  2.md", "  +2", "small", "  a.md", "top.md"]); // the folders below keep their files
+});
+
+test("the open file shows even beyond a folder's limit", () => {
+  const paths = ["big/1.md", "big/2.md", "big/3.md", "big/4.md"];
+  const view = visibleRows(fileTree(paths), () => true, 1, "big/3.md");
+  assert.deepEqual(view.rows.map((r) => r.name ?? `+${r.count}`), ["big", "1.md", "3.md", "+2"]);
 });
 
 test("the folders above a file", () => {
