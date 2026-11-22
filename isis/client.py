@@ -40,12 +40,18 @@ class Failure(Exception):
 
 def fetch(server: str, method: str, path: str, query: dict | None = None, body: dict | None = None) -> dict:
     """One request to the server's JSON API. Tests replace this function."""
+    if not server.lower().startswith(("http://", "https://")):
+        raise Failure(f"--server needs an address that starts with http:// or https://, such as {DEFAULT_SERVER}. It was given {server}")
     url = server.rstrip("/") + path + ("?" + urllib.parse.urlencode(query) if query else "")
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            return json.loads(response.read().decode("utf-8"))
+            answer = response.read()
+        try:
+            return json.loads(answer.decode("utf-8"))
+        except ValueError:  # a page, or anything else that isn't isis's JSON
+            raise Failure(f"what answers at {server} isn't an isis server. Pass its address with --server.") from None
     except urllib.error.HTTPError as e:
         try:
             detail = json.loads(e.read().decode("utf-8")).get("detail")

@@ -170,6 +170,33 @@ def test_no_server(capsys):
     assert code == 2 and "isis found no server" in err and "isis serve" in err
 
 
+def test_an_address_that_is_not_an_isis_server(capsys):
+    """Another program's page is not read as results, and an address needs its http://."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Page(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<!doctype html><title>Something else</title>")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        code, out, err = run(capsys, "search", "whale", "--server", f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert code == 2 and out == "" and "isn't an isis server" in err
+    for address in ("127.0.0.1:8000", "localhost", "ftp://example.org"):
+        code, out, err = run(capsys, "search", "whale", "--server", address)
+        assert code == 2 and out == "" and "starts with http://" in err and address in err
+
+
 def test_an_older_server_is_named_as_such(capsys, tmp_path):
     """A server from before `isis related` answers its endpoint with the page's files: 405."""
     import threading

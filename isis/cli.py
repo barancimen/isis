@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 EVERY_INTERFACE = ("0.0.0.0", "::", "")
+_noted: set[Path] = set()  # archives already said to have no manifest
 
 
 def folders_of(corpus: list[str], osiris: list[str] = ()) -> list[Path]:
@@ -30,7 +31,8 @@ def archives_of(osiris: list[str]) -> dict[Path, Path | None]:
         if not Path(d).is_dir():
             sys.exit(f"isis: not a folder: {d}")
         md, manifest = archive_folders(Path(d))
-        if manifest is None:
+        if manifest is None and md not in _noted:  # once, however often the folders are worked out
+            _noted.add(md)
             print(f"isis: no {MANIFEST} next to {md}: each document's kind comes from its source alone, "
                   "so a page osiris fetched again another way counts as a web page", flush=True)
         found[md] = manifest
@@ -111,7 +113,8 @@ def cmd_serve(args) -> None:
     if args.llm_key_file:
         os.environ["ISIS_LLM_KEY_FILE"] = str(Path(args.llm_key_file).resolve())
     package = Path(__file__).parent
-    url = f"http://{args.host}:{args.port}"
+    host = f"[{args.host}]" if ":" in args.host else args.host  # an IPv6 address goes in brackets
+    url = f"http://{host}:{args.port}{args.base_path and args.base_path + '/'}"
     if sys.stderr.isatty():
         os.environ["ISIS_URL"] = url  # the server shows it at the bottom, with its memory and disk use
     else:

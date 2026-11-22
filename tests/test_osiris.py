@@ -201,6 +201,15 @@ def test_the_command_line_takes_an_archive(tmp_path, monkeypatch):
     assert cli.archives_of([str(data / "md")]) == {data / "md": data / "manifest.sqlite"}
 
 
+def test_a_missing_manifest_is_said_once(tmp_path, capsys):
+    md = tmp_path / "data" / "md"
+    md.mkdir(parents=True)
+    (tmp_path / "notes").mkdir()
+    cli.folders_of([str(tmp_path / "notes")], [str(md)])  # as `isis serve` and `isis index` do,
+    assert cli.archives_of([str(md)]) == {md: None}  # each more than once
+    assert capsys.readouterr().out.count("no manifest.sqlite") == 1
+
+
 def test_an_archive_osiris_is_writing_to_is_saved_when_it_is_done(tmp_path):
     import fcntl
 
