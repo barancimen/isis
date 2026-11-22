@@ -364,8 +364,8 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
             raise HTTPException(400, "params must be a JSON object, skip a list of folders and hide a list of files")
         started = time.perf_counter()
         try:
-            corrected = None if as_typed else correct_query(engine.snapshot, q)
             with time_limit():
+                corrected = None if as_typed else correct_query(engine.snapshot, q)
                 hits = engine.search(corrected or q, limit=max(1, min(limit, 200)), mode=mode, config=configure(SearchConfig, overrides),
                                      skip_folders=[str(f) for f in skip_folders],
                                      skip_files=[str(f) for f in hidden_files], model=model or None)

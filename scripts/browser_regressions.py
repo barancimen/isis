@@ -361,8 +361,34 @@ def title_clears_filter(page, answers):
     expect(page.locator("#file-list .file.current")).to_be_visible()
 
 
+@check("the page starts when the server is busy at first, and whatever this browser has saved for it")
+def start_up(page, answers):
+    clear_tasks()
+    busy = {"left": 2}
+
+    def handle(route):
+        if busy["left"]:
+            busy["left"] -= 1
+            return route.fulfill(status=503, content_type="application/json", headers={"Retry-After": "1"},
+                                 body=json.dumps({"detail": "the server is busy. Try again in a moment"}))
+        return route.continue_()
+
+    page.route("**/api/status", handle)
+    page.goto(URL)
+    expect(page.locator("#index-status")).to_contain_text("Waiting for the server", timeout=5000)
+    page.wait_for_selector("#statusbar[data-state=ready]", timeout=30000)  # by itself, with no reload
+    expect(page.locator("#panel-search")).to_be_visible()
+    page.unroute("**/api/status")
+    page.evaluate("""() => { localStorage.setItem('isis.params', JSON.stringify({search: 'oops', related: [1, 2]}));
+                           localStorage.setItem('isis.panel', 'nowhere'); sessionStorage.clear(); }""")
+    page.reload()
+    page.wait_for_selector("#statusbar[data-state=ready]", timeout=30000)
+    expect(page.locator("#panel-search")).to_be_visible()
+    expect(page.locator("#search-tune .tune-count")).to_have_attribute("data-changed", "0")
+
+
 CHECKS = [first_task, rename_blur, save_retry, conflict, list_enter, error_text,
-          emoji_marks, search_errors, related_switch, hide_refused, sliders, title_clears_filter]
+          emoji_marks, search_errors, related_switch, hide_refused, sliders, title_clears_filter, start_up]
 
 
 def main():

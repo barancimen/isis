@@ -459,3 +459,14 @@ def test_related_for_any_text_leaves_nothing_on_disk(make_client):
     r = client.post("/api/related", json={"text": "The sperm whale dives for squid.", "steer": "+whale"})
     assert r.status_code == 200 and r.json()["lanes"]
     assert list(client.workspaces.folder.iterdir()) == []
+
+
+def test_a_query_too_large_to_run_is_refused_before_its_words_are_looked_up(make_client, monkeypatch):
+    from isis.engine import search
+
+    looked_up = []
+    monkeypatch.setattr(search, "near_words", lambda snapshot, word: looked_up.append(word) or [])
+    client = make_client()
+    answer = client.get("/api/search", params={"q": " ".join(f"whalx{n}" for n in range(150))})
+    assert answer.status_code == 400 and "too many parts" in answer.json()["detail"] and not looked_up
+    assert client.get("/api/search", params={"q": "whalx ship"}).status_code == 200 and looked_up

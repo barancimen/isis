@@ -100,7 +100,9 @@ async function api(method, url, body, { duringRename = false, ...options } = {})
     });
   } catch (cause) {
     if (cause?.name === "AbortError") throw cause;
-    throw new Error("The server can't be reached. Check that it's running and try again", { cause }); // not the browser's "Failed to fetch"
+    const error = new Error("The server can't be reached. Check that it's running and try again", { cause }); // not the browser's "Failed to fetch"
+    error.unreachable = true;
+    throw error;
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -1286,7 +1288,7 @@ function showConflict(doc) {
 // A save that failed because the server couldn't be reached, was busy or was restarting is tried
 // again by itself, after these waits (ms) and then at the last of them: the text is still only here.
 const RETRY_SAVE = [3000, 10000, 30000, 60000];
-const worthRetrying = (error) => !error.status || error.status >= 500 || error.status === 429;
+const worthRetrying = (error) => Boolean(error.unreachable) || error.status >= 500 || error.status === 429;
 
 function retrySave(doc) {
   clearTimeout(doc.retry);
@@ -2751,7 +2753,9 @@ async function forgetFeedback() {
 
 function loadParams() {
   const saved = store.json("params", {});
-  return { search: saved.search || {}, related: saved.related || {} };
+  // Whatever this browser holds under that name, the page starts: only a list of settings is taken.
+  const settings = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+  return { search: settings(saved?.search), related: settings(saved?.related) };
 }
 
 function saveParams() {
@@ -3578,7 +3582,7 @@ async function untilAnswered(ask) {
     try {
       return await ask();
     } catch (error) {
-      if (error.status && error.status < 500 && error.status !== 429) throw error;
+      if (!worthRetrying(error)) throw error; // a mistake of the page's or the request's own: waiting won't mend it
       console.error(error);
       $("#index-status").textContent = "Waiting for the server…";
       await new Promise((resolve) => setTimeout(resolve, error.retryAfter ? error.retryAfter * 1000 : wait));
@@ -3614,7 +3618,8 @@ async function init() {
     state.openFolders = new Set(resume.openFolders ?? []);
     $("#file-filter").value = resume.fileFilter ?? "";
   }
-  showPanel(resume?.panel || store.get("panel") || "search");
+  const panel = resume?.panel || store.get("panel");
+  showPanel(["files", "search", "related"].includes(panel) ? panel : "search");
   await untilAnswered(() => Promise.all([loadTasks(), loadFiles()]));
   shareOutHiddenDocs();
   shareOutSkipped();

@@ -42,6 +42,7 @@ from .text import term_spans, tokenize, tokenize_with_surface
 # the end, a /regex still being typed, or a plain word.
 TOKEN = re.compile(r"""([-+]?)((?i:doc:))?(?:"([^"]*)(?:"|$)|/((?:\\.|[^/\\])+)/(?=\s|$)|(/(?:\\.|[^/\\])*\\?)$|(\S+))""")
 DOC = "doc:"
+APOSTROPHE = re.compile(r"\\?['’ʼ]")  # typed, or the curly one of printed text (escaped or not)
 EDGES = re.compile(r"^[\W_]+|[\W_]+$")  # punctuation around a word, such as the comma after it
 WILDCARD = "*"  # in a word or phrase: any letters or digits, or none
 PREFER, REQUIRE, NEVER = "", "+", "-"
@@ -279,12 +280,19 @@ def compile_pattern(pattern: str, shown: str = "") -> re.Pattern | TimedPattern:
     return timed_pattern(pattern, smart, shown) if timed else compiled
 
 
+def as_written(text: str) -> str:
+    """`text` as a pattern that matches it as it is written, except that a typed apostrophe also
+    matches the curly one that books and web pages use, and the other way round."""
+    return APOSTROPHE.sub(lambda _: "['’ʼ]", re.escape(text))
+
+
 def phrase_pattern(phrase: str) -> re.Pattern | TimedPattern | TimedLiteral:
     words = phrase.split()
     if any(WILDCARD in w for w in words):  # "red umbre*la"
         return compile_pattern("(?i)" + r"\s+".join(map(_wildcard_regex, words)), f'"{phrase}"')
-    pattern = re.compile(r"\s+".join(map(re.escape, words)), re.IGNORECASE)
-    native.remember_phrase(pattern, words)  # the Rust extension, if built, counts it in every passage
+    pattern = re.compile(r"\s+".join(map(as_written, words)), re.IGNORECASE)
+    if not APOSTROPHE.search(phrase):  # the Rust extension, if built, counts it in every passage, letter for letter
+        native.remember_phrase(pattern, words)
     return literal(pattern, f'"{phrase}"')
 
 
@@ -329,7 +337,7 @@ class Clause:
         if self.kind == "wildcard":
             return wildcard_pattern(self.value)
         if self.kind == "word" and self.term() is None:
-            return literal(re.compile(rf"(?<!\w){re.escape(self.value)}(?!\w)", re.IGNORECASE), self.value)
+            return literal(re.compile(rf"(?<!\w){as_written(self.value)}(?!\w)", re.IGNORECASE), self.value)
         return None
 
 
@@ -635,6 +643,8 @@ def correct_query(snapshot: Snapshot, query: str) -> str | None:
     no passage contains is changed: + and - clauses, phrases and regexes mean what they say."""
     if not len(snapshot):
         return None
+    if _pattern_deadline.get() is not None and len(query.split()) > MAX_TIMED_CLAUSES:
+        return None  # under a time limit it is refused for its size: no word of it is looked up first
     df = snapshot.bm25.doc_freq
     parts, at = [], 0
     for m in TOKEN.finditer(query):

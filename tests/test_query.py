@@ -586,3 +586,15 @@ def test_results_with_the_same_score_come_in_the_same_order_however_many_are_ask
     assert all(top_rows(scores, k, positive=True).tolist() == whole[:k] for k in range(len(scores) + 1))
     assert [row for row, _ in best_first(scores, 2)] == whole
     assert list(best_first(np.zeros(4, np.float32), 2)) == []
+
+
+def test_an_apostrophe_matches_the_typed_and_the_printed_one(tmp_path):
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "The whale’s tail rose.\n\nThe whale's jaw fell.\n\nA whale swam.\n\nDon’t wait.\n"})
+    engine = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
+    engine.refresh()
+    texts = lambda q: sorted(h.text for h in engine.search(q))
+    both = ["The whale's jaw fell.", "The whale’s tail rose."]
+    assert texts("+whale's") == texts("+whale’s") == texts('"whale\'s"') == both  # and not every passage with "whale"
+    assert texts("whale -whale's") == ["A whale swam."]
+    assert texts("+don't") == ["Don’t wait."]
+    assert texts('"the whale\'s tail"') == ["The whale’s tail rose."]
