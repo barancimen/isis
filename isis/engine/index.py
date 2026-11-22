@@ -52,8 +52,8 @@ LEGACY_INDEX_VERSION = 2  # everything in index.json: still read, and saved the 
 UNKNOWN = "\x01"  # a site or source not known yet, in the lists a cache keeps
 FRONT_MATTER_CHARS = 65536  # enough to hold the frontmatter of any file
 CHUNKER_VERSION = 3  # raise it when files split differently: they are read again, and keep their embeddings
-TERMS_VERSION = 2  # raise it when text becomes terms differently: cached passages are split into terms again
-# (1: Snowball stems; 2: lowercase words)
+TERMS_VERSION = 3  # raise it when text becomes terms differently: cached passages are split into terms again
+# (1: Snowball stems; 2: lowercase words; 3: the text without its heading)
 MARKDOWN = (".md", ".markdown")
 NO_EMBED = ".no-embed"  # a file by this name: this folder and those below it are searched by keywords only
 EMBED_GROUP = 256  # passages per embedding call while indexing
@@ -203,8 +203,8 @@ class PassageRows(Sequence):
         for part in self.parts:
             yield from part
 
-    def search_texts(self, rows, chunk: int = 4096):
-        """The search_text of these passages, in order, without making the passages: read in
+    def texts(self, rows, chunk: int = 4096):
+        """The text of these passages, in order, without making the passages: read in
         batches from each TextStore, which a scan of the whole corpus for a phrase or regex needs."""
         rows = np.asarray(rows, np.int64)
         if not hasattr(self, "_parts_of"):
@@ -224,16 +224,13 @@ class PassageRows(Sequence):
                 at = np.flatnonzero(which == s)
                 if s < 0:  # a file read since the cache was saved: its passages are in a list
                     for j in at.tolist():
-                        out[j] = self.parts[part[j]][local[j]].search_text
+                        out[j] = self.parts[part[j]][local[j]].text
                     continue
                 store = self._parts_of[s]
                 index = self._lo_of[part[at]] + local[at]
-                texts, headings = store.texts, store.headings
-                for j, a, b, h in zip(at.tolist(), store.starts[index].tolist(), store.starts[index + 1].tolist(),
-                                      store.heading_ids[index].tolist()):
-                    text = texts[a:b].decode("utf-8", "surrogatepass")
-                    heading = headings[h]
-                    out[j] = f"{heading}\n{text}" if heading else text
+                texts = store.texts
+                for j, a, b in zip(at.tolist(), store.starts[index].tolist(), store.starts[index + 1].tolist()):
+                    out[j] = texts[a:b].decode("utf-8", "surrogatepass")
             yield from out
 
 
@@ -278,6 +275,8 @@ class Snapshot:
     _folder_rows: dict = field(default_factory=dict, repr=False)
     _source_rows: dict = field(default_factory=dict, repr=False)
     _document_rows: dict = field(default_factory=dict, repr=False)
+    _headings: dict = field(default_factory=dict, repr=False)
+    _heading_matches: dict = field(default_factory=dict, repr=False)
     near_words: dict = field(default_factory=dict, repr=False)  # for search.near_words
     excerpt_matches: dict = field(default_factory=dict, repr=False)  # for related.find_excerpts
     theme_scores: dict = field(default_factory=dict, repr=False)  # for related.theme_scores
@@ -314,8 +313,8 @@ class Snapshot:
 
             def texts():
                 if isinstance(passages, PassageRows):
-                    return passages.search_texts(todo)
-                return (passages[i].search_text for i in todo.tolist())
+                    return passages.texts(todo)
+                return (passages[i].text for i in todo.tolist())
 
             found = native.phrase_counts(pattern, texts())  # a phrase, with the Rust extension
             if found is None:
@@ -390,6 +389,52 @@ class Snapshot:
             return np.repeat(np.arange(len(sizes), dtype=np.int32), sizes)
 
         return self.cached(self._document_rows, "rows", 1, documents)
+
+    def heading_rows(self) -> tuple[np.ndarray, list[str]]:
+        """The heading each passage is under, as its place in a list of the snapshot's headings.
+        Only doc: clauses look at headings: a passage is matched by its text alone."""
+
+        def make() -> tuple[np.ndarray, list[str]]:
+            ids: dict[str, int] = {"": 0}
+            parts = self.passages.parts if isinstance(self.passages, PassageRows) else [self.passages]
+            stores: dict[int, np.ndarray] = {}  # id of a TextStore -> its heading ids in the list
+            out = []
+            for part in parts:
+                if isinstance(part, StoredPassages):
+                    store = part.store
+                    if id(store) not in stores:
+                        stores[id(store)] = np.array([ids.setdefault(h, len(ids)) for h in store.headings], np.int32)
+                    out.append(stores[id(store)][store.heading_ids[part.lo:part.hi]])
+                else:
+                    out.append(np.fromiter((ids.setdefault(p.heading, len(ids)) for p in part), np.int32, len(part)))
+            return (np.concatenate(out) if out else np.zeros(0, np.int32)), list(ids)
+
+        return self.cached(self._headings, "rows", 2, make)
+
+    def heading_terms(self) -> dict[str, np.ndarray]:
+        """Which headings (their places in heading_rows' list) hold each term."""
+
+        def make() -> dict[str, np.ndarray]:
+            found: dict[str, list[int]] = {}
+            for i, heading in enumerate(self.heading_rows()[1]):
+                for term in {t for t, _ in tokenize_with_surface(heading)}:
+                    found.setdefault(term, []).append(i)
+            return {t: np.array(v, np.int64) for t, v in found.items()}
+
+        return self.cached(self._headings, "terms", 2, make)
+
+    def heading_matches(self, pattern: re.Pattern, ids: np.ndarray) -> np.ndarray:
+        """Whether `pattern` matches in each heading (by place in heading_rows' list), worked out
+        for `ids` and kept, like pattern_counts."""
+        headings = self.heading_rows()[1]
+        n = len(headings)
+        found, done = self.cached(self._heading_matches, (pattern.pattern, pattern.flags), 32,
+                                  lambda: (np.zeros(n, bool), np.zeros(n, bool)))
+        todo = ids[~done[ids]]
+        if len(todo):
+            found[todo] = [any(m.end() > m.start() for m in pattern.finditer(headings[i])) for i in todo.tolist()]
+            done[todo] = True
+        return found
 
     def outside_folders(self, skip) -> np.ndarray:
         """Which passages are not in these corpus folders, nor of these sources of an osiris
@@ -714,8 +759,9 @@ class Engine:
                           source=document_source(head))
 
     def _terms_of(self, passages: list[Passage]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The BM25 rows (CSR pieces) of these passages. Their words join the word list."""
-        pairs = [tokenize_with_surface(p.heading) + tokenize_with_surface(p.text) for p in passages]
+        """The BM25 rows (CSR pieces) of these passages, from their text without their headings.
+        Their words join the word list."""
+        pairs = [tokenize_with_surface(p.text) for p in passages]
         rows = term_counts([[t for t, _ in ps] for ps in pairs], self.vocab)
         for term, word in {pair for ps in pairs for pair in ps}:
             self.words.add(word, self.vocab.ids[term])
@@ -1461,7 +1507,6 @@ class Engine:
         found: set[str] = set()
         for record in files.values():
             for p in record.passages:
-                found.update(WORD.findall(p.heading))
                 found.update(WORD.findall(p.text))
         words = sorted({w.lower() for w in found} - STOPWORDS)
         words = [w for w in words if len(w) > 1]

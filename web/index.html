@@ -57,7 +57,7 @@
         <summary><span class="tune-title">How to search</span></summary>
         <div id="search-guide" class="help-body">
           <h4>The basics</h4>
-          <p>Search looks through passages, the short sections of up to about 180 words that your documents are cut into. A long section is cut into passages that overlap by about 20 words. Results update as you type.</p>
+          <p>Search looks through passages, the short sections of up to about 180 words that your documents are cut into. A long section is cut into passages that overlap by about 20 words. A passage's heading isn't part of it, so only <code>doc:</code> rules look at headings. Results update as you type.</p>
           <p>Passages with more of your words rank higher. A word counts for more when it's rare in the folder the passage is in. A match counts for less in a long passage. Each folder isis was started with is weighed on its own, so a large archive doesn't change how the words of your notes count.</p>
           <ul>
             <li>Words match whole and in any case. Endings aren't removed, so <code>whale</code> doesn't find "whales", but <code>whale*</code> finds both.</li>
@@ -76,7 +76,7 @@
           <h4>Regular expressions</h4>
           <p><code>/text/</code> is a regular expression in Python's syntax. It ignores case unless it has a capital letter in it.</p>
           <ul>
-            <li>It searches each passage's text, with the passage's heading as the first line.</li>
+            <li>It searches each passage's text, without its heading.</li>
             <li><code>.</code> doesn't match a line break. <code>^</code> and <code>$</code> mark the start and end of the whole passage.</li>
             <li><code>\b</code> marks the edge of a word and <code>\w</code> matches one letter, digit or underscore. So <code>/\bhostage\w*/</code> finds the words that start with "hostage".</li>
             <li>Spaces are allowed inside, as in <code>/red door/</code>. Write a slash inside it as <code>\/</code>.</li>
@@ -97,7 +97,7 @@
           <ul>
             <li><code>+word</code> keeps only the passages that contain the word and <code>-word</code> removes them. Both work with phrases, wildcards and regular expressions, as in <code>-"red door"</code> or <code>+/\d{4}/</code>. Words after <code>+</code> and <code>-</code> match exactly, without misspellings.</li>
             <li><code>site:github.com</code> keeps only documents whose <code>url:</code> line at the top is on that website or one of its subdomains. Several of them mean any of those sites. <code>-site:github.com</code> removes the site.</li>
-            <li><code>doc:word</code> keeps the passages of documents that contain the word in any passage. <code>-doc:word</code> removes every passage of those documents. It takes phrases, wildcards and regular expressions too, so <code>homes -doc:house -doc:/decor\w*/</code> finds homes only in documents that never mention a house or decoration. <code>doc:word</code> means the same as <code>+doc:word</code>.</li>
+            <li><code>doc:word</code> keeps the passages of documents that contain the word in any passage or heading. <code>-doc:word</code> removes every passage of those documents. It takes phrases, wildcards and regular expressions too, so <code>homes -doc:house -doc:/decor\w*/</code> finds homes only in documents that never mention a house or decoration. <code>doc:word</code> means the same as <code>+doc:word</code>.</li>
           </ul>
           <p>These rules apply before anything is ranked, so meaning never brings back a passage they rule out. <code>site:</code> and <code>doc:</code> rules don't change the order of results. On their own they list every passage they allow. <code>-</code> rules on their own find nothing.</p>
           <h4>Good to know</h4>

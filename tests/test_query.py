@@ -125,10 +125,23 @@ def test_regex_must_match_and_ranks_with_the_words(engine):
     assert marked == ["white whale"]  # the phrase and its words make one mark
 
 
-def test_phrases_and_regexes_see_headings_like_words_do(engine):
-    assert paths(engine.search("/^Whales/")) == ["whales.md", "whales.md"]  # the heading starts each passage
-    assert paths(engine.search('+"The Pequod" +ahab')) == ["ships/pequod.md"]  # its body never names the ship
-    assert engine.search("ambergris -/^Whales/") == []
+def test_a_passage_is_matched_by_its_text_without_its_heading(engine):
+    assert engine.search("/^Whales/") == []  # only the heading starts with it
+    assert engine.search('+"The Pequod" +ahab') == []  # the passage about Ahab never names the ship
+    assert [h.text for h in engine.search("+whales")] == ["Ambergris is found in whales."]
+    assert "whales.md" in paths(engine.search("ambergris -/^Whales/"))
+
+
+def test_doc_rules_see_the_headings(tmp_path):
+    corpus = write_corpus(tmp_path / "corpus", {"a.md": "# Harpoons\n\nThe ship sailed.\n", "b.md": "# Sails\n\nThe ship sailed.\n"})
+    engine = Engine(corpus, embedder=HashEmbedder(), index_dir=tmp_path / "index")
+    engine.refresh()
+    assert engine.search("+harpoons") == []
+    assert paths(engine.search("ship doc:harpoons")) == ["a.md"]
+    assert paths(engine.search("ship -doc:harpoons")) == ["b.md"]
+    assert paths(engine.search("ship doc:/^Harp/")) == ["a.md"]
+    assert paths(engine.search('ship -doc:"harpoons"')) == ["b.md"]
+
 
 def test_exclusions_drop_passages_in_both_modes(engine):
     for mode in ("lexical", "hybrid"):
@@ -154,12 +167,6 @@ def test_steering_sorts_clauses_by_use():
     assert steer.filters.required_terms == {"harpoon"} and [p.pattern for p in steer.filters.required] == ["beak"]
     assert steer.filters.excluded_terms == {"squid"} and len(steer.filters.excluded) == 2  # "of" is a stopword
     assert steer.text == "Whales harpoon white whale"
-
-
-def test_a_match_in_the_heading_is_shown_and_opened_there(engine):
-    (hit,) = [h for h in engine.search('"The Pequod"') if "Ahab" in h.text]  # its body never names the ship
-    assert hit.match[0] == 0 and hit.focus_line == 0  # the heading line of ships/pequod.md
-    assert hit.snippet[0].text == "# The Pequod" and hit.snippet[0].marks
 
 
 def test_hits_list_every_highlight_in_the_passage(engine):

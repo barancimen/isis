@@ -85,9 +85,9 @@ def test_limit_files_and_json(app, capsys):
 
 
 def test_the_query_goes_in_quotes(app, capsys, tmp_path):
-    _, out, _ = run(capsys, "search", "pequod", "--keywords")
+    _, out, _ = run(capsys, "search", "pequod ahab", "--keywords")
     assert "[ships/pequod.md:3]" in out and "[ships/pequod.md:5]" in out  # 3 is "The Pequod was a whaling ship."
-    _, out, _ = run(capsys, "search", "pequod -ship", "--keywords")
+    _, out, _ = run(capsys, "search", "pequod ahab -ship", "--keywords")
     assert "[ships/pequod.md:3]" not in out and "[ships/pequod.md:5]" in out
     for argv in (("whale", "-ship"), ("whale", "-open"), ("-ship",)):
         code, out, err = run(capsys, "search", *argv)

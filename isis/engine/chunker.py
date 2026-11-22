@@ -40,11 +40,6 @@ class Passage:
         """What the embedding model sees: the passage's text alone, without its heading."""
         return self.text
 
-    @property
-    def search_text(self) -> str:
-        """What phrases and regexes are matched in: the heading too, as words are."""
-        return f"{self.heading}\n{self.text}" if self.heading else self.text
-
 
 def split_lines(content: str) -> list[str]:
     """Split lines the way CodeMirror does, at \\r\\n, \\r and \\n only, so line numbers agree with the

@@ -4,6 +4,7 @@ import random
 import numpy as np
 import pytest
 
+from conftest import write_corpus
 import isis.engine.index as I
 import isis.engine.related as R
 from isis.engine.index import Engine
@@ -451,3 +452,16 @@ def test_suggestions_in_some_folders_only_look_at_them(tmp_path, monkeypatch, sa
     e.snapshot.theme_scores.clear()
     assert scoped and all(path.startswith("a/") for _, path, _, _ in scoped)
     assert shown(e.related(task, prefs=prefs, config=config, skip_folders=["b"])) == scoped
+
+
+def test_word_rules_match_passages_without_their_headings_and_documents_with_them(tmp_path):
+    engine = Engine(write_corpus(tmp_path / "corpus"), embedder=HashEmbedder(), index_dir=tmp_path / "index", target_words=0)
+    engine.refresh()
+    task = "The whale and the squid in the deep sea, and ambergris.\n\nAhab hunted the whale from his ship.\n"
+    found = lambda steer: sorted({h.path for l in engine.related(task, prefs=TaskPrefs(steer=steer),
+                                                                 config=RelatedConfig(z_strong=1.0, z_weak=-1.0)).lanes
+                                  for h in l.items})
+    assert found("") == ["finches.md", "ships/pequod.md", "whales.md"]
+    assert found("+/^Whales/") == []  # only the heading starts with it
+    assert found("doc:/^Whales/") == ["whales.md"]
+    assert found("-doc:/^Whales/") == ["finches.md", "ships/pequod.md"]

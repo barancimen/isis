@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from conftest import legacy_cache, paths, write_corpus
-from isis.engine.index import Engine, corpus_exclude
+from isis.engine.index import TERMS_VERSION, Engine, corpus_exclude
 from isis.engine.search import SearchConfig
 from isis.engine.semantic import HashEmbedder
 
@@ -486,7 +486,7 @@ def test_a_cache_of_stemmed_terms_is_split_into_words_again_without_reading_or_e
     assert paths(e.search("whaling")) == ["ships/pequod.md"] and not e.search("whal ", config=SearchConfig(typo_weight=0))  # no old stem
     assert "whaling" in e.snapshot.words.words
     assert e.refresh()["embedded"] == 0  # and saves the new terms
-    assert json.loads((index / "index.json").read_text())["terms"] == 2
+    assert json.loads((index / "index.json").read_text())["terms"] == TERMS_VERSION
 
 
 def test_a_replaced_snapshot_is_freed_at_once(tmp_path):
@@ -538,8 +538,8 @@ def test_the_cache_keeps_passages_in_a_text_file_read_when_needed(tmp_path, monk
     (corpus / "b" / "c.md").write_text("Pikeword moved.\n\nTroutword is new.\n")
     again.refresh()  # saves loaded and freshly read files together
     rows = again.snapshot.passages
-    assert list(rows.search_texts(range(len(rows)))) == [p.search_text for p in rows]
-    assert list(rows.search_texts([2, 0], chunk=1)) == [rows[2].search_text, rows[0].search_text]
+    assert list(rows.texts(range(len(rows)))) == [p.text for p in rows]
+    assert list(rows.texts([2, 0], chunk=1)) == [rows[2].text, rows[0].text]
     assert len(list(index.glob("cache.*"))) == 1  # the old one is gone
     third = Engine(corpus, embedder=HashEmbedder(), index_dir=index)
     assert list(third.snapshot.passages) == list(again.snapshot.passages)

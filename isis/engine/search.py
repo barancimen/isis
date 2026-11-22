@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 
 from . import native
-from .chunker import HEADING, document_title, web_host
+from .chunker import document_title, web_host
 from .index import Snapshot
 from .lexical import B, K1
 from .params import Group, tunable
@@ -362,26 +362,33 @@ class Filters:
         return ok
 
     def _documents_allowed(self, snapshot: Snapshot, rows: np.ndarray) -> np.ndarray:
-        """Which of `rows` pass the doc: clauses. A phrase or regex is matched in every passage of
-        their documents, and the counts are cached per snapshot like those of the other patterns."""
+        """Which of `rows` pass the doc: clauses. A document is its passages and their headings. A
+        phrase or regex is matched in every passage and heading of their documents, and the counts
+        are cached per snapshot like those of the other patterns."""
         document_of = snapshot.document_of_rows()
+        heading_of, _ = snapshot.heading_rows()
         n_docs = len(snapshot.file_rows)
         documents = document_of[rows]
         if self.doc_required or self.doc_excluded:
             touched = np.zeros(n_docs, bool)
             touched[documents] = True
             scan = np.flatnonzero(touched[document_of])  # every passage of those documents
+            scan_headings = np.unique(heading_of[scan])
 
         def with_term(term: str) -> np.ndarray:
             has = np.zeros(n_docs, bool)
             if (tid := snapshot.term_id(term)) is not None:
                 has[document_of[snapshot.bm25.rows_with(tid)]] = True
+            if (ids := snapshot.heading_terms().get(term)) is not None:
+                has[document_of[np.isin(heading_of, ids)]] = True
             return has
 
         def with_pattern(p: re.Pattern) -> np.ndarray:
             has = np.zeros(n_docs, bool)
             counts = snapshot.pattern_counts(p, scan)
             has[document_of[scan[counts[scan] > 0]]] = True
+            in_heading = snapshot.heading_matches(p, scan_headings)
+            has[document_of[scan[in_heading[heading_of[scan]]]]] = True
             return has
 
         ok = np.ones(n_docs, bool)
@@ -746,15 +753,6 @@ def _spans(text: str, terms: set[str], patterns: list[re.Pattern], words: list[t
     return merged
 
 
-def heading_line(lines: list[str], start: int, heading: str) -> int | None:
-    """The line of the heading a passage sits under: the nearest heading above it."""
-    for n in range(min(start, len(lines)) - 1, -1, -1):
-        m = HEADING.match(lines[n])
-        if m:
-            return n if m.group(1) == heading else None
-    return None
-
-
 def make_hit(
     snapshot: Snapshot,
     row: int,
@@ -785,23 +783,13 @@ def make_hit(
         return (n, spans[0][0], spans[0][1] - spans[0][0]) if spans else None
 
     match = next((m for n in range(start, end + 1) if (m := first_match_on(n))), None)
-    above = None  # a heading line that holds the only match (phrases and regexes see headings)
-    if match is None and p.heading:
-        n = heading_line(lines, start, p.heading)
-        if n is not None and (match := first_match_on(n)):
-            above = n
 
     # The whole passage (what + adds to the task, and what the reader highlights), with a few
     # dimmed lines of context around it.
     first = max(0, start - context_lines)
-    snippet = []
-    if above is not None and above < first:  # show the heading, then the passage
-        snippet += [SnippetLine(above, lines[above], False, spans_on(above)),
-                    SnippetLine(above, "", False, [])]
-    for n in range(first, min(last_line, end + context_lines) + 1):
-        inside = start <= n <= end
-        snippet.append(SnippetLine(n, lines[n], inside, spans_on(n) if inside or n == above else []))
+    snippet = [SnippetLine(n, lines[n], start <= n <= end, spans_on(n) if start <= n <= end else [])
+               for n in range(first, min(last_line, end + context_lines) + 1)]
     focus = match[0] if match else start
-    marks = [(n, s, e) for n in ([above] if above is not None else []) + list(range(start, end + 1)) for s, e in spans_on(n)]
+    marks = [(n, s, e) for n in range(start, end + 1) for s, e in spans_on(n)]
 
     return Hit(p.path, p.heading, p.start_line, p.end_line, score, focus, match, p.text, snippet, why, marks, title=document_title(lines))

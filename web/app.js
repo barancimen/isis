@@ -1523,12 +1523,12 @@ const passageKey = (passage) => `${passage.path}:${passage.start_line}`;
 const CONTEXT_CHARS = 90;
 
 // What is left of the lines on one side of a passage, nearest first. `cut` keeps the part of a line
-// nearest the passage. A line with a highlight, such as a heading that holds the match, stays whole.
+// nearest the passage.
 function trimContext(lines, cut) {
   let room = CONTEXT_CHARS;
   const kept = [];
   for (const line of lines) {
-    if (line.marks.length || !line.text.trim()) {
+    if (!line.text.trim()) {
       kept.push(line);
     } else if (room > 0) {
       const fits = line.text.length <= room;
