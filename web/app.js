@@ -179,7 +179,7 @@ const markdownStyle = HighlightStyle.define([
 const theme = EditorView.theme({
   "&": { height: "100%", fontSize: "16px", backgroundColor: "var(--bg)", color: "var(--fg)" },
   "&.cm-focused": { outline: "none" },
-  ".cm-scroller": { fontFamily: "var(--font)", lineHeight: "1.65", overflowY: "scroll" },
+  ".cm-scroller": { fontFamily: "var(--font)", lineHeight: "var(--line-text)", overflowY: "scroll" }, // set in style.css
   ".cm-content": { padding: "18px 0 50vh", maxWidth: "44em", caretColor: "var(--fg)" },
   ".cm-line": { padding: "0 22px", textAlign: "justify" },
   ".cm-line.cm-not-prose, .cm-line.cm-env-meta": { textAlign: "left" },
@@ -194,9 +194,9 @@ const theme = EditorView.theme({
   // The selection is drawn under the lines, so this background would hide it. Here the browser's own
   // highlight shows instead, which the editor otherwise turns off.
   ".cm-line.cm-env ::selection, .cm-line.cm-env::selection": { backgroundColor: "var(--selection) !important" },
-  ".cm-env-meta": { fontSize: "0.8em", lineHeight: "1.55", color: "var(--muted)" },
+  ".cm-env-meta": { fontSize: "0.8em", lineHeight: "var(--line)", color: "var(--muted)" },
   ".cm-env-key": { fontWeight: "600" },
-  ".cm-env-edge": { fontSize: "6px", lineHeight: "16px", userSelect: "none" },
+  ".cm-env-edge": { fontSize: "6px", lineHeight: "12px", userSelect: "none" },
   ".cm-env-edge, .cm-env-edge span, .cm-rule, .cm-rule span": { color: "transparent !important" },
   ".cm-rule": {
     backgroundImage: "linear-gradient(var(--border), var(--border))",
