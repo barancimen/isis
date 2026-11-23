@@ -202,10 +202,13 @@ class FeedbackRequest(Body):
 
 def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: bool = True, watch: bool = True,
                allowed_hosts: list[str] | None = None, build_native: bool = False,
-               llm: QuerySynth | None = None) -> FastAPI:
+               llm: QuerySynth | None = None, other_models: list[str] = ()) -> FastAPI:
     """`allowed_hosts`: the Host headers the API answers (None: any). A page on another site can
     point its own domain at 127.0.0.1 (DNS rebinding); checking the Host header stops it from
     reading the corpus or overwriting tasks through the browser.
+
+    `other_models`: the models on the corpus's list that the engine wasn't given, by id. The page
+    shows them greyed out in its menu of models.
 
     `tasks` as Workspaces serves the public: each visitor gets private tasks, and requests are
     limited (see public.py)."""
@@ -326,6 +329,7 @@ def create_app(engine: Engine, tasks: TaskStore | Workspaces, *, background: boo
                  "unembedded": int((~engine.view(e).has_vector).sum()), "index_bytes": engine.index_bytes(e)}
                 for e in engine.embedders
             ],
+            "other_models": list(other_models),  # on the corpus's list, and not loaded
             "page_version": page_version.current(),
             "llm": bool(llm and llm.available),  # LLM help for writing queries
         }
@@ -522,7 +526,9 @@ def app_from_env() -> FastAPI:
     """The app `isis serve` runs, configured through ISIS_CORPUS (the folders, as a JSON list, or
     separated like PATH), ISIS_OSIRIS (those of the folders that are osiris archives, as a JSON
     object of folder to manifest, or each as folder and manifest separated by "|"; the manifest
-    is empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
+    is empty if there is none), ISIS_TASKS, ISIS_MODELS (comma-separated, the default first; empty: keywords only),
+    ISIS_OTHER_MODELS (comma-separated: the corpus's models that aren't loaded, which the page shows
+    greyed out), ISIS_HOSTS (comma-separated Host names to answer, or "*"; default:
     this machine only), ISIS_PUBLIC ("1": serve the public, see public.py), ISIS_BASE_PATH (with
     ISIS_PUBLIC: where the site lives on its domain, such as /isis) and ISIS_BUILD_NATIVE ("1": build
     the Rust extension when it is missing or outdated, see native.start_build), ISIS_LLM_KEY_FILE
@@ -548,5 +554,6 @@ def app_from_env() -> FastAPI:
     store = (Workspaces(tasks_dir, base_path=os.environ.get("ISIS_BASE_PATH", ""))
              if os.environ.get("ISIS_PUBLIC") == "1" else TaskStore(tasks_dir))
     key = load_key(os.environ.get("ISIS_LLM_KEY_FILE") or None)
+    others = [m for m in os.environ.get("ISIS_OTHER_MODELS", "").split(",") if m and m not in models]
     return create_app(engine, store, allowed_hosts=hosts, build_native=os.environ.get("ISIS_BUILD_NATIVE") == "1",
-                      llm=QuerySynth(key) if key else None)
+                      llm=QuerySynth(key) if key else None, other_models=others)

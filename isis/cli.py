@@ -49,25 +49,32 @@ def cmd_index(args) -> None:
 
     folders = folders_of(args.corpus, args.osiris)
     tasks_dir = Path(args.tasks).resolve() if args.tasks else folders[0] / "_tasks"
-    embedders = [] if args.no_model else [Embedder(m) for m in models(args, folders)]
+    embedders = [Embedder(m) for m in models(args, folders)[0]]
     engine = Engine(folders, embedder=embedders, exclude=corpus_exclude(folders, tasks_dir), osiris=archives_of(args.osiris))
     engine.defer_archives = False  # a single run: save everything, whatever osiris is doing
     engine.refresh()  # it reports its progress
 
 
-def models(args, folders: list[Path]) -> list[str]:
-    """The models to load: those named with --model, or else the corpus's active model alone. Its
-    other models aren't loaded, so their embeddings stay on disk as they are until one of them is
-    made active."""
-    if args.model:
-        return list(dict.fromkeys(args.model))
+def models(args, folders: list[Path]) -> tuple[list[str], list[str]]:
+    """The models to load, the default one first, and the corpus's other models, which the page
+    shows greyed out. Without options the corpus's active model alone is loaded. --model names the
+    ones to load instead, and --all-models adds every model of the corpus's list, after those named
+    and the active one. A model that isn't loaded keeps its embeddings on disk as they are."""
+    if args.no_model:
+        return [], []
     from .engine.models import ModelError, ModelList
 
     try:
-        active = ModelList.of(folders[0]).active
+        listed = ModelList.of(folders[0])
     except ModelError as e:
         sys.exit(f"isis: {e}")
-    return [active] if active else []
+    load = [listed.find(m) or m for m in args.model or []]  # as the list spells it, so its embeddings are found
+    if args.all_models or not load:
+        load += [m for m in [listed.active] if m]
+    if args.all_models:
+        load += listed.models
+    load = list(dict.fromkeys(load))
+    return load, [m for m in listed.models if m not in load]
 
 
 RESTART = "Start isis again to use it."
@@ -264,7 +271,9 @@ def cmd_serve(args) -> None:
     os.environ["ISIS_OSIRIS"] = json.dumps({str(md): str(manifest or "") for md, manifest in archives_of(args.osiris).items()})
     if args.tasks:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
-    os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args, folders))
+    load, others = models(args, folders)
+    os.environ["ISIS_MODELS"] = ",".join(load)
+    os.environ["ISIS_OTHER_MODELS"] = ",".join(others)  # listed for the corpus and not loaded: greyed out in the page
     os.environ["ISIS_HOSTS"] = ",".join(allowed_hosts(args.host, args.allow_host))
     os.environ["ISIS_BUILD_NATIVE"] = "0" if args.no_build else "1"
     if args.llm_key_file:
@@ -316,8 +325,11 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--tasks", help="folder for task documents (default: _tasks in the first folder)")
         p.add_argument("--model", action="append", metavar="REPO",
                        help="Load this embedding model for this run, in place of the corpus's active one. It can be "
-                            "repeated, and the first one named is then the default. A corpus's active model is "
-                            f"{MODELS[0]} until isis model changes it.")
+                            "repeated to load several, and the first one named is then the default. A corpus's "
+                            f"active model is {MODELS[0]} until isis model changes it.")
+        p.add_argument("--all-models", action="store_true",
+                       help="Load every model of the corpus's list, the active one first. The models named with "
+                            "--model come before it.")
         p.add_argument("--no-model", action="store_true", help="lexical search only, no embeddings")
 
     p = sub.add_parser("index", help="build or update the search index")
@@ -343,9 +355,10 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("model", help="list, add or remove the corpus's embedding models, or choose the active one",
-                       description="The embedding models of a corpus. isis loads only the active one. These commands "
-                                   "change the list in the corpus's .isis folder and never delete embeddings. Stop "
-                                   "isis first and start it again afterwards. Name the same folders as for isis serve.")
+                       description="The embedding models of a corpus. isis loads the active one, unless it is started "
+                                   "with --model or --all-models. These commands change the list in the corpus's .isis "
+                                   "folder and never delete embeddings. Stop isis first and start it again afterwards. "
+                                   "Name the same folders as for isis serve.")
     actions = p.add_subparsers(dest="action", required=True)
     a = actions.add_parser("list", help="the corpus's models, with the active one marked")
     folders(a)

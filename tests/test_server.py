@@ -21,6 +21,15 @@ def test_status_files_and_file_content(client):
     assert client.get("/api/file", params={"path": "whales.md"}).json()["content"].startswith("# Whales")
 
 
+def test_status_lists_the_models_loaded_and_those_left_out(engine, corpus):
+    with TestClient(create_app(engine, TaskStore(corpus / "_tasks"), background=False, watch=False)) as c:
+        assert c.get("/api/status").json()["other_models"] == []
+    app = create_app(engine, TaskStore(corpus / "_tasks"), background=False, watch=False, other_models=["some/model"])
+    with TestClient(app) as c:
+        status = c.get("/api/status").json()
+    assert [m["id"] for m in status["models"]] == ["hash:64"] and status["other_models"] == ["some/model"]
+
+
 def test_file_access_stays_inside_the_corpus(client):
     assert client.get("/api/file", params={"path": "../outside.md"}).status_code == 400
     assert client.get("/api/file", params={"path": "missing.md"}).status_code == 404

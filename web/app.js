@@ -3311,21 +3311,30 @@ function renderIndexStatus(s) {
   $("#index-size").textContent = countsText(s);
 }
 
-// The meaning model this browser uses, from the models the server offers. The first is the default.
-// The server loads its corpus's active model, so there is usually one, shown as a name and not a menu.
-function renderModelPick(models) {
+// The meaning model this browser uses, from the models the server loaded. The first is the default.
+// `others` are the models on the corpus's list that the server wasn't started with: they stay in
+// the menu, greyed out, and can't be chosen. A corpus with a single model shows its name, not a menu.
+function renderModelPick(models, others) {
   const ids = models.map((m) => m.id);
-  const saved = store.get("model");
+  const saved = store.get("model"); // kept while its model isn't loaded, for when it is again
   state.model = ids.includes(saved) ? saved : ids[0] ?? null;
   const pick = $("#model-pick");
-  pick.replaceChildren(...models.map((m) => h("option", { value: m.id }, m.label)));
+  pick.replaceChildren(
+    ...models.map((m) => h("option", { value: m.id }, m.label)),
+    ...others.map((id) => h("option", { value: id, disabled: true }, id)),
+  );
   pick.value = state.model ?? "";
-  pick.disabled = models.length < 2;
+  const alone = models.length + others.length < 2;
+  pick.disabled = alone;
   $("#model-name").textContent = pick.selectedOptions[0]?.textContent ?? "";
   const box = $("#model-box");
   box.hidden = !models.length;
-  box.classList.toggle("status-name", models.length < 2);
-  box.title = `The meaning model that Search and Related use.${models.length < 2 ? "" : " This browser keeps your choice."}`;
+  box.classList.toggle("status-name", alone);
+  box.title = [
+    "The meaning model that Search and Related use.",
+    models.length > 1 ? "This browser keeps your choice." : "",
+    others.length ? "The server was started without the greyed models." : "",
+  ].filter(Boolean).join(" ");
 }
 
 function pickModel(id) {
@@ -3596,8 +3605,8 @@ async function untilAnswered(ask) {
 }
 
 // What a reload would change besides the page's files: the folders, the models and LLM help the
-// server was started with.
-const serverSetup = (s) => JSON.stringify([s.folders ?? [], (s.models ?? []).map((m) => m.id), Boolean(s.llm)]);
+// server was started with. A server from before it listed the models it didn't load has none of those.
+const serverSetup = (s) => JSON.stringify([s.folders ?? [], (s.models ?? []).map((m) => m.id), Boolean(s.llm), s.other_models ?? []]);
 
 async function init() {
   bind();
@@ -3608,7 +3617,7 @@ async function init() {
   state.pageVersion = $('meta[name="page-version"]')?.content || String(status.page_version);
   renderFolderPicks(status.folders, status.sources ?? []);
   showLlmHelp(Boolean(status.llm));
-  renderModelPick(status.models ?? []);
+  renderModelPick(status.models ?? [], status.other_models ?? []);
   $("#model-pick").addEventListener("change", (e) => pickModel(e.target.value));
   if (!status.model) {
     const button = $("#search-meaning");

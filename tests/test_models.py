@@ -59,6 +59,11 @@ def refused(*argv) -> str:
     return str(stopped.value)
 
 
+def chosen(corpus, *named, all_models=False, no_model=False) -> tuple[list[str], list[str]]:
+    """The models isis would load for this corpus, and its other models, which the page greys out."""
+    return cli.models(SimpleNamespace(model=list(named), all_models=all_models, no_model=no_model), [corpus])
+
+
 def vector_files(corpus) -> dict[str, bytes]:
     """Each model's saved embeddings in a corpus folder, by model."""
     return {name.partition(":")[0]: b"".join(p.read_bytes() for p in files if p.suffix != ".json")
@@ -69,8 +74,21 @@ def test_a_corpus_starts_with_the_built_in_models_and_reading_them_writes_nothin
     listed = ModelList.of(corpus)
     assert (listed.models, listed.active) == ([LEAF, MICRO], LEAF)
     assert not (corpus / ".isis").exists()
-    assert cli.models(SimpleNamespace(model=None), [corpus]) == [LEAF]  # the active one alone
-    assert cli.models(SimpleNamespace(model=[MICRO, SMALL, MICRO]), [corpus]) == [MICRO, SMALL]  # for one run
+    assert chosen(corpus) == ([LEAF], [MICRO])  # the active one alone
+    assert not (corpus / ".isis").exists()
+
+
+def test_isis_can_be_started_with_several_models_or_all_of_them(corpus, fake):
+    assert chosen(corpus, MICRO, SMALL, MICRO.lower()) == ([MICRO, SMALL], [LEAF])  # for one run, the first the default
+    assert chosen(corpus, all_models=True) == ([LEAF, MICRO], [])
+    assert chosen(corpus, MICRO, all_models=True) == ([MICRO, LEAF], [])  # those named go first
+    assert chosen(corpus, MICRO, no_model=True) == chosen(corpus, all_models=True, no_model=True) == ([], [])
+    run("model", "add", SMALL, corpus)
+    assert chosen(corpus) == ([SMALL], [LEAF, MICRO])
+    assert chosen(corpus, all_models=True) == ([SMALL, LEAF, MICRO], [])  # the active one first
+    run("model", "remove", LEAF, corpus)
+    assert chosen(corpus, all_models=True) == ([SMALL, MICRO], [])  # a removed model is neither loaded nor shown
+    assert chosen(corpus, LEAF) == ([LEAF], [MICRO, SMALL])  # unless it is named
 
 
 def test_a_repository_is_named_by_its_id_or_its_address():
@@ -91,7 +109,7 @@ def test_adding_a_model_tries_it_and_makes_it_active(corpus, fake, capsys):
     assert json.loads(saved.read_text()) == {"models": [LEAF, MICRO, SMALL], "active": SMALL}
     assert saved.stat().st_mode & 0o044 == 0o044 & ~_umask()  # a server running as someone else can read it
     assert "made it the active model" in capsys.readouterr().out
-    assert cli.models(SimpleNamespace(model=None), [corpus]) == [SMALL]
+    assert chosen(corpus) == ([SMALL], [LEAF, MICRO])
 
     run("model", "add", "other/model", corpus, "--inactive")
     run("model", "add", SMALL.upper(), corpus)  # the same repository, as Hugging Face reads names
@@ -164,18 +182,25 @@ def test_serve_loads_the_active_model_alone(corpus, fake, monkeypatch):
     import uvicorn
 
     monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
-    for key in ("ISIS_CORPUS", "ISIS_OSIRIS", "ISIS_MODELS", "ISIS_HOSTS", "ISIS_BUILD_NATIVE"):
+    for key in ("ISIS_CORPUS", "ISIS_OSIRIS", "ISIS_MODELS", "ISIS_OTHER_MODELS", "ISIS_HOSTS", "ISIS_BUILD_NATIVE"):
         monkeypatch.setenv(key, "")  # put back as they were afterwards
     monkeypatch.delenv("ISIS_URL", raising=False)
-    serve = lambda *options: run("serve", corpus, "--no-build", *options) or os.environ["ISIS_MODELS"]
-    assert serve() == LEAF
-    assert serve("--model", MICRO, "--model", LEAF) == f"{MICRO},{LEAF}"  # for one run
-    assert serve("--no-model") == ""
+
+    def serve(*options) -> tuple[str, str]:  # the models it loads, and those the page greys out
+        run("serve", corpus, "--no-build", *options)
+        return os.environ["ISIS_MODELS"], os.environ["ISIS_OTHER_MODELS"]
+
+    assert serve() == (LEAF, MICRO)
+    assert serve("--model", MICRO, "--model", LEAF) == (f"{MICRO},{LEAF}", "")  # several, for one run
+    assert serve("--all-models") == (f"{LEAF},{MICRO}", "")
+    assert serve("--no-model") == ("", "")
     run("model", "use", MICRO, corpus)
-    assert serve() == MICRO
+    assert serve() == (MICRO, LEAF)
+    assert serve("--all-models") == (f"{MICRO},{LEAF}", "")
     run("model", "remove", LEAF, corpus)
+    assert serve() == (MICRO, "")  # a removed model is no longer shown
     run("model", "remove", MICRO, corpus)
-    assert serve() == ""  # no model left: keywords only
+    assert serve() == ("", "")  # no model left: keywords only
 
 
 def test_only_the_active_model_is_loaded_and_the_others_keep_their_embeddings(corpus, fake):
@@ -192,7 +217,7 @@ def test_only_the_active_model_is_loaded_and_the_others_keep_their_embeddings(co
 
     run("model", "use", MICRO.lower(), corpus)
     fake.loaded.clear()
-    engine = Engine(corpus, embedder=[FakeEmbedder(m) for m in cli.models(SimpleNamespace(model=None), [corpus])])
+    engine = Engine(corpus, embedder=[FakeEmbedder(m) for m in chosen(corpus)[0]])
     assert fake.loaded == [MICRO] and engine.refresh()["embedded"] == 1  # only what changed meanwhile
     assert engine.embedder.seen == ["Ambergris washed up on the beach."]
     assert vector_files(corpus)[LEAF] == after[LEAF]
@@ -243,7 +268,7 @@ def test_removing_the_active_model_needs_the_next_one_named(corpus, fake, capsys
 
     run("model", "remove", MICRO, corpus)  # the last one: nothing to name
     assert json.loads((corpus / ".isis" / "models.json").read_text()) == {"models": [], "active": None}
-    assert cli.models(SimpleNamespace(model=None), [corpus]) == []
+    assert chosen(corpus) == ([], [])
     assert "keywords only" in capsys.readouterr().out
     assert vector_files(corpus) == before  # none of this deleted anything
     run("model", "add", SMALL, corpus, "--inactive")  # the only model is the active one

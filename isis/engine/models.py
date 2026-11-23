@@ -1,5 +1,6 @@
-"""The embedding models of a corpus: the ones it has, and the active one, which is the only one
-`isis serve` and `isis index` load. `isis model` changes them while isis is stopped (see cli.py).
+"""The embedding models of a corpus: the ones it has, and the active one, which is the one
+`isis serve` and `isis index` load unless they are told to load others (see cli.models). `isis model`
+changes them while isis is stopped.
 
 They are kept in .isis/models.json of the first corpus folder, as {"models": [...], "active": ...}.
 A corpus without that file has the models in MODELS, the first of them active."""

@@ -105,7 +105,7 @@ def test_serve_builds_unless_told_not_to(monkeypatch, tmp_path):
     import uvicorn
 
     monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
-    for key in ("ISIS_CORPUS", "ISIS_MODELS", "ISIS_HOSTS", "ISIS_BUILD_NATIVE"):
+    for key in ("ISIS_CORPUS", "ISIS_OSIRIS", "ISIS_MODELS", "ISIS_OTHER_MODELS", "ISIS_HOSTS", "ISIS_BUILD_NATIVE"):
         monkeypatch.setenv(key, "")  # put back as they were afterwards
     cli.main(["serve", str(tmp_path)])
     assert os.environ["ISIS_BUILD_NATIVE"] == "1"
