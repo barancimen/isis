@@ -3312,6 +3312,7 @@ function renderIndexStatus(s) {
 }
 
 // The meaning model this browser uses, from the models the server offers. The first is the default.
+// The server loads its corpus's active model, so there is usually one, shown as a name and not a menu.
 function renderModelPick(models) {
   const ids = models.map((m) => m.id);
   const saved = store.get("model");
@@ -3319,8 +3320,12 @@ function renderModelPick(models) {
   const pick = $("#model-pick");
   pick.replaceChildren(...models.map((m) => h("option", { value: m.id }, m.label)));
   pick.value = state.model ?? "";
+  pick.disabled = models.length < 2;
   $("#model-name").textContent = pick.selectedOptions[0]?.textContent ?? "";
-  $("#model-box").hidden = !models.length;
+  const box = $("#model-box");
+  box.hidden = !models.length;
+  box.classList.toggle("status-name", models.length < 2);
+  box.title = `The meaning model that Search and Related use.${models.length < 2 ? "" : " This browser keeps your choice."}`;
 }
 
 function pickModel(id) {

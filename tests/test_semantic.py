@@ -59,3 +59,22 @@ def test_a_cached_model_never_touches_the_network(monkeypatch, tmp_path):
     assert downloads == []
     e._fetch("missing.json")  # not in the cache yet: the one case that downloads
     assert downloads == [("some/model", "missing.json")]
+
+
+def test_a_file_the_repo_lacks_is_missing_and_an_unreachable_hub_is_not(monkeypatch):
+    import huggingface_hub
+    from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
+
+    from isis.engine.semantic import Embedder
+
+    def download(repo, name):
+        raise (LocalEntryNotFoundError if name == "offline.json" else EntryNotFoundError)("404")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda repo, name: None)
+    e = Embedder.__new__(Embedder)
+    e.model_id = "some/model"
+    with pytest.raises(FileNotFoundError, match="some/model has no onnx/model.onnx"):
+        e._fetch("onnx/model.onnx")
+    with pytest.raises(LocalEntryNotFoundError):  # the network is away: nothing is known about the repo
+        e._fetch("offline.json")

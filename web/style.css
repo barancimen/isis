@@ -616,6 +616,8 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
 }
 .status-pick[hidden] { display: none; }
+.status-pick.status-name { padding-right: 5px; cursor: default; }
+.status-pick.status-name::after, .status-pick.status-name select { display: none; }
 .status-pick::after { content: ""; border: 4px solid transparent; border-top-width: 0; border-bottom-color: currentColor; }
 .status-pick:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
 .status-pick select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; font: inherit; cursor: pointer; }

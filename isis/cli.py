@@ -1,5 +1,6 @@
-"""`isis index` builds or updates the index, `isis serve` runs the web app, and `isis search` and
-`isis related` ask a running server."""
+"""`isis index` builds or updates the index, `isis serve` runs the web app, `isis model` changes a
+corpus's embedding models while isis is stopped, and `isis search` and `isis related` ask a running
+server."""
 
 from __future__ import annotations
 
@@ -48,17 +49,190 @@ def cmd_index(args) -> None:
 
     folders = folders_of(args.corpus, args.osiris)
     tasks_dir = Path(args.tasks).resolve() if args.tasks else folders[0] / "_tasks"
-    embedders = [] if args.no_model else [Embedder(m) for m in models(args)]
+    embedders = [] if args.no_model else [Embedder(m) for m in models(args, folders)]
     engine = Engine(folders, embedder=embedders, exclude=corpus_exclude(folders, tasks_dir), osiris=archives_of(args.osiris))
     engine.defer_archives = False  # a single run: save everything, whatever osiris is doing
     engine.refresh()  # it reports its progress
 
 
-def models(args) -> list[str]:
-    """The models to offer: those named with --model, or else every model in MODELS."""
-    from .engine.semantic import MODELS
+def models(args, folders: list[Path]) -> list[str]:
+    """The models to load: those named with --model, or else the corpus's active model alone. Its
+    other models aren't loaded, so their embeddings stay on disk as they are until one of them is
+    made active."""
+    if args.model:
+        return list(dict.fromkeys(args.model))
+    from .engine.models import ModelError, ModelList
 
-    return list(dict.fromkeys(args.model or MODELS))
+    try:
+        active = ModelList.of(folders[0]).active
+    except ModelError as e:
+        sys.exit(f"isis: {e}")
+    return [active] if active else []
+
+
+RESTART = "Start isis again to use it."
+TRIAL = "The sperm whale dives deep for squid."
+
+
+def _size(n: int) -> str:
+    if n < 1e6:
+        return f"{max(1, round(n / 1e3))} KB"
+    return f"{n / 1e6:.1f} MB" if n < 1e9 else f"{n / 1e9:.2f} GB"
+
+
+def check_model(repo: str) -> None:
+    """Loads a model and embeds a sentence with it, so that one isis can't use is refused before
+    it is made active. Loading it also downloads its files, which a server kept off the network
+    (HF_HUB_OFFLINE=1) can't do when it starts."""
+    import numpy as np
+    from huggingface_hub.utils import GatedRepoError, HfHubHTTPError, LocalEntryNotFoundError, RepositoryNotFoundError
+
+    from .engine import semantic
+    from .engine.models import ModelError
+
+    try:
+        semantic.fetch_settings(repo)  # before it is loaded, so a file the network kept back isn't taken as missing
+        embedder = semantic.Embedder(repo)
+        vector = embedder.embed([TRIAL])
+        if vector.shape != (1, embedder.dim) or not np.isfinite(vector).all() or abs(np.linalg.norm(vector) - 1) > 1e-3:
+            raise ValueError("it doesn't turn a sentence into one vector")
+    except Exception as e:
+        first = next((line.strip() for line in str(e).splitlines() if line.strip()), type(e).__name__)
+        if isinstance(e, GatedRepoError):
+            why = "Hugging Face gives its files only to accounts that were granted access"
+        elif isinstance(e, RepositoryNotFoundError):
+            why = "Hugging Face has no repository by that name, or it is private"
+        elif isinstance(e, LocalEntryNotFoundError):
+            why = "its files aren't downloaded yet and Hugging Face can't be reached"
+        elif isinstance(e, FileNotFoundError):  # as Embedder._fetch says it
+            why = f"{e}, and isis needs a tokenizer.json and ONNX weights in onnx/model.onnx"
+        elif isinstance(e, HfHubHTTPError):  # "500 Server Error. (Request ID: ...)"
+            why = f"Hugging Face answered {re.sub(r'[.]? *[(]Request ID.*', '', first)}"
+        else:
+            why = first
+        raise ModelError(f"cannot use {repo}: {why.rstrip('.')}") from None
+
+
+def embeddings_of(folders: list[Path], model: str) -> list[Path]:
+    """The files that hold a model's embeddings, in every folder of the corpus."""
+    from .engine.index import saved_vectors
+    from .engine.models import made_by
+
+    return [path for folder in folders for name, files in saved_vectors(folder / ".isis").items()
+            if made_by(name, model) for path in files]
+
+
+def cmd_model(args) -> None:
+    """`isis model`: the corpus's embedding models. It changes files only, so isis is stopped
+    first and started again afterwards, by hand."""
+    from .engine.models import ModelError, ModelList, repo_id
+
+    folders = folders_of(args.corpus, args.osiris)
+    try:
+        listed = ModelList.of(folders[0])
+        if args.action == "list":
+            list_models(listed, folders)
+        elif args.action == "add":
+            add_model(listed, repo_id(args.repo), active=not args.inactive)
+        elif args.action == "use":
+            use_model(listed, repo_id(args.repo))
+        else:
+            remove_model(listed, folders, repo_id(args.repo), repo_id(args.next) if args.next else None)
+    except ModelError as e:
+        sys.exit(f"isis: {e}")
+    except OSError as e:
+        sys.exit(f"isis: cannot change the models of {folders[0]}: {e.strerror or e}"
+                 + (f", {e.filename}" if e.filename else ""))
+
+
+def list_models(listed, folders: list[Path]) -> None:
+    from .engine.index import saved_vectors
+    from .engine.models import made_by
+
+    if not listed.models:
+        print("This corpus has no embedding model, so isis searches it by keywords only.")
+    width = max(map(len, listed.models), default=0)
+    for model in listed.models:
+        size = sum(path.stat().st_size for path in embeddings_of(folders, model))
+        print(f"{model:<{width}}  {'active' if model == listed.active else '':<6}  "
+              f"{f'embeddings {_size(size)}' if size else 'no embeddings yet'}")
+    others: dict[str, int] = {}  # embeddings of models that are not on the list
+    for folder in folders:
+        for name, files in saved_vectors(folder / ".isis").items():
+            if not any(made_by(name, model) for model in listed.models):
+                model = name.partition(":")[0]
+                others[model] = others.get(model, 0) + sum(path.stat().st_size for path in files)
+    for model, size in others.items():
+        print(f"{model} is not one of the models, and {_size(size)} of its embeddings are still here. "
+              f"isis model remove {model} deletes them.")
+
+
+def add_model(listed, repo: str, active: bool) -> None:
+    known, before = listed.find(repo), listed.active
+    name = known or repo
+    check_model(name)
+    listed.add(name, active)
+    listed.save()
+    if name == before:
+        print(f"{name} is already the active model.")
+    elif listed.active == before:
+        print(f"{name} is already one of the models." if known else f"Added {name}.", f"{before} stays the active model.")
+    elif known:
+        print(f"{name} was already one of the models. It is now the active one. {RESTART}")
+    else:
+        print(f"Added {name} and made it the active model. When isis starts again, it embeds the corpus with it.")
+
+
+def use_model(listed, repo: str) -> None:
+    before = listed.active
+    name = listed.use(repo)
+    if name == before:
+        print(f"{name} is already the active model.")
+        return
+    check_model(name)
+    listed.save()
+    print(f"{name} is now the active model. {RESTART}")
+
+
+def remove_model(listed, folders: list[Path], repo: str, then: str | None) -> None:
+    from .engine.models import ModelError
+
+    name, before = listed.find(repo), listed.active
+    files = embeddings_of(folders, name or repo)
+    if name is None and not files:
+        raise ModelError(f"{repo} is not one of this corpus's models, and it has no embeddings here. {listed.has()}")
+    listed.remove(repo, then)
+    if listed.active and listed.active != before:
+        check_model(listed.active)
+    if name is not None or listed.active != before:
+        listed.save()  # the list first: if deleting the embeddings then fails, the command can be run again
+    size = sum(path.stat().st_size for path in files)
+    for path in files:
+        path.unlink()
+    if name is None:
+        print(f"{repo} was not one of the models. Its {_size(size)} of embeddings are deleted.")
+    else:
+        print(f"Removed {name} and deleted its {_size(size)} of embeddings." if files else
+              f"Removed {name}, which had no embeddings to delete.")
+    if listed.active != before:
+        print(f"{listed.active} is now the active model. {RESTART}" if listed.active else
+              "No model is left, so isis now searches by keywords only.")
+    cache = _downloaded(name or repo)
+    if cache:
+        print(f"The model's downloaded files are still in the Hugging Face cache, {cache}.")
+
+
+def _downloaded(repo: str) -> Path | None:
+    """The Hugging Face cache, if it holds files downloaded for this model. They stay when a model
+    is removed: other corpora may use it, and the cache shares large files between its models."""
+    try:
+        from huggingface_hub import constants
+        from huggingface_hub.file_download import repo_folder_name
+
+        cache = Path(constants.HF_HUB_CACHE)
+        return cache if (cache / repo_folder_name(repo_id=repo, repo_type="model")).is_dir() else None
+    except Exception:  # another version of the library, which keeps them elsewhere
+        return None
 
 
 def allowed_hosts(host: str, extra: list[str]) -> list[str]:
@@ -104,12 +278,13 @@ def cmd_serve(args) -> None:
         check_public(args)
         os.environ["ISIS_PUBLIC"] = "1"
         os.environ["ISIS_BASE_PATH"] = args.base_path
+    folders = folders_of(args.corpus, args.osiris)
     # As JSON: a folder's name may hold the ":" or "|" that would otherwise separate them.
-    os.environ["ISIS_CORPUS"] = json.dumps(list(map(str, folders_of(args.corpus, args.osiris))))
+    os.environ["ISIS_CORPUS"] = json.dumps(list(map(str, folders)))
     os.environ["ISIS_OSIRIS"] = json.dumps({str(md): str(manifest or "") for md, manifest in archives_of(args.osiris).items()})
     if args.tasks:
         os.environ["ISIS_TASKS"] = str(Path(args.tasks).resolve())
-    os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args))
+    os.environ["ISIS_MODELS"] = "" if args.no_model else ",".join(models(args, folders))
     os.environ["ISIS_HOSTS"] = ",".join(allowed_hosts(args.host, args.allow_host))
     os.environ["ISIS_BUILD_NATIVE"] = "0" if args.no_build else "1"
     if args.llm_key_file:
@@ -149,15 +324,20 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="isis", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def common(p):
+    def folders(p):
         p.add_argument("corpus", nargs="*", help="one or more folders of markdown files")
         p.add_argument("--osiris", action="append", default=[], metavar="DIR",
                        help="an archive made by osiris (its data folder, or the md folder in it), whose sources "
                             "can each be left out of Search and Related; it joins the corpus if not named among its "
                             "folders (repeatable)")
+
+    def common(p):
+        folders(p)
         p.add_argument("--tasks", help="folder for task documents (default: _tasks in the first folder)")
         p.add_argument("--model", action="append", metavar="REPO",
-                       help=f"offer only this embedding model (repeatable; the first is the default; default: {', '.join(MODELS)})")
+                       help="Load this embedding model for this run, in place of the corpus's active one. It can be "
+                            "repeated, and the first one named is then the default. A corpus's active model is "
+                            f"{MODELS[0]} until isis model changes it.")
         p.add_argument("--no-model", action="store_true", help="lexical search only, no embeddings")
 
     p = sub.add_parser("index", help="build or update the search index")
@@ -181,6 +361,29 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--base-path", default="", metavar="PATH",
                    help="with --public: where the site lives on its domain, such as /isis")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("model", help="list, add or remove the corpus's embedding models, or choose the active one",
+                       description="The embedding models of a corpus. isis loads only the active one. These commands "
+                                   "change files in the corpus's .isis folder, so stop isis first and start it again "
+                                   "afterwards. Name the same folders as for isis serve.")
+    actions = p.add_subparsers(dest="action", required=True)
+    a = actions.add_parser("list", help="the corpus's models, with the active one marked")
+    folders(a)
+    a = actions.add_parser("add", help="add a model from Hugging Face and make it the active one")
+    a.add_argument("repo", metavar="REPO", help="its Hugging Face repository, such as BAAI/bge-small-en-v1.5, or "
+                                                "the address of its page. It needs ONNX weights in onnx/model.onnx "
+                                                "and a tokenizer.json")
+    folders(a)
+    a.add_argument("--inactive", action="store_true", help="leave the active model as it is")
+    a = actions.add_parser("use", help="make one of the corpus's models the active one")
+    a.add_argument("repo", metavar="REPO", help="the model, as isis model list names it")
+    folders(a)
+    a = actions.add_parser("remove", help="remove a model and delete its embeddings")
+    a.add_argument("repo", metavar="REPO", help="the model, as isis model list names it")
+    folders(a)
+    a.add_argument("--next", metavar="REPO",
+                   help="the model to be active afterwards, which has to be named when the active one is removed")
+    p.set_defaults(func=cmd_model)
 
     # Listed for --help only: main() hands them to client.py before this parser exists.
     sub.add_parser("search", help="search the corpus of a running server (isis search -h)", add_help=False)

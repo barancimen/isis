@@ -116,6 +116,23 @@ def _text_key(text: str) -> int:
     return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "little")
 
 
+def saved_vectors(cache: Path) -> dict[str, list[Path]]:
+    """The files of the embeddings saved in a folder's cache, by the name of the embedder that made
+    them (see Engine._vectors_path). `isis model` lists them, and deletes those of a model it removes."""
+    found: dict[str, list[Path]] = {}
+    folder = Path(cache) / "models"
+    for path in sorted(folder.glob("*.json")):
+        with suppress(OSError, ValueError, AttributeError):  # not one of ours
+            name = json.loads(path.read_text(encoding="utf-8")).get("name")
+            if isinstance(name, str) and ".tmp" not in path.name:
+                found.setdefault(name, []).extend(p for p in (path, path.with_suffix(".npy")) if p.exists())
+    for path in sorted(folder.glob("*.npz")):  # the way they were saved before, with the name inside
+        with suppress(Exception):
+            with np.load(path, allow_pickle=False) as data:
+                found.setdefault(str(data["name"]), []).append(path)
+    return found
+
+
 def _changes(new: list[str], modified: list[str], removed: list[str]) -> str:
     """'100 new files, 2 changed, 1 removed', naming the files when there are only a few."""
     parts = []

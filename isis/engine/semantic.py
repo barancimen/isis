@@ -1,7 +1,8 @@
-"""Sentence embeddings from small ONNX models on the CPU. The app offers the models in MODELS:
-MongoDB/mdbr-leaf-ir (6-layer BERT, 384 dimensions, 23M parameters), the default, and
+"""Sentence embeddings from small ONNX models on the CPU. A corpus starts with the models in MODELS:
+MongoDB/mdbr-leaf-ir (6-layer BERT, 384 dimensions, 23M parameters), the active one, and
 TaylorAI/bge-micro-v2 (3 layers, 17M parameters), which is about 1.4 times faster to embed with
-but finds less by meaning."""
+but finds less by meaning. `isis model` adds and removes models, and says which is active (see
+models.py)."""
 
 from __future__ import annotations
 
@@ -22,10 +23,33 @@ from .text import tokenize
 log = logging.getLogger(__name__)
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")  # read when huggingface_hub is imported
 
-# The models the app offers, each by its Hugging Face repo; the first is the default. Any repo with
-# ONNX weights and a tokenizer.json can join the list.
+# The models a corpus has until `isis model` changes its list, each by its Hugging Face repo; the
+# first is the active one. `isis model add` takes any repo with ONNX weights and a tokenizer.json.
 MODELS = ("MongoDB/mdbr-leaf-ir", "TaylorAI/bge-micro-v2")
 DEFAULT_MODEL = MODELS[0]
+
+
+# Files that say how to use a model. A repo may lack them, and an Embedder then pools by the mean
+# and puts nothing before a text.
+SETTINGS = ("config_sentence_transformers.json", "1_Pooling/config.json")
+
+
+def fetch_settings(model_id: str) -> None:
+    """Downloads a model's SETTINGS files where its repo has them, and raises if Hugging Face can't
+    say whether it does. An Embedder goes without one it can't get, which is right for a repo that
+    lacks it and wrong when only the network failed, so `isis model` asks here before it trusts
+    what the model was loaded with."""
+    from huggingface_hub import hf_hub_download, try_to_load_from_cache
+    from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
+
+    for filename in SETTINGS:
+        if try_to_load_from_cache(model_id, filename) is None:  # neither downloaded nor known to be missing
+            try:
+                hf_hub_download(model_id, filename)
+            except LocalEntryNotFoundError:  # Hugging Face can't be reached
+                raise
+            except EntryNotFoundError:  # the repo has none
+                pass
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
@@ -99,6 +123,7 @@ class Embedder:
         downloaded (the first run); with the model cached, nothing goes over the network. A file
         the repo is known not to have raises FileNotFoundError, also without the network."""
         from huggingface_hub import hf_hub_download, try_to_load_from_cache
+        from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
 
         cached = try_to_load_from_cache(self.model_id, filename)  # reads the cache folder only
         if isinstance(cached, str):
@@ -106,7 +131,12 @@ class Embedder:
         if cached is not None:  # cached as missing from the repo
             raise FileNotFoundError(f"{self.model_id} has no {filename}")
         log.info("downloading %s of %s (only the first time)", filename, self.model_id)
-        return hf_hub_download(self.model_id, filename)
+        try:
+            return hf_hub_download(self.model_id, filename)
+        except LocalEntryNotFoundError:  # Hugging Face can't be reached
+            raise
+        except EntryNotFoundError:  # the repo is there and the file isn't: the same answer as from the cache
+            raise FileNotFoundError(f"{self.model_id} has no {filename}") from None
 
     def _prompts(self) -> tuple[str, str]:
         """What goes before a query and before a passage, from the "prompts" of the repo's
