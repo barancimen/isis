@@ -118,7 +118,8 @@ def _text_key(text: str) -> int:
 
 def saved_vectors(cache: Path) -> dict[str, list[Path]]:
     """The files of the embeddings saved in a folder's cache, by the name of the embedder that made
-    them (see Engine._vectors_path). `isis model` lists them, and deletes those of a model it removes."""
+    them (see Engine._vectors_path). `isis model` says how much each model has. Nothing deletes them
+    when a model is removed."""
     found: dict[str, list[Path]] = {}
     folder = Path(cache) / "models"
     for path in sorted(folder.glob("*.json")):

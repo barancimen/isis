@@ -163,8 +163,8 @@ def list_models(listed, folders: list[Path]) -> None:
                 model = name.partition(":")[0]
                 others[model] = others.get(model, 0) + sum(path.stat().st_size for path in files)
     for model, size in others.items():
-        print(f"{model} is not one of the models, and {_size(size)} of its embeddings are still here. "
-              f"isis model remove {model} deletes them.")
+        print(f"{model} is not one of the models. isis keeps its {_size(size)} of embeddings, and uses them again "
+              "if the model is added.")
 
 
 def add_model(listed, repo: str, active: bool) -> None:
@@ -180,7 +180,8 @@ def add_model(listed, repo: str, active: bool) -> None:
     elif known:
         print(f"{name} was already one of the models. It is now the active one. {RESTART}")
     else:
-        print(f"Added {name} and made it the active model. When isis starts again, it embeds the corpus with it.")
+        print(f"Added {name} and made it the active model. When isis starts again, it embeds the passages "
+              "this model hasn't embedded yet.")
 
 
 def use_model(listed, repo: str) -> None:
@@ -195,44 +196,23 @@ def use_model(listed, repo: str) -> None:
 
 
 def remove_model(listed, folders: list[Path], repo: str, then: str | None) -> None:
+    """Takes a model off the list. Nothing is deleted: its embeddings stay where they are, and are
+    used again if the model is added back."""
     from .engine.models import ModelError
 
     name, before = listed.find(repo), listed.active
-    files = embeddings_of(folders, name or repo)
-    if name is None and not files:
-        raise ModelError(f"{repo} is not one of this corpus's models, and it has no embeddings here. {listed.has()}")
-    listed.remove(repo, then)
+    if name is None:
+        raise ModelError(f"{repo} is not one of this corpus's models. {listed.has()}")
+    listed.remove(name, then)
     if listed.active and listed.active != before:
         check_model(listed.active)
-    if name is not None or listed.active != before:
-        listed.save()  # the list first: if deleting the embeddings then fails, the command can be run again
-    size = sum(path.stat().st_size for path in files)
-    for path in files:
-        path.unlink()
-    if name is None:
-        print(f"{repo} was not one of the models. Its {_size(size)} of embeddings are deleted.")
-    else:
-        print(f"Removed {name} and deleted its {_size(size)} of embeddings." if files else
-              f"Removed {name}, which had no embeddings to delete.")
+    listed.save()
+    size = sum(path.stat().st_size for path in embeddings_of(folders, name))
+    print(f"Removed {name}. isis keeps its {_size(size)} of embeddings, and uses them again if the model is added back."
+          if size else f"Removed {name}.")
     if listed.active != before:
         print(f"{listed.active} is now the active model. {RESTART}" if listed.active else
               "No model is left, so isis now searches by keywords only.")
-    cache = _downloaded(name or repo)
-    if cache:
-        print(f"The model's downloaded files are still in the Hugging Face cache, {cache}.")
-
-
-def _downloaded(repo: str) -> Path | None:
-    """The Hugging Face cache, if it holds files downloaded for this model. They stay when a model
-    is removed: other corpora may use it, and the cache shares large files between its models."""
-    try:
-        from huggingface_hub import constants
-        from huggingface_hub.file_download import repo_folder_name
-
-        cache = Path(constants.HF_HUB_CACHE)
-        return cache if (cache / repo_folder_name(repo_id=repo, repo_type="model")).is_dir() else None
-    except Exception:  # another version of the library, which keeps them elsewhere
-        return None
 
 
 def allowed_hosts(host: str, extra: list[str]) -> list[str]:
@@ -364,8 +344,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("model", help="list, add or remove the corpus's embedding models, or choose the active one",
                        description="The embedding models of a corpus. isis loads only the active one. These commands "
-                                   "change files in the corpus's .isis folder, so stop isis first and start it again "
-                                   "afterwards. Name the same folders as for isis serve.")
+                                   "change the list in the corpus's .isis folder and never delete embeddings. Stop "
+                                   "isis first and start it again afterwards. Name the same folders as for isis serve.")
     actions = p.add_subparsers(dest="action", required=True)
     a = actions.add_parser("list", help="the corpus's models, with the active one marked")
     folders(a)
@@ -378,7 +358,7 @@ def main(argv: list[str] | None = None) -> None:
     a = actions.add_parser("use", help="make one of the corpus's models the active one")
     a.add_argument("repo", metavar="REPO", help="the model, as isis model list names it")
     folders(a)
-    a = actions.add_parser("remove", help="remove a model and delete its embeddings")
+    a = actions.add_parser("remove", help="take a model off the list, keeping its embeddings on disk")
     a.add_argument("repo", metavar="REPO", help="the model, as isis model list names it")
     folders(a)
     a.add_argument("--next", metavar="REPO",

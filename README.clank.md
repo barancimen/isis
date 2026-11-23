@@ -50,20 +50,20 @@ Point `isis serve` at any folder of `.md` files, or at several: `isis serve dir1
 
 A corpus has a list of embedding models, and one of them is the active model. `isis serve` and `isis index` load only the active model. They embed new and changed passages with it, and leave the embeddings of the other models on disk as they are. A corpus starts with two models, `MongoDB/mdbr-leaf-ir` with 23M parameters, which is active, and `TaylorAI/bge-micro-v2` with 17M.
 
-`isis model` changes the list. It only changes files, so stop isis before you run it and start isis again afterwards. A server left running keeps its model until it restarts, and can save a removed model's embeddings again. Name the same folders as for `isis serve`, with `--osiris` if you use it.
+`isis model` changes the list. It only changes files, so stop isis before you run it and start isis again afterwards. A server left running keeps its model until it restarts. Name the same folders as for `isis serve`, with `--osiris` if you use it.
 
 ```sh
 isis model list notes                                    # the models, the active one, and the size of their embeddings
 isis model add BAAI/bge-small-en-v1.5 notes              # add a model from Hugging Face and make it active
 isis model add BAAI/bge-small-en-v1.5 notes --inactive   # add it and leave the active model as it is
 isis model use TaylorAI/bge-micro-v2 notes               # make another model of the list active
-isis model remove TaylorAI/bge-micro-v2 notes            # remove a model and delete its embeddings
+isis model remove TaylorAI/bge-micro-v2 notes            # take a model off the list
 isis model remove BAAI/bge-small-en-v1.5 notes --next MongoDB/mdbr-leaf-ir   # the active model, naming the next one
 ```
 
 `add` takes the name of a Hugging Face repository, or the address of its page. The repository needs ONNX weights in `onnx/model.onnx` and a `tokenizer.json`. Before a model becomes active, `add`, `use` and `remove --next` load it and embed a sentence with it. That downloads its files the first time and refuses a model isis can't run, so a server kept off the network can start with it. The corpus is embedded with a newly active model when isis next starts, or by `isis index`. A model that was active before only embeds what changed since then.
 
-`remove` deletes the model's embeddings from every folder named. The model's downloaded files stay in the Hugging Face cache, where `hf cache rm model/REPO` deletes them. Removing the active model is refused unless `--next` names another model of the list. With no model left, isis searches by keywords only.
+`remove` takes the model off the list and deletes nothing. Its embeddings stay on disk, and are used again if the model is added back. To free the space, delete the model's files in `.isis/models/` of each folder yourself. Its downloaded files stay in the Hugging Face cache, where `hf cache rm model/REPO` deletes them. Removing the active model is refused unless `--next` names another model of the list. With no model left, isis searches by keywords only.
 
 The list is kept in `.isis/models.json` of the first folder named, and each model's vectors in `.isis/models/` of every folder, matched to passages by their text. Served without that folder, or with another one named first, the corpus has the list of the folder that is then first. Text a model wants in front of queries or passages comes from the `prompts` of its `config_sentence_transformers.json`, so mdbr-leaf-ir gets its query prefix without any setting. Task paragraphs in Related are embedded like passages.
 

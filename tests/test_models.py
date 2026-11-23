@@ -20,6 +20,7 @@ class FakeEmbedder(HashEmbedder):
     """Stands in for a model from Hugging Face: named as one, and noted when it is loaded."""
 
     loaded: list[str] = []
+    embedded: list[str] = []  # the passages any of them embedded
     refused: dict[str, Exception] = {}  # what loading these models raises
 
     def __init__(self, model_id: str):
@@ -34,6 +35,7 @@ class FakeEmbedder(HashEmbedder):
 
     def embed(self, texts, cache=False, query=False):
         self.seen.extend(texts)
+        FakeEmbedder.embedded.extend(t for t in texts if t != cli.TRIAL)
         return super().embed(texts, cache, query)
 
 
@@ -42,6 +44,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(semantic, "Embedder", FakeEmbedder)
     monkeypatch.setattr(semantic, "fetch_settings", lambda model_id: None)  # nothing to ask Hugging Face
     monkeypatch.setattr(FakeEmbedder, "loaded", [])
+    monkeypatch.setattr(FakeEmbedder, "embedded", [])
     monkeypatch.setattr(FakeEmbedder, "refused", {})
     return FakeEmbedder
 
@@ -58,7 +61,7 @@ def refused(*argv) -> str:
 
 def vector_files(corpus) -> dict[str, bytes]:
     """Each model's saved embeddings in a corpus folder, by model."""
-    return {name.partition(":")[0]: b"".join(p.read_bytes() for p in files if p.suffix == ".npy")
+    return {name.partition(":")[0]: b"".join(p.read_bytes() for p in files if p.suffix != ".json")
             for name, files in saved_vectors(corpus / ".isis").items()}
 
 
@@ -195,21 +198,31 @@ def test_only_the_active_model_is_loaded_and_the_others_keep_their_embeddings(co
     assert vector_files(corpus)[LEAF] == after[LEAF]
 
 
-def test_removing_a_model_deletes_its_embeddings_in_every_folder(tmp_path, fake, capsys):
+def test_removing_a_model_never_deletes_its_embeddings(tmp_path, fake, capsys):
     a, b = write_corpus(tmp_path / "a"), write_corpus(tmp_path / "b", {"x.md": "Finches differ in their beaks.\n"})
     run("index", a, b, "--model", LEAF, "--model", MICRO)
-    kept = vector_files(a), vector_files(b)
     old = b / ".isis" / "models" / "old.npz"  # as embeddings were saved before
     np.savez(old, name=f"{MICRO}:onnx/model.onnx:256", keys=np.zeros(0, np.uint64), vectors=np.zeros((0, 64), np.float16))
+    kept = vector_files(a), vector_files(b)
+    files = sorted(p.name for folder in (a, b) for p in (folder / ".isis" / "models").iterdir())
 
     run("model", "remove", MICRO, a, b)
-    assert vector_files(a) == {LEAF: kept[0][LEAF]} and vector_files(b) == {LEAF: kept[1][LEAF]}
-    assert sorted(p.suffix for p in (b / ".isis" / "models").iterdir()) == [".json", ".npy"]
     listed = ModelList.of(a)
     assert (listed.models, listed.active) == ([LEAF], LEAF)
     assert not (b / ".isis" / "models.json").exists()  # the list is the first folder's
-    assert f"Removed {MICRO} and deleted its" in capsys.readouterr().out
+    assert (vector_files(a), vector_files(b)) == kept  # in every folder, to the byte
+    assert sorted(p.name for folder in (a, b) for p in (folder / ".isis" / "models").iterdir()) == files
+    out = capsys.readouterr().out
+    assert f"Removed {MICRO}. isis keeps its" in out and "uses them again if the model is added back" in out
     assert "not one of this corpus's models" in refused("model", "remove", MICRO, a, b)
+    run("model", "list", a, b)
+    assert f"{MICRO} is not one of the models. isis keeps its" in capsys.readouterr().out
+
+    run("model", "add", MICRO, a, b)  # back again: nothing to embed
+    fake.embedded.clear()
+    run("index", a, b)
+    assert fake.loaded[-1] == MICRO and fake.embedded == []
+    assert (vector_files(a), vector_files(b)) == kept
 
 
 def test_removing_the_active_model_needs_the_next_one_named(corpus, fake, capsys):
@@ -219,33 +232,33 @@ def test_removing_the_active_model_needs_the_next_one_named(corpus, fake, capsys
     assert f"{LEAF} is the active model" in message and f"--next, which can be {MICRO}." in message
     assert "can't be the next active model" in refused("model", "remove", LEAF, corpus, "--next", SMALL)
     assert "can't be the next active model" in refused("model", "remove", LEAF, corpus, "--next", LEAF)
-    assert vector_files(corpus) == before and not (corpus / ".isis" / "models.json").exists()  # nothing was done
+    assert not (corpus / ".isis" / "models.json").exists()  # nothing was done
 
     fake.loaded.clear()
     run("model", "remove", LEAF, corpus, "--next", MICRO)
     listed = ModelList.of(corpus)
     assert (listed.models, listed.active) == ([MICRO], MICRO)
     assert fake.loaded == [MICRO]  # tried before it becomes the active one
-    assert vector_files(corpus) == {MICRO: before[MICRO]}
     assert f"{MICRO} is now the active model" in capsys.readouterr().out
 
     run("model", "remove", MICRO, corpus)  # the last one: nothing to name
     assert json.loads((corpus / ".isis" / "models.json").read_text()) == {"models": [], "active": None}
-    assert cli.models(SimpleNamespace(model=None), [corpus]) == [] and vector_files(corpus) == {}
+    assert cli.models(SimpleNamespace(model=None), [corpus]) == []
     assert "keywords only" in capsys.readouterr().out
+    assert vector_files(corpus) == before  # none of this deleted anything
     run("model", "add", SMALL, corpus, "--inactive")  # the only model is the active one
     assert ModelList.of(corpus).active == SMALL
 
 
-def test_embeddings_of_a_model_that_is_not_listed_can_be_removed(corpus, fake, capsys):
+def test_embeddings_of_a_model_that_is_not_listed_are_kept_too(corpus, fake, capsys):
     run("index", corpus, "--model", SMALL)  # for one run, without adding it
+    before = vector_files(corpus)
     run("model", "list", corpus)
     out = capsys.readouterr().out
     assert f"{LEAF}" in out and "active" in out and "no embeddings yet" in out
-    assert f"{SMALL} is not one of the models" in out
-    run("model", "remove", SMALL, corpus)
-    assert vector_files(corpus) == {} and not (corpus / ".isis" / "models.json").exists()
-    assert "was not one of the models" in capsys.readouterr().out
+    assert f"{SMALL} is not one of the models. isis keeps its" in out
+    assert "not one of this corpus's models" in refused("model", "remove", SMALL, corpus)
+    assert vector_files(corpus) == before and not (corpus / ".isis" / "models.json").exists()
 
 
 def test_choosing_the_active_model(corpus, fake, capsys):
