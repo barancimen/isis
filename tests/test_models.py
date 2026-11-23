@@ -309,3 +309,16 @@ def test_a_list_of_models_that_cannot_be_read_stops_isis(corpus, fake):
     assert ModelList.of(corpus).active == "a/b"
     saved.write_text('{"models": ["a/b", "c/d"], "active": "C/D"}')
     assert ModelList.of(corpus).active == "c/d"
+
+
+def test_a_model_added_back_in_another_case_finds_its_embeddings(corpus, fake):
+    run("index", corpus, "--model", LEAF, "--model", MICRO)
+    kept = vector_files(corpus)
+    run("model", "remove", MICRO, corpus)
+    (corpus / "new.md").write_text("Ambergris washed up on the beach.\n")  # changed while the model was away
+    run("model", "add", MICRO.lower(), corpus)
+    assert ModelList.of(corpus).active == MICRO  # spelt as its embeddings are
+    fake.embedded.clear()
+    run("index", corpus)
+    assert fake.embedded == ["Ambergris washed up on the beach."]  # only the new passage
+    assert set(vector_files(corpus)) == set(kept)  # and no second set of embeddings

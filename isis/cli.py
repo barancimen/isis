@@ -140,7 +140,7 @@ def cmd_model(args) -> None:
         if args.action == "list":
             list_models(listed, folders)
         elif args.action == "add":
-            add_model(listed, repo_id(args.repo), active=not args.inactive)
+            add_model(listed, folders, repo_id(args.repo), active=not args.inactive)
         elif args.action == "use":
             use_model(listed, repo_id(args.repo))
         else:
@@ -174,9 +174,19 @@ def list_models(listed, folders: list[Path]) -> None:
               "if the model is added.")
 
 
-def add_model(listed, repo: str, active: bool) -> None:
+def kept_spelling(folders: list[Path], repo: str) -> str | None:
+    """A model's name as the embeddings kept for it spell it, if there are any. A model that was
+    removed and is added back in another case then finds them, and its downloaded files."""
+    from .engine.index import saved_vectors
+    from .engine.models import made_by
+
+    return next((name[:len(repo)] for folder in folders for name in saved_vectors(folder / ".isis")
+                 if made_by(name, repo)), None)
+
+
+def add_model(listed, folders: list[Path], repo: str, active: bool) -> None:
     known, before = listed.find(repo), listed.active
-    name = known or repo
+    name = known or kept_spelling(folders, repo) or repo
     check_model(name)
     listed.add(name, active)
     listed.save()
