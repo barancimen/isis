@@ -43,6 +43,35 @@ export function envelopeAt(lines, i) {
   return null;
 }
 
+const WEB_ADDRESS = /\bhttps?:\/\/[^\s"'<>`]+/gi;
+const CLOSERS = { ")": "(", "]": "[", "}": "{" };
+
+// The web addresses in a line, where each starts and ends. A full stop or comma after one, or a
+// bracket it doesn't open, belongs to the text around it.
+export function webAddresses(line) {
+  const found = [];
+  for (const m of line.matchAll(WEB_ADDRESS)) {
+    let url = m[0];
+    for (;;) {
+      const last = url.at(-1);
+      const opener = CLOSERS[last];
+      const unopened = opener && url.split(opener).length < url.split(last).length;
+      if (!".,;:!?".includes(last) && !unopened) break;
+      url = url.slice(0, -1);
+    }
+    if (hasHost(url)) found.push({ from: m.index, to: m.index + url.length, url });
+  }
+  return found;
+}
+
+function hasHost(url) {
+  try {
+    return Boolean(new URL(url).host);
+  } catch {
+    return false;
+  }
+}
+
 // The enveloped blocks of a document, and the other lines that are horizontal rules.
 // The lines that aren't running text: fenced or indented code, headings and table rows. `inList` says
 // which lines belong to a list, where an indent is only the level of the item.

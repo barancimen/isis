@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure, webAddresses } from "./reflow.js";
 
 test("hard-wrapped paragraphs flow", () => {
   const lines = ["What the white whale was to Ahab, has been", "hinted; what, at times, he", "was to me.", "", "Next paragraph."];
@@ -154,4 +154,17 @@ test("a line that starts with inline code opens no fence, and a longer fence hol
 test("code, headings and table rows are not prose", () => {
   const lines = ["# Title", "Some text", "```", "code", "```", "    indented", "| a | b |", "- item", "    more of the item", "End"];
   assert.deepEqual(linesNotProse(lines, new Set([7, 8])), [0, 2, 3, 4, 5, 6]);
+});
+
+test("web addresses in a line, without the text around them", () => {
+  const urls = (line) => webAddresses(line).map(({ url }) => url);
+  assert.deepEqual(webAddresses('canonical: "https://center.study/post/originary-technics"'),
+    [{ from: 12, to: 56, url: "https://center.study/post/originary-technics" }]);
+  assert.deepEqual(urls("url: https://example.org/a?b=1#c"), ["https://example.org/a?b=1#c"]);
+  assert.deepEqual(urls("see: https://a.example/x, and http://b.example/y."), ["https://a.example/x", "http://b.example/y"]);
+  assert.deepEqual(urls("wiki: (https://en.wikipedia.org/wiki/Foo_(bar))"), ["https://en.wikipedia.org/wiki/Foo_(bar)"]);
+  assert.deepEqual(urls("link: <https://example.org/>"), ["https://example.org/"]);
+  assert.deepEqual(urls('original: "/pdfs/originary-technics.pdf"'), []);
+  assert.deepEqual(urls("go: javascript:alert(1)"), []);
+  assert.deepEqual(urls("empty: https:// and ftp://example.org"), []);
 });

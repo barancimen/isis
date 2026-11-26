@@ -8,7 +8,7 @@ import {
 import { ancestors, fileTree, visibleRows } from "./filetree.js";
 import { cleanHistory, forget, remember } from "./history.js";
 import { planInsertion } from "./insert.js";
-import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure } from "./reflow.js";
+import { enterInList, envelopeAt, linesNotProse, listStructure, paragraphAt, softBreaks, structure, webAddresses } from "./reflow.js";
 
 // ---------- helpers ----------
 
@@ -196,6 +196,7 @@ const theme = EditorView.theme({
   ".cm-line.cm-env ::selection, .cm-line.cm-env::selection": { backgroundColor: "var(--selection) !important" },
   ".cm-env-meta": { fontSize: "0.8em", lineHeight: "var(--line)", color: "var(--muted)" },
   ".cm-env-key": { fontWeight: "600" },
+  ".cm-env-url, .cm-env-url span": { color: "var(--accent)", textDecoration: "underline", textUnderlineOffset: "2px" },
   ".cm-env-edge": { fontSize: "6px", lineHeight: "12px", userSelect: "none" },
   ".cm-env-edge, .cm-env-edge span, .cm-rule, .cm-rule span": { color: "transparent !important" },
   ".cm-rule": {
@@ -461,7 +462,34 @@ function typedBreaksAfter(breaks, tr) {
 
 const notProse = Decoration.line({ class: "cm-not-prose" });
 
+// A web address in a YAML card opens in a new tab, with a click in the reader and with Ctrl/⌘+click
+// in a task, where a click puts the cursor there. A click that ends a selection only selects.
+function webLinks(editable) {
+  const at = (event) => (event.target instanceof Element ? event.target.closest(".cm-env-url") : null);
+  const open = (a) => window.open(a.href, "_blank", "noopener,noreferrer");
+  return [
+    EditorView.domEventHandlers({
+      mousedown(event) {
+        const a = editable && event.button === 0 && (event.ctrlKey || event.metaKey) && at(event);
+        if (!a) return false;
+        event.preventDefault(); // before CodeMirror adds a cursor there
+        open(a);
+        return true;
+      },
+      click(event, view) {
+        const a = at(event);
+        if (!a) return false;
+        event.preventDefault(); // the browser doesn't follow it as well
+        if (!editable && event.button === 0 && view.state.selection.main.empty) open(a);
+        return true;
+      },
+    }),
+    editable ? [] : EditorView.theme({ ".cm-env-url": { cursor: "pointer" } }),
+  ];
+}
+
 function reflow({ editable }) {
+  const link = (href) => ({ href, rel: "noopener noreferrer", ...(editable ? { title: "Ctrl/⌘+click to open" } : {}) });
   const build = (state, focused, typedBreaks) => {
     const lines = state.doc.toJSON();
     const cursorLine = editable && focused ? state.doc.lineAt(state.selection.main.head).number - 1 : -1;
@@ -502,8 +530,12 @@ function reflow({ editable }) {
         const line = state.doc.line(i + 1);
         const edge = (i === open || i === close) && !editing(i);
         decos.push(Decoration.line({ class: `cm-env${meta ? " cm-env-meta" : ""}${edge ? " cm-env-edge" : ""}` }).range(line.from));
-        const key = meta && i !== open && i !== close && /^\s*[\w.-]+:/.exec(line.text);
+        if (!meta || i === open || i === close) continue;
+        const key = /^\s*[\w.-]+:/.exec(line.text);
         if (key) decos.push(Decoration.mark({ class: "cm-env-key" }).range(line.from, line.from + key[0].length));
+        for (const { from, to, url } of webAddresses(line.text)) {
+          decos.push(Decoration.mark({ tagName: "a", class: "cm-env-url", attributes: link(url) }).range(line.from + from, line.from + to));
+        }
       }
     }
     for (const i of rules) {
@@ -523,7 +555,7 @@ function reflow({ editable }) {
     },
     provide: (f) => EditorView.decorations.from(f, (value) => value.decos),
   });
-  return editable ? [field, EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing))] : field;
+  return [field, webLinks(editable), editable ? EditorView.focusChangeEffect.of((_, focusing) => setFocused.of(focusing)) : []];
 }
 
 // ---------- find in a pane ----------
