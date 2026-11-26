@@ -464,13 +464,15 @@ const notProse = Decoration.line({ class: "cm-not-prose" });
 
 // A web address in a YAML card opens in a new tab, with a click in the reader and with Ctrl/⌘+click
 // in a task, where a click puts the cursor there. A click that ends a selection only selects.
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+
 function webLinks(editable) {
   const at = (event) => (event.target instanceof Element ? event.target.closest(".cm-env-url") : null);
   const open = (a) => window.open(a.href, "_blank", "noopener,noreferrer");
   return [
     EditorView.domEventHandlers({
       mousedown(event) {
-        const a = editable && event.button === 0 && (event.ctrlKey || event.metaKey) && at(event);
+        const a = editable && event.button === 0 && (MAC ? event.metaKey : event.ctrlKey) && at(event); // Ctrl+click is a right click on a Mac
         if (!a) return false;
         event.preventDefault(); // before CodeMirror adds a cursor there
         open(a);
@@ -489,7 +491,7 @@ function webLinks(editable) {
 }
 
 function reflow({ editable }) {
-  const link = (href) => ({ href, rel: "noopener noreferrer", ...(editable ? { title: "Ctrl/⌘+click to open" } : {}) });
+  const link = (href) => ({ href, rel: "noopener noreferrer", ...(editable ? { title: `${MAC ? "⌘" : "Ctrl"}+click to open` } : {}) });
   const build = (state, focused, typedBreaks) => {
     const lines = state.doc.toJSON();
     const cursorLine = editable && focused ? state.doc.lineAt(state.selection.main.head).number - 1 : -1;
