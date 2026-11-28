@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from isis import cli, client
 from isis.engine.index import Engine
 from isis.engine.related import RelatedConfig
-from isis.engine.osiris import archive_folders, kind_of, lane_of_source
+from isis.engine.osiris import archive_folders, describe, kind_of, lane_of_source
 from isis.engine.semantic import HashEmbedder
 from isis.server.app import create_app
 from isis.server.tasks import TaskStore
@@ -78,6 +78,11 @@ def test_kinds():
     assert kind_of("newlane", "x") == "newlane"
     assert lane_of_source("tweet:twitterapi") == "twitter" and lane_of_source("html") == "generic"
     assert lane_of_source("file:epub") == "localfile" and lane_of_source("html_file") == "singlefile"
+    # osiris saves chats with assistants and sessions with coding agents in one lane, told apart by source
+    assert [kind_of("chat", s) for s in ("chat:claude", "chat:claude:extension", "chat:chatgpt", "chat:deepseek")] == ["chat:chatbot"] * 4
+    assert [kind_of("chat", s) for s in ("chat:claude-code", "chat:claude-code:history", "chat:omp", "chat:pi")] == ["chat:session"] * 4
+    assert lane_of_source("chat:pi") == "chat" and lane_of_source("chat:claude") == "chat"
+    assert describe("chat:session") == ("chat", "AI chats", "Coding agent sessions")
 
 
 def test_archive_folders(tmp_path):

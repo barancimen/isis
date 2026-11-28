@@ -38,6 +38,7 @@ LANES = {
     "arxiv": "arXiv",
     "twitter": "X (Twitter)",
     "singlefile": "Saved pages",
+    "chat": "AI chats",
 }
 
 # The kinds of each lane that has more than one: (kind, name, the sources that are of it). A source
@@ -76,6 +77,12 @@ KINDS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("singlefile", "SingleFile pages", ("singlefile",)),
         ("html", "Other saved pages", ("html_file",)),
     ],
+    # Exports from the chat sites and the extension, and the logs of coding agents (Claude Code's prompt
+    # history among them), which osiris saves in one lane.
+    "chat": [
+        ("chatbot", "Chatbot conversations", ("chat:claude", "chat:chatgpt", "chat:deepseek")),
+        ("session", "Coding agent sessions", ("chat:claude-code", "chat:omp", "chat:pi")),
+    ],
 }
 
 # The lane of a document the manifest doesn't name, from its source alone. A lane's own fetch has a
@@ -85,7 +92,7 @@ SOURCE_LANES = (
     ("youtube", "youtube"), ("hackernews", "hackernews"), ("lesswrong", "lesswrong"), ("reddit", "reddit"),
     ("stackexchange", "stackexchange"), ("tweet", "twitter"), ("github", "github"), ("arxiv_abstract", "arxiv"),
     ("pdf:arxiv", "arxiv"), ("html:arxiv", "arxiv"), ("fulltext:scry", "arxiv"), ("file", "localfile"),
-    ("singlefile", "singlefile"), ("html_file", "singlefile"),
+    ("singlefile", "singlefile"), ("html_file", "singlefile"), ("chat", "chat"),
 )
 
 
